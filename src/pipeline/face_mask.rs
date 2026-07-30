@@ -1,0 +1,341 @@
+//! Face masks: Occluder, border mask, gaussian blur, soft paste-back.
+//!
+//! Port of crosswap/app/processors/face_masks.py + frame_worker.py mask logic.
+//!
+//! Mask convention: 1.0 = keep swapped face, 0.0 = keep original background.
+
+use crate::gpu::ops::GpuOps;
+use crate::models::manager::ModelManager;
+use crate::pipeline::workspace::{GpuWorkspace, MAX_BLUR_KS};
+
+/// Occluder mask inference.
+///
+/// Input: face [3, 256, 256] in [0, 255].
+/// ONNX: input="img" [1,3,256,256] normalized /255, output="output" [1,1,256,256].
+/// Output: binary mask [256, 256] where 1.0 = face, 0.0 = occluded.
+pub fn apply_occluder(
+    manager: &mut ModelManager,
+    face_chw_256: &[f32], // [3, 256, 256] in [0, 255]
+) -> anyhow::Result<Vec<f32>> {
+    let session = manager
+        .get_mut("Occluder")
+        .ok_or_else(|| anyhow::anyhow!("Occluder not loaded"))?;
+
+    // Normalize: / 255.0
+    let normalized: Vec<f32> = face_chw_256.iter().map(|&v| v / 255.0).collect();
+
+    let input_tensor = ort::value::Tensor::from_array(([1usize, 3, 256, 256], normalized))?;
+
+    let outputs = session.run(ort::inputs!["img" => input_tensor])?;
+    let (_shape, data) = outputs["output"].try_extract_tensor::<f32>()?;
+
+    // Threshold at 0 → binary, then float
+    let mask: Vec<f32> = data
+        .iter()
+        .map(|&v| if v > 0.0 { 1.0 } else { 0.0 })
+        .collect();
+    Ok(mask) // [256*256]
+}
+
+/// Generate border mask [size, size] with zeroed borders.
+///
+/// `top/bottom/left/right` are the number of pixels to zero from each edge (0-based).
+/// Result: 1.0 inside the border, 0.0 outside.
+pub fn generate_border_mask(size: u32, top: u32, bottom: u32, left: u32, right: u32) -> Vec<f32> {
+    let s = size as usize;
+    let mut mask = vec![1.0f32; s * s];
+
+    let bottom_start = size - bottom;
+    let right_start = size - right;
+
+    for y in 0..size {
+        for x in 0..size {
+            if y < top || y >= bottom_start || x < left || x >= right_start {
+                mask[(y * size + x) as usize] = 0.0;
+            }
+        }
+    }
+    mask
+}
+
+/// Generate a soft oval mask for face boundary.
+///
+/// Returns [size, size] mask with 1.0 inside oval, smooth falloff at edges.
+pub fn soft_oval_mask(
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
+    feather: f32,
+) -> Vec<f32> {
+    let mut mask = vec![0.0f32; (height * width) as usize];
+    let scale = radius_x / feather.max(1.0);
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = (x as f32 - center_x) / radius_x;
+            let dy = (y as f32 - center_y) / radius_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let v = ((1.0 - dist) * scale).clamp(0.0, 1.0);
+            mask[(y * width + x) as usize] = v;
+        }
+    }
+    mask
+}
+
+/// Apply Gaussian blur to a single-channel [H, W] mask (CPU).
+///
+/// Separable 2-pass (horizontal + vertical) Gaussian filter.
+pub fn gaussian_blur(mask: &mut [f32], width: u32, height: u32, kernel_size: u32, sigma: f32) {
+    if kernel_size <= 1 {
+        return;
+    }
+
+    let ks = kernel_size as i32;
+    let half = ks / 2;
+
+    // Build 1D Gaussian kernel
+    let mut kernel = vec![0.0f32; ks as usize];
+    let mut sum = 0.0f32;
+    for i in 0..ks {
+        let x = (i - half) as f32;
+        let v = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel[i as usize] = v;
+        sum += v;
+    }
+    for k in kernel.iter_mut() {
+        *k /= sum;
+    }
+
+    let w = width as usize;
+    let h = height as usize;
+
+    // Horizontal pass
+    let mut tmp = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut val = 0.0f32;
+            for (k, weight) in kernel.iter().enumerate() {
+                let sx = (x as i32 + k as i32 - half).clamp(0, width as i32 - 1) as usize;
+                val += mask[y * w + sx] * weight;
+            }
+            tmp[y * w + x] = val;
+        }
+    }
+
+    // Vertical pass
+    for y in 0..h {
+        for x in 0..w {
+            let mut val = 0.0f32;
+            for (k, weight) in kernel.iter().enumerate() {
+                let sy = (y as i32 + k as i32 - half).clamp(0, height as i32 - 1) as usize;
+                val += tmp[sy * w + x] * weight;
+            }
+            mask[y * w + x] = val;
+        }
+    }
+}
+
+/// Resize a single-channel mask [src_h, src_w] → [dst_h, dst_w] via bilinear.
+pub fn resize_mask(src: &[f32], src_h: u32, src_w: u32, dst_h: u32, dst_w: u32) -> Vec<f32> {
+    let mut dst = vec![0.0f32; (dst_h * dst_w) as usize];
+    let sy = src_h as f32 / dst_h as f32;
+    let sx = src_w as f32 / dst_w as f32;
+
+    for dy in 0..dst_h {
+        for dx in 0..dst_w {
+            let fy = dy as f32 * sy;
+            let fx = dx as f32 * sx;
+            let y0 = (fy as u32).min(src_h - 1);
+            let y1 = (y0 + 1).min(src_h - 1);
+            let x0 = (fx as u32).min(src_w - 1);
+            let x1 = (x0 + 1).min(src_w - 1);
+            let wy = fy - y0 as f32;
+            let wx = fx - x0 as f32;
+
+            let v = src[(y0 * src_w + x0) as usize] * (1.0 - wx) * (1.0 - wy)
+                + src[(y0 * src_w + x1) as usize] * wx * (1.0 - wy)
+                + src[(y1 * src_w + x0) as usize] * (1.0 - wx) * wy
+                + src[(y1 * src_w + x1) as usize] * wx * wy;
+            dst[(dy * dst_w + dx) as usize] = v;
+        }
+    }
+    dst
+}
+
+/// Compose final mask from border mask and optional occluder.
+///
+/// Both masks should be same size. Result = elementwise multiply.
+pub fn compose_masks(border: &[f32], occluder: Option<&[f32]>) -> Vec<f32> {
+    match occluder {
+        Some(occ) => border
+            .iter()
+            .zip(occ.iter())
+            .map(|(&b, &o)| b * o)
+            .collect(),
+        None => border.to_vec(),
+    }
+}
+
+/// GPU-native mask generation: border + optional restorer oval + gaussian blur.
+///
+/// Writes the blurred mask into `ws.mask_128`, then resizes to `ws.mask_512`.
+/// The blur kernel is cached in the workspace and regenerated only when
+/// kernel_size/sigma change.
+pub fn gpu_generate_mask_512(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    border_top: u32,
+    border_bottom: u32,
+    border_left: u32,
+    border_right: u32,
+    blur_ks: u32,
+    blur_sigma: f32,
+    use_restorer_oval: bool,
+) -> anyhow::Result<()> {
+    // Crosswap only applies the oval fallback when restoration is active and
+    // no explicit parser/XSeg mask is available.
+    gpu.border_oval_mask(
+        &mut ws.mask_128,
+        128,
+        border_top,
+        border_bottom,
+        border_left,
+        border_right,
+        use_restorer_oval,
+    )?;
+
+    // 2. Optional gaussian blur → mask_128 (uses mask_128_tmp scratch)
+    if blur_ks > 1 {
+        let ks = blur_ks.min(MAX_BLUR_KS as u32);
+        // Regenerate blur kernel if params changed
+        if ks != ws.blur_ks_current || (blur_sigma - ws.blur_sigma_current).abs() > 1e-6 {
+            let half = (ks as i32) / 2;
+            let mut weights = vec![0.0f32; ks as usize];
+            let mut sum = 0.0f32;
+            for i in 0..ks as i32 {
+                let x = (i - half) as f32;
+                let v = (-x * x / (2.0 * blur_sigma * blur_sigma)).exp();
+                weights[i as usize] = v;
+                sum += v;
+            }
+            for w in weights.iter_mut() {
+                *w /= sum;
+            }
+            gpu.upload_into(&weights, &mut ws.blur_kernel)?;
+            ws.blur_ks_current = ks;
+            ws.blur_sigma_current = blur_sigma;
+        }
+        gpu.gaussian_blur_mask(
+            &mut ws.mask_128,
+            &mut ws.mask_128_tmp,
+            128,
+            128,
+            &ws.blur_kernel,
+            ks,
+        )?;
+    }
+
+    // 3. Resize 128 → 512 into mask_512
+    gpu.mask_resize(&ws.mask_128, &mut ws.mask_512, 128, 128, 512, 512)?;
+    Ok(())
+}
+
+/// Paste swapped face back into frame using mask.
+///
+/// `frame_chw` — full frame [3, H, W] in [0, 255], MODIFIED in place.
+/// `swap_chw` — swapped face [3, face_size, face_size] in [0, 255].
+/// `mask` — face mask [face_size, face_size] where 1.0 = swap, 0.0 = keep original.
+/// `affine` — 2×3 affine matrix (face coords → frame coords).
+pub fn paste_back(
+    frame_chw: &mut [f32],
+    frame_h: u32,
+    frame_w: u32,
+    swap_chw: &[f32],
+    mask: &[f32],
+    face_size: u32,
+    affine: &[[f64; 3]; 2],
+) {
+    // affine maps frame_kps → face_template (src→dst).
+    // To paste back: iterate frame pixels, use FORWARD affine to find face pixel.
+    // affine(frame_pixel) → face_pixel (sample from swap).
+    let a = affine;
+    let fs = face_size as f32;
+
+    // Compute bounding box of the face in frame space using inverse transform
+    let inv = crate::math::affine::invert_2x3(affine);
+    let corners = [
+        (0.0, 0.0),
+        (fs as f64, 0.0),
+        (0.0, fs as f64),
+        (fs as f64, fs as f64),
+    ];
+    let mut min_x = f64::MAX;
+    let mut min_y = f64::MAX;
+    let mut max_x = f64::MIN;
+    let mut max_y = f64::MIN;
+    for (cx, cy) in corners {
+        let fx = inv[0][0] * cx + inv[0][1] * cy + inv[0][2];
+        let fy = inv[1][0] * cx + inv[1][1] * cy + inv[1][2];
+        min_x = min_x.min(fx);
+        min_y = min_y.min(fy);
+        max_x = max_x.max(fx);
+        max_y = max_y.max(fy);
+    }
+
+    let left = (min_x.floor() as i32).max(0) as u32;
+    let top = (min_y.floor() as i32).max(0) as u32;
+    let right = (max_x.ceil() as i32).min(frame_w as i32) as u32;
+    let bottom = (max_y.ceil() as i32).min(frame_h as i32) as u32;
+
+    // Inverse mapping: for each frame pixel in bbox, find face pixel via forward affine
+    for fy in top..bottom {
+        for fx in left..right {
+            // Forward affine: frame → face
+            let sx = (a[0][0] * fx as f64 + a[0][1] * fy as f64 + a[0][2]) as f32;
+            let sy = (a[1][0] * fx as f64 + a[1][1] * fy as f64 + a[1][2]) as f32;
+
+            // Check bounds in face space
+            if sx < 0.0 || sy < 0.0 || sx >= fs - 1.0 || sy >= fs - 1.0 {
+                continue;
+            }
+
+            // Bilinear sample from swap face and mask
+            let x0 = sx as u32;
+            let y0 = sy as u32;
+            let x1 = x0 + 1;
+            let y1 = y0 + 1;
+            let wx = sx - x0 as f32;
+            let wy = sy - y0 as f32;
+
+            let face_idx = |yy: u32, xx: u32| (yy * face_size + xx) as usize;
+
+            // Sample mask
+            let m = mask[face_idx(y0, x0)] * (1.0 - wx) * (1.0 - wy)
+                + mask[face_idx(y0, x1)] * wx * (1.0 - wy)
+                + mask[face_idx(y1, x0)] * (1.0 - wx) * wy
+                + mask[face_idx(y1, x1)] * wx * wy;
+
+            if m < 0.001 {
+                continue;
+            }
+
+            for c in 0..3u32 {
+                let cidx =
+                    |yy: u32, xx: u32| (c * face_size * face_size + yy * face_size + xx) as usize;
+
+                // Bilinear sample from swap
+                let sv = swap_chw[cidx(y0, x0)] * (1.0 - wx) * (1.0 - wy)
+                    + swap_chw[cidx(y0, x1)] * wx * (1.0 - wy)
+                    + swap_chw[cidx(y1, x0)] * (1.0 - wx) * wy
+                    + swap_chw[cidx(y1, x1)] * wx * wy;
+
+                let frame_idx = (c * frame_h * frame_w + fy * frame_w + fx) as usize;
+                let orig = frame_chw[frame_idx];
+                frame_chw[frame_idx] = sv * m + orig * (1.0 - m);
+            }
+        }
+    }
+}

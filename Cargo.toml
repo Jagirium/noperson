@@ -1,0 +1,79 @@
+[package]
+name = "noperson"
+version = "0.1.0"
+edition = "2024"
+description = "Open-source GPU-accelerated face swap — pure Rust, ort + CUDA"
+license = "AGPL-3.0"
+
+[lib]
+name = "noperson"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "noperson"
+path = "src/main.rs"
+
+[dependencies]
+# ── ML inference — ONNX Runtime with CUDA EP ────────────────────────
+# Cross-platform: Linux/macOS/Windows. CUDA EP for NVIDIA GPUs.
+# download-binaries: auto-downloads libonnxruntime, copy-dylibs: puts .so next to binary.
+ort = { version = "2.0.0-rc.13", features = ["cuda", "tensorrt", "download-binaries", "copy-dylibs"] }
+ort-sys = "2.0.0-rc.13"
+
+# ── GPU compute — cudarc (CUDA driver API, PTX kernels) ─────────────
+# Used for image ops: warp, resize, normalize, mask, blur, paste-back.
+cudarc = { version = "0.19.4", features = ["cuda-12080"] }
+
+# ── Image I/O ───────────────────────────────────────────────────────
+image = { version = "0.25", features = ["jpeg", "png", "bmp", "webp"] }
+
+# ── GUI — pure Rust immediate mode ──────────────────────────────────
+eframe = "0.35.0"
+egui = "0.35.0"
+egui_extras = { version = "0.35.0", features = ["image"] }
+
+# ── Native file dialog ──────────────────────────────────────────────
+rfd = "0.17.2"
+
+# ── Serialization ───────────────────────────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── Error handling ─────────────────────────────────────────────────
+anyhow = "1"
+thiserror = "2"
+
+# ── Logging ────────────────────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Math (affine estimation on CPU — 5 points, too small for GPU) ──
+nalgebra = "0.34"
+
+# ── Byte casting ───────────────────────────────────────────────────
+bytemuck = { version = "1", features = ["derive"] }
+
+# ── Hashing (model integrity verification) ──────────────────────────
+sha2 = "0.10"
+
+# ── Platform I/O ────────────────────────────────────────────────────
+[target.'cfg(target_os = "linux")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"] }
+virtualcam = { version = "1.0.0", default-features = false, features = ["v4l2"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
+virtualcam = { version = "1.0.0", default-features = false, features = ["media-foundation", "obs", "gpu"] }
+
+[features]
+default = []
+
+[dev-dependencies]
+egui_kittest = { version = "0.35.0", features = ["snapshot", "wgpu"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
