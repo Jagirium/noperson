@@ -152,6 +152,18 @@ impl<E: Send + 'static> ShadowBuildQueue<E> {
         ready
     }
 
+    /// Cancel any shadow work when the desired state returns to the active spec.
+    pub fn cancel_pending(&self) {
+        let mut state = self.lock_state();
+        if let Some(building) = &state.building {
+            building.cancellation.cancel();
+        }
+        state.desired = None;
+        state.ready = None;
+        state.last_failure = None;
+        self.shared.changed.notify_all();
+    }
+
     pub fn snapshot(&self) -> BuildSnapshot {
         snapshot_from(&self.lock_state())
     }

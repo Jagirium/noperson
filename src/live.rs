@@ -1,5 +1,9 @@
 //! Shared Rust-native engine used by both photo and webcam live paths.
 
+mod atomic;
+
+pub use atomic::{AtomicLiveEngine, LiveShadowBuilder};
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
@@ -13,7 +17,7 @@ use thiserror::Error;
 
 use crate::config::parameters::{FaceSwapParams, RestorerSize};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
-use crate::engine::{EngineSpec, ModelArtifact, ModelRole};
+use crate::engine::{BuildCancellation, EngineSpec, ModelArtifact, ModelRole};
 use crate::gpu::ops::GpuOps;
 use crate::models::live_catalog::{CANONICAL_SWAPPER_FILENAME, validate_model_file};
 use crate::models::manager::ModelManager;
@@ -194,6 +198,14 @@ fn restorer_session_name(params: &FaceSwapParams) -> anyhow::Result<Option<&'sta
     }
 }
 
+fn ensure_build_active(cancellation: Option<&BuildCancellation>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !cancellation.is_some_and(BuildCancellation::is_cancelled),
+        "shadow build cancelled"
+    );
+    Ok(())
+}
+
 impl LiveEngine {
     pub fn new(
         gpu: Arc<GpuOps>,
@@ -250,7 +262,7 @@ impl LiveEngine {
             detector_model,
             device_id,
         )?;
-        Self::new_from_spec_inner(gpu, models_dir, identity_path, &spec, stream, false)
+        Self::new_from_spec_inner(gpu, models_dir, identity_path, &spec, stream, false, None)
     }
 
     /// Build a fully content-verified generation before it becomes eligible for activation.
@@ -261,7 +273,26 @@ impl LiveEngine {
         spec: &EngineSpec,
         stream: &Arc<CudaStream>,
     ) -> anyhow::Result<Self> {
-        Self::new_from_spec_inner(gpu, models_dir, identity_path, spec, stream, true)
+        Self::new_from_spec_inner(gpu, models_dir, identity_path, spec, stream, true, None)
+    }
+
+    fn new_from_spec_cancellable(
+        gpu: Arc<GpuOps>,
+        models_dir: &Path,
+        identity_path: &Path,
+        spec: &EngineSpec,
+        stream: &Arc<CudaStream>,
+        cancellation: &BuildCancellation,
+    ) -> anyhow::Result<Self> {
+        Self::new_from_spec_inner(
+            gpu,
+            models_dir,
+            identity_path,
+            spec,
+            stream,
+            true,
+            Some(cancellation),
+        )
     }
 
     fn new_from_spec_inner(
@@ -271,12 +302,16 @@ impl LiveEngine {
         spec: &EngineSpec,
         stream: &Arc<CudaStream>,
         verify_files: bool,
+        cancellation: Option<&BuildCancellation>,
     ) -> anyhow::Result<Self> {
+        ensure_build_active(cancellation)?;
         spec.validate()?;
         if verify_files {
             validate_model_file(identity_path, &spec.identity_sha256)?;
+            ensure_build_active(cancellation)?;
             for artifact in spec.models.values() {
                 validate_model_file(&models_dir.join(&artifact.filename), &artifact.sha256)?;
+                ensure_build_active(cancellation)?;
             }
         }
 
@@ -288,15 +323,19 @@ impl LiveEngine {
             DetectorModel::RetinaFace => manager.load("RetinaFace", &detector_artifact.filename)?,
             DetectorModel::Scrfd2_5g => manager.load("SCRFD2.5g", &detector_artifact.filename)?,
         }
+        ensure_build_active(cancellation)?;
         manager.load(
             "Inswapper128ArcFace",
             &required_artifact(spec, ModelRole::Recognizer)?.filename,
         )?;
+        ensure_build_active(cancellation)?;
         manager.load(
             "Inswapper128",
             &required_artifact(spec, ModelRole::Swapper)?.filename,
         )?;
+        ensure_build_active(cancellation)?;
         manager.load_emap_file(&required_artifact(spec, ModelRole::Emap)?.filename)?;
+        ensure_build_active(cancellation)?;
 
         for (role, session_name) in [
             (ModelRole::Restorer, restorer_session_name(&spec.params)?),
@@ -306,11 +345,13 @@ impl LiveEngine {
         ] {
             if let (Some(artifact), Some(session_name)) = (spec.models.get(&role), session_name) {
                 manager.load(session_name, &artifact.filename)?;
+                ensure_build_active(cancellation)?;
             }
         }
 
         let detector = FaceDetector::from_model(spec.detector, 0.5);
         let mut workspace = GpuWorkspace::new(stream)?;
+        ensure_build_active(cancellation)?;
         let identity = image::open(identity_path)?;
         let (width, height) = identity.dimensions();
         let rgb = identity.to_rgb8();
@@ -319,6 +360,7 @@ impl LiveEngine {
         gpu.hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
         let (faces, _) =
             detector.detect_gpu(&mut manager, &gpu, &chw, &mut workspace, height, width)?;
+        ensure_build_active(cancellation)?;
         let face = faces
             .first()
             .ok_or_else(|| anyhow::anyhow!("No face in identity image"))?;
@@ -336,6 +378,7 @@ impl LiveEngine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
         let latent = FaceRecognizer::calc_latent(&embedding, emap);
+        ensure_build_active(cancellation)?;
         let source_faces = vec![SourceFace {
             embedding,
             latent,

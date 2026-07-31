@@ -162,3 +162,29 @@ fn build_failure_never_changes_the_active_generation() {
     assert!(queue.take_ready().is_none());
     assert_eq!(supervisor.begin_frame().id(), active_id);
 }
+
+#[test]
+fn returning_to_the_active_spec_cancels_every_pending_candidate() {
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let queue = ShadowBuildQueue::spawn(ScriptedBuilder {
+        started: started_tx,
+        release_cancelled_a: release_rx,
+    })
+    .unwrap();
+
+    queue.request(spec('a')).unwrap();
+    assert_eq!(
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        'a'
+    );
+    queue.cancel_pending();
+    release_tx.send(()).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while queue.snapshot().phase != BuildPhase::Idle && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(queue.snapshot().phase, BuildPhase::Idle);
+    assert!(queue.take_ready().is_none());
+}
