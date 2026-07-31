@@ -403,6 +403,18 @@ pub struct FaceSwapParams {
     /// Legacy compact-GUI toggle. Kept for config compatibility.
     pub histogram_matching: bool,
 
+    // Final face/mask degradation controls
+    #[serde(default)]
+    pub jpeg_compression_enabled: bool,
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u8,
+    #[serde(default)]
+    pub final_blur_enabled: bool,
+    #[serde(default = "default_final_blur")]
+    pub final_blur: u32,
+    #[serde(default)]
+    pub overall_mask_blur: u32,
+
     // Strength
     pub strength: f32,
 
@@ -456,6 +468,11 @@ impl Default for FaceSwapParams {
             color_adjust: ColorAdjustParams::default(),
             color_correction: false,
             histogram_matching: false,
+            jpeg_compression_enabled: false,
+            jpeg_quality: default_jpeg_quality(),
+            final_blur_enabled: false,
+            final_blur: default_final_blur(),
+            overall_mask_blur: 0,
             strength: 1.0,
             similarity_threshold: 0.6,
         }
@@ -464,6 +481,14 @@ impl Default for FaceSwapParams {
 
 const fn default_enhancer_blend() -> f32 {
     1.0
+}
+
+const fn default_jpeg_quality() -> u8 {
+    50
+}
+
+const fn default_final_blur() -> u32 {
+    1
 }
 
 const fn default_landmark_score() -> f32 {

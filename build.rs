@@ -14,6 +14,33 @@ fn main() {
         .unwrap_or_else(|_| "/usr/local/cuda".to_string());
     let nvcc = format!("{cuda_path}/bin/nvcc");
 
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        let out_dir = env::var("OUT_DIR").unwrap();
+        let object = format!("{out_dir}/jpeg_roundtrip.o");
+        let archive = format!("{out_dir}/libnoperson_jpeg_roundtrip.a");
+        let cc_status = Command::new("cc")
+            .args([
+                "-O3",
+                "-fPIC",
+                "-c",
+                "native/jpeg_roundtrip.c",
+                "-o",
+                &object,
+            ])
+            .status()
+            .expect("failed to compile native/jpeg_roundtrip.c");
+        assert!(cc_status.success(), "C compiler failed for JPEG bridge");
+        let ar_status = Command::new("ar")
+            .args(["rcs", &archive, &object])
+            .status()
+            .expect("failed to archive JPEG bridge");
+        assert!(ar_status.success(), "archiver failed for JPEG bridge");
+        println!("cargo:rustc-link-search=native={out_dir}");
+        println!("cargo:rustc-link-lib=static=noperson_jpeg_roundtrip");
+        println!("cargo:rustc-link-lib=dylib=jpeg");
+        println!("cargo:rerun-if-changed=native/jpeg_roundtrip.c");
+    }
+
     // Compile each .cu file to .ptx
     if kernels_dir.exists() {
         for entry in std::fs::read_dir(kernels_dir).expect("Failed to read gpu_kernels/") {

@@ -7,6 +7,64 @@ use crate::{
     pipeline::workspace::GpuWorkspace,
 };
 
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn noperson_jpeg_roundtrip(
+        rgb: *const u8,
+        width: i32,
+        height: i32,
+        quality: i32,
+        output: *mut u8,
+    ) -> i32;
+}
+
+pub fn jpeg_roundtrip_reference(
+    rgb: &[[u8; 3]],
+    width: usize,
+    height: usize,
+    quality: u8,
+) -> anyhow::Result<Vec<[u8; 3]>> {
+    anyhow::ensure!(
+        rgb.len() == width * height,
+        "JPEG dimensions do not match data"
+    );
+    anyhow::ensure!((1..=100).contains(&quality), "JPEG quality must be 1..=100");
+    let input: Vec<u8> = rgb.iter().flatten().copied().collect();
+    let mut output = vec![0u8; input.len()];
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = unsafe {
+            noperson_jpeg_roundtrip(
+                input.as_ptr(),
+                width as i32,
+                height as i32,
+                quality as i32,
+                output.as_mut_ptr(),
+            )
+        };
+        anyhow::ensure!(status == 0, "libjpeg roundtrip failed with status {status}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use image::{ImageEncoder, codecs::jpeg::JpegEncoder};
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, quality).write_image(
+            &input,
+            width as u32,
+            height as u32,
+            image::ExtendedColorType::Rgb8,
+        )?;
+        output = image::load_from_memory_with_format(&encoded, image::ImageFormat::Jpeg)?
+            .to_rgb8()
+            .into_raw();
+    }
+    Ok(output
+        .chunks_exact(3)
+        .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect())
+}
+
 /// CPU oracle for CrossSwap's ordered torchvision-v2 color adjustment stack.
 pub fn adjust_color_reference(
     image: &[[f32; 3]],
@@ -197,6 +255,55 @@ pub fn apply_color_adjust_gpu(
         controls.noise,
         seed,
     )?;
+    Ok(())
+}
+
+pub fn apply_final_blur_gpu(
+    gpu: &GpuOps,
+    workspace: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<()> {
+    if !params.final_blur_enabled {
+        return Ok(());
+    }
+    let kernel_size = params.final_blur * 2 + 1;
+    let sigma = params.final_blur as f32 * 0.1;
+    let ks = crate::pipeline::face_mask::prepare_blur_kernel(gpu, workspace, kernel_size, sigma)?;
+    gpu.gaussian_blur_chw(
+        &mut workspace.face_512,
+        &mut workspace.face_512_scratch,
+        512,
+        512,
+        &workspace.blur_kernel,
+        ks,
+    )?;
+    Ok(())
+}
+
+pub fn apply_jpeg_compression(
+    gpu: &GpuOps,
+    workspace: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<()> {
+    if !params.jpeg_compression_enabled {
+        return Ok(());
+    }
+    const PIXELS: usize = 512 * 512;
+    gpu.download_into(&workspace.face_512, &mut workspace.host_color_swapped)?;
+    let rgb: Vec<[u8; 3]> = (0..PIXELS)
+        .map(|pixel| {
+            std::array::from_fn(|channel| {
+                workspace.host_color_swapped[channel * PIXELS + pixel].clamp(0.0, 255.0) as u8
+            })
+        })
+        .collect();
+    let decoded = jpeg_roundtrip_reference(&rgb, 512, 512, params.jpeg_quality)?;
+    for (pixel, rgb) in decoded.iter().enumerate() {
+        for (channel, value) in rgb.iter().enumerate() {
+            workspace.host_color_swapped[channel * PIXELS + pixel] = f32::from(*value);
+        }
+    }
+    gpu.upload_into(&workspace.host_color_swapped, &mut workspace.face_512)?;
     Ok(())
 }
 

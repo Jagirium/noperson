@@ -213,6 +213,14 @@ impl EngineSpec {
         ] {
             validate_float_range(control, value, min, max)?;
         }
+        validate_range("jpeg_quality", self.params.jpeg_quality as i64, 1, 100)?;
+        validate_range("final_blur", self.params.final_blur as i64, 1, 50)?;
+        validate_range(
+            "overall_mask_blur",
+            self.params.overall_mask_blur as i64,
+            0,
+            100,
+        )?;
         validate_float_range(
             "similarity_threshold",
             self.params.similarity_threshold,

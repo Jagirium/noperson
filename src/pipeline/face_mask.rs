@@ -505,6 +505,7 @@ pub fn gpu_generate_mask_512(
     blur_sigma: f32,
     use_restorer_oval: bool,
     use_learned_mask: bool,
+    overall_blur: u32,
 ) -> anyhow::Result<()> {
     // Crosswap only applies the oval fallback when restoration is active and
     // no explicit parser/XSeg mask is available.
@@ -532,6 +533,19 @@ pub fn gpu_generate_mask_512(
     }
 
     if use_learned_mask {
+        if overall_blur > 0 {
+            let kernel_size = overall_blur * 2 + 1;
+            let sigma = (overall_blur as f32 + 1.0) * 0.2;
+            let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
+            gpu.gaussian_blur_mask(
+                &mut ws.mask_learned_128,
+                &mut ws.mask_128_tmp,
+                128,
+                128,
+                &ws.blur_kernel,
+                ks,
+            )?;
+        }
         gpu.mask_mul(&mut ws.mask_128, &ws.mask_learned_128)?;
     }
 
@@ -975,7 +989,7 @@ fn compose_learned_mask(
     Ok(())
 }
 
-fn prepare_blur_kernel(
+pub(crate) fn prepare_blur_kernel(
     gpu: &GpuOps,
     ws: &mut GpuWorkspace,
     kernel_size: u32,

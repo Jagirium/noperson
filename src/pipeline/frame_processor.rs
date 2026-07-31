@@ -300,6 +300,8 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         face_mask::gpu_apply_fake_diff(gpu, ws, params)?;
         crate::pipeline::color::apply_auto_color_gpu(gpu, ws, params, learned_mask)?;
         crate::pipeline::color::apply_color_adjust_gpu(gpu, ws, params)?;
+        crate::pipeline::color::apply_jpeg_compression(gpu, ws, params)?;
+        crate::pipeline::color::apply_final_blur_gpu(gpu, ws, params)?;
         face_mask::gpu_generate_mask_512(
             gpu,
             ws,
@@ -311,6 +313,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             blur_sigma,
             params.restorer_enabled,
             learned_mask,
+            params.overall_mask_blur,
         )?;
         let _ = gpu.profile_mark(6); // after_mask_gen
 

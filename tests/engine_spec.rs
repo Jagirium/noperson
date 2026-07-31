@@ -305,6 +305,13 @@ fn auto_color_blend_is_generation_validated() {
         Err(EngineSpecError::InvalidFloatControl { control, .. })
             if control == "color_adjust.hue"
     ));
+
+    spec.params.color_adjust.hue = 0.0;
+    spec.params.jpeg_quality = 0;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. }) if control == "jpeg_quality"
+    ));
 }
 
 #[test]

@@ -2,8 +2,10 @@ use noperson::{
     config::parameters::ColorAdjustParams,
     pipeline::color::{
         adjust_color_reference, dfl_transfer_reference, histogram_transfer_reference,
+        jpeg_roundtrip_reference,
     },
 };
+use sha2::{Digest, Sha256};
 
 #[test]
 #[allow(clippy::excessive_precision)] // Values captured verbatim from CrossSwap's Kornia path.
@@ -125,6 +127,20 @@ fn manual_color_stack_matches_torchvision_uint8_oracle() {
     ];
     let actual = adjust_color_reference(&image, 3, 3, &params);
     assert_pixels_close(&actual, &expected, 0.0);
+}
+
+#[test]
+fn jpeg_roundtrip_matches_torchvision_libjpeg_oracle() {
+    let chw: Vec<u8> = (0..3 * 8 * 8).map(|value| value as u8).collect();
+    let rgb: Vec<[u8; 3]> = (0..64)
+        .map(|pixel| [chw[pixel], chw[64 + pixel], chw[128 + pixel]])
+        .collect();
+    let decoded = jpeg_roundtrip_reference(&rgb, 8, 8, 50).unwrap();
+    let bytes: Vec<u8> = decoded.iter().flatten().copied().collect();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        "68d4b54625f3fb103841a70f8ddc9fedaea0c4f2830362e5e70356fa3701ed04"
+    );
 }
 
 fn color_fixture() -> ([[f32; 3]; 4], [[f32; 3]; 4]) {

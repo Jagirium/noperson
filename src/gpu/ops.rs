@@ -71,6 +71,8 @@ pub struct GpuOps {
     // Mask kernels
     blur_h_fn: CudaFunction,
     blur_v_fn: CudaFunction,
+    blur_chw_h_fn: CudaFunction,
+    blur_chw_v_fn: CudaFunction,
     mask_resize_fn: CudaFunction,
     mask_mul_fn: CudaFunction,
     occluder_threshold_fn: CudaFunction,
@@ -162,6 +164,8 @@ impl GpuOps {
             l2_normalize_fn: load("matmul_512", "l2_normalize_kernel"),
             blur_h_fn: load("gaussian_blur", "gaussian_blur_h_kernel"),
             blur_v_fn: load("gaussian_blur", "gaussian_blur_v_kernel"),
+            blur_chw_h_fn: load("gaussian_blur", "gaussian_blur_chw_h_kernel"),
+            blur_chw_v_fn: load("gaussian_blur", "gaussian_blur_chw_v_kernel"),
             mask_resize_fn: load("gaussian_blur", "mask_resize_kernel"),
             mask_mul_fn: load("gaussian_blur", "mask_mul_kernel"),
             occluder_threshold_fn: load("mask_postprocess", "occluder_threshold_kernel"),
@@ -973,6 +977,40 @@ impl GpuOps {
             b.arg(&border_mode);
             unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         }
+        Ok(())
+    }
+
+    /// Separable torchvision-compatible Gaussian blur on a three-channel CHW image.
+    pub fn gaussian_blur_chw(
+        &self,
+        image: &mut CudaSlice<f32>,
+        tmp: &mut CudaSlice<f32>,
+        h: u32,
+        w: u32,
+        kernel: &CudaSlice<f32>,
+        ks: u32,
+    ) -> Result<(), DriverError> {
+        if ks <= 1 {
+            return Ok(());
+        }
+        let total = 3 * h * w;
+        let mut horizontal = self.stream.launch_builder(&self.blur_chw_h_fn);
+        horizontal.arg(&*image);
+        horizontal.arg(&mut *tmp);
+        horizontal.arg(kernel);
+        horizontal.arg(&h);
+        horizontal.arg(&w);
+        horizontal.arg(&ks);
+        unsafe { horizontal.launch(LaunchConfig::for_num_elems(total)) }?;
+
+        let mut vertical = self.stream.launch_builder(&self.blur_chw_v_fn);
+        vertical.arg(&*tmp);
+        vertical.arg(&mut *image);
+        vertical.arg(kernel);
+        vertical.arg(&h);
+        vertical.arg(&w);
+        vertical.arg(&ks);
+        unsafe { vertical.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())
     }
 

@@ -74,6 +74,58 @@ void gaussian_blur_v_kernel(
     dst[y * W + x] = val;
 }
 
+extern "C" __global__
+void gaussian_blur_chw_h_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    const float* __restrict__ kernel,
+    const unsigned int H,
+    const unsigned int W,
+    const unsigned int ks
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int pixels = H * W;
+    unsigned int total = 3 * pixels;
+    if (idx >= total) return;
+    unsigned int channel = idx / pixels;
+    unsigned int pixel = idx % pixels;
+    unsigned int y = pixel / W;
+    unsigned int x = pixel % W;
+    int half = (int)ks / 2;
+    float value = 0.0f;
+    for (int k = 0; k < (int)ks; ++k) {
+        int sx = gaussian_border_index((int)x + k - half, (int)W, 0);
+        value += src[channel * pixels + y * W + sx] * kernel[k];
+    }
+    dst[idx] = value;
+}
+
+extern "C" __global__
+void gaussian_blur_chw_v_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    const float* __restrict__ kernel,
+    const unsigned int H,
+    const unsigned int W,
+    const unsigned int ks
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int pixels = H * W;
+    unsigned int total = 3 * pixels;
+    if (idx >= total) return;
+    unsigned int channel = idx / pixels;
+    unsigned int pixel = idx % pixels;
+    unsigned int y = pixel / W;
+    unsigned int x = pixel % W;
+    int half = (int)ks / 2;
+    float value = 0.0f;
+    for (int k = 0; k < (int)ks; ++k) {
+        int sy = gaussian_border_index((int)y + k - half, (int)H, 0);
+        value += src[channel * pixels + sy * W + x] * kernel[k];
+    }
+    dst[idx] = value;
+}
+
 // Resize single-channel mask [src_h, src_w] → [dst_h, dst_w] via bilinear.
 extern "C" __global__
 void mask_resize_kernel(
