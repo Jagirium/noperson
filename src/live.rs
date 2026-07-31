@@ -7,7 +7,7 @@ use cudarc::driver::{CudaSlice, CudaStream};
 use image::GenericImageView;
 use thiserror::Error;
 
-use crate::config::parameters::FaceSwapParams;
+use crate::config::parameters::{FaceSwapParams, RestorerSize};
 use crate::config::settings::ExecutionProvider;
 use crate::gpu::ops::GpuOps;
 use crate::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
@@ -91,7 +91,17 @@ impl LiveEngine {
         manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
         manager.load_emap(CANONICAL_SWAPPER_FILENAME)?;
         if params.restorer_enabled {
-            manager.load("GPENBFR512", "GPEN-BFR-512.onnx")?;
+            match params.restorer_size {
+                RestorerSize::Gpen256 => {
+                    manager.load("GPENBFR256", "GPEN-BFR-256.onnx")?;
+                }
+                RestorerSize::Gpen512 => {
+                    manager.load("GPENBFR512", "GPEN-BFR-512.onnx")?;
+                }
+                RestorerSize::Gpen1024 => {
+                    anyhow::bail!("GPEN-1024 is excluded from the runtime")
+                }
+            }
         }
 
         let detector = YoloFaceDetector::new(0.5);

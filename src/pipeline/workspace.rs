@@ -28,6 +28,8 @@ pub struct GpuWorkspace {
     pub face_256: CudaSlice<f32>,         // swap face [3, dim*128, dim*128] (max 512)
     pub face_512: CudaSlice<f32>,         // Pipeline face [3, 512, 512]
     pub face_512_scratch: CudaSlice<f32>, // Scratch for upscaled swap [3, 512, 512]
+    pub restorer_256_input: CudaSlice<f32>,
+    pub restorer_256_output: CudaSlice<f32>,
     /// Last GPEN output in aligned 512-space. Reused between inference keyframes.
     pub restorer_cache: CudaSlice<f32>,
     pub restorer_cache_valid: bool,
@@ -101,6 +103,8 @@ impl GpuWorkspace {
             face_256: stream.alloc_zeros::<f32>(face_256_size)?,
             face_512: stream.alloc_zeros::<f32>(face_512_size)?,
             face_512_scratch: stream.alloc_zeros::<f32>(face_512_size)?,
+            restorer_256_input: stream.alloc_zeros::<f32>(3 * 256 * 256)?,
+            restorer_256_output: stream.alloc_zeros::<f32>(3 * 256 * 256)?,
             restorer_cache: stream.alloc_zeros::<f32>(face_512_size)?,
             restorer_cache_valid: false,
             restorer_frame: 0,

@@ -5,8 +5,7 @@
 
 use cudarc::driver::CudaSlice;
 
-use crate::config::parameters::FaceSwapParams;
-use crate::config::parameters::RestorerMode;
+use crate::config::parameters::{FaceSwapParams, RestorerMode, RestorerSize};
 use crate::gpu::ops::GpuOps;
 use crate::gpu::unified;
 use crate::math::affine;
@@ -136,6 +135,7 @@ pub fn process_frame_gpu(
         // face_512; inference input/output and alpha blending stay on GPU.
         if params.restorer_enabled {
             let values = 3 * pipeline_size as usize * pipeline_size as usize;
+            let (restorer_name, restorer_size) = restorer_contract(params.restorer_size)?;
             // Refresh the temporally stable GPEN-512 output every second frame
             // and reuse the device-resident result in between.
             // A single cache is safe only for the common one-face live path.
@@ -146,21 +146,49 @@ pub fn process_frame_gpu(
                 || !ws.restorer_cache_valid
                 || ws.restorer_frame.is_multiple_of(2);
             if refresh {
-                gpu.stream
-                    .memcpy_dtod(&ws.face_512, &mut ws.face_512_scratch)?;
-                // GPEN expects [-1, 1] and returns [-1, 1].
-                gpu.affine_scale(&mut ws.face_512_scratch, 1.0 / 127.5, -1.0)?;
                 let session = manager
-                    .get_mut("GPENBFR512")
-                    .ok_or_else(|| anyhow::anyhow!("GPENBFR512 is not loaded"))?;
-                unified::run_gpen(
-                    session,
-                    &gpu.stream,
-                    &mut ws.face_512_scratch,
-                    &mut ws.restorer_cache,
-                    pipeline_size as usize,
-                )?;
-                gpu.affine_scale(&mut ws.restorer_cache, 127.5, 127.5)?;
+                    .get_mut(restorer_name)
+                    .ok_or_else(|| anyhow::anyhow!("{restorer_name} is not loaded"))?;
+                if restorer_size == 256 {
+                    gpu.resize_npp(
+                        &ws.face_512,
+                        &mut ws.restorer_256_input,
+                        pipeline_size,
+                        pipeline_size,
+                        256,
+                        256,
+                    )?;
+                    gpu.affine_scale(&mut ws.restorer_256_input, 1.0 / 127.5, -1.0)?;
+                    unified::run_gpen(
+                        session,
+                        &gpu.stream,
+                        &mut ws.restorer_256_input,
+                        &mut ws.restorer_256_output,
+                        256,
+                    )?;
+                    gpu.affine_scale(&mut ws.restorer_256_output, 127.5, 127.5)?;
+                    gpu.resize_npp(
+                        &ws.restorer_256_output,
+                        &mut ws.restorer_cache,
+                        256,
+                        256,
+                        pipeline_size,
+                        pipeline_size,
+                    )?;
+                } else {
+                    gpu.stream
+                        .memcpy_dtod(&ws.face_512, &mut ws.face_512_scratch)?;
+                    // GPEN expects [-1, 1] and returns [-1, 1].
+                    gpu.affine_scale(&mut ws.face_512_scratch, 1.0 / 127.5, -1.0)?;
+                    unified::run_gpen(
+                        session,
+                        &gpu.stream,
+                        &mut ws.face_512_scratch,
+                        &mut ws.restorer_cache,
+                        restorer_size,
+                    )?;
+                    gpu.affine_scale(&mut ws.restorer_cache, 127.5, 127.5)?;
+                }
                 ws.restorer_cache_valid = true;
             }
             gpu.scalar_blend_inplace(
@@ -245,6 +273,14 @@ pub fn process_frame_gpu(
     })
 }
 
+fn restorer_contract(size: RestorerSize) -> anyhow::Result<(&'static str, usize)> {
+    match size {
+        RestorerSize::Gpen256 => Ok(("GPENBFR256", 256)),
+        RestorerSize::Gpen512 => Ok(("GPENBFR512", 512)),
+        RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
+    }
+}
+
 /// Compute face alignment template at target size.
 /// Match Crosswap's actual `get_arcface_template(..., mode="arcface128")`
 /// output, including its `(1, 5, 2)` NumPy indexing behavior. `template[:, 0]`
@@ -262,4 +298,23 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
     dst[0][0] += offset;
     dst[0][1] += offset;
     dst
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restorer_contract;
+    use crate::config::parameters::RestorerSize;
+
+    #[test]
+    fn restorer_contract_maps_only_supported_runtime_sizes() {
+        assert_eq!(
+            restorer_contract(RestorerSize::Gpen256).unwrap(),
+            ("GPENBFR256", 256)
+        );
+        assert_eq!(
+            restorer_contract(RestorerSize::Gpen512).unwrap(),
+            ("GPENBFR512", 512)
+        );
+        assert!(restorer_contract(RestorerSize::Gpen1024).is_err());
+    }
 }
