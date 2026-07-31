@@ -5,6 +5,7 @@
 
 use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
+use std::cell::RefCell;
 
 use crate::config::settings::DetectorModel;
 use crate::gpu::ops::GpuOps;
@@ -119,13 +120,19 @@ impl FaceDetectorBackend for FaceDetector {
         frame_w: u32,
     ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
         let (mut combined, scale) = self.detect_gpu(mgr, gpu, frame_chw, ws, frame_h, frame_w)?;
+        let elements = 3 * frame_h as usize * frame_w as usize;
+        let mut rotated = match self {
+            Self::Yolo(detector) => detector.rotation_scratch.borrow_mut().take(),
+            Self::Anchor(detector) => detector.rotation_scratch.borrow_mut().take(),
+        }
+        .filter(|buffer| buffer.len() == elements)
+        .map_or_else(|| gpu.alloc_zeros(elements), Ok)?;
         for turns in 1..4 {
             let (rotated_h, rotated_w) = if turns % 2 == 0 {
                 (frame_h, frame_w)
             } else {
                 (frame_w, frame_h)
             };
-            let mut rotated = gpu.alloc_zeros(3 * frame_h as usize * frame_w as usize)?;
             gpu.rotate_quadrants(frame_chw, &mut rotated, frame_h, frame_w, turns)?;
             let (faces, _) = self.detect_gpu(mgr, gpu, &rotated, ws, rotated_h, rotated_w)?;
             combined.extend(
@@ -141,6 +148,10 @@ impl FaceDetectorBackend for FaceDetector {
             Self::Anchor(detector) => detector.max_faces,
         };
         select_center_faces(&mut combined, frame_h, frame_w, max_faces);
+        match self {
+            Self::Yolo(detector) => *detector.rotation_scratch.borrow_mut() = Some(rotated),
+            Self::Anchor(detector) => *detector.rotation_scratch.borrow_mut() = Some(rotated),
+        }
         Ok((combined, scale))
     }
 }
@@ -192,6 +203,7 @@ pub struct YoloFaceDetector {
     score_threshold: f32,
     nms_iou_threshold: f32,
     max_faces: usize,
+    rotation_scratch: RefCell<Option<CudaSlice<f32>>>,
 }
 
 impl YoloFaceDetector {
@@ -201,6 +213,7 @@ impl YoloFaceDetector {
             score_threshold,
             nms_iou_threshold: 0.4,
             max_faces: 0,
+            rotation_scratch: RefCell::new(None),
         }
     }
 
@@ -377,6 +390,7 @@ pub struct AnchorDetector {
     nms_iou_threshold: f32,
     kind: AnchorDetectorKind,
     max_faces: usize,
+    rotation_scratch: RefCell<Option<CudaSlice<f32>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -420,6 +434,7 @@ impl AnchorDetector {
             nms_iou_threshold: 0.4,
             kind,
             max_faces: 0,
+            rotation_scratch: RefCell::new(None),
         }
     }
 

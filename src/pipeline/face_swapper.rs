@@ -112,6 +112,18 @@ impl FaceSwapper {
         latent: &[f32],
         dim: u32,
     ) -> anyhow::Result<()> {
+        Self::swap_gpu_cached(manager, gpu, ws, latent, dim, true)
+    }
+
+    /// Repeat a strength pass while retaining the invariant latent on-device.
+    pub(crate) fn swap_gpu_cached(
+        manager: &mut ModelManager,
+        gpu: &GpuOps,
+        ws: &mut GpuWorkspace,
+        latent: &[f32],
+        dim: u32,
+        upload_latent: bool,
+    ) -> anyhow::Result<()> {
         assert_eq!(latent.len(), 512);
         anyhow::ensure!((1..=4).contains(&dim), "unsupported swap dim: {dim}");
         let tile_size = 128u32;
@@ -127,14 +139,16 @@ impl FaceSwapper {
             }
         }
         gpu.normalize_prefix(&mut ws.swap_batch_in, active_tile_values)?;
-        let latent_values = n_tiles * 512;
-        for tile in 0..n_tiles {
-            ws.host_swap_tiles[tile * 512..(tile + 1) * 512].copy_from_slice(latent);
+        if upload_latent {
+            let latent_values = n_tiles * 512;
+            for tile in 0..n_tiles {
+                ws.host_swap_tiles[tile * 512..(tile + 1) * 512].copy_from_slice(latent);
+            }
+            gpu.upload_into(
+                &ws.host_swap_tiles[..latent_values],
+                &mut ws.swap_latent_gpu,
+            )?;
         }
-        gpu.upload_into(
-            &ws.host_swap_tiles[..latent_values],
-            &mut ws.swap_latent_gpu,
-        )?;
 
         let cuda_mem_info = MemoryInfo::new(
             AllocationDevice::CUDA,

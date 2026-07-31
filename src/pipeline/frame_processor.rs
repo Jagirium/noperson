@@ -195,15 +195,16 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                         gpu.stream
                             .memcpy_dtod(&ws.face_512_scratch, &mut ws.face_256)?;
                     }
-                    for _ in 0..iterations {
+                    for iteration in 0..iterations {
                         gpu.stream
                             .memcpy_dtod(&ws.face_256, &mut ws.face_512_scratch)?;
-                        FaceSwapper::swap_gpu(
+                        FaceSwapper::swap_gpu_cached(
                             manager,
                             gpu,
                             ws,
                             &source.expect("Inswapper source selected above").latent,
                             dim,
+                            iteration == 0,
                         )?;
                     }
                     if fractional_blend < 1.0 {

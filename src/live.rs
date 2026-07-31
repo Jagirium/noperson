@@ -71,6 +71,7 @@ pub struct LiveEngine {
     params: FaceSwapParams,
     enhancer: Option<FrameEnhancer>,
     dfm: Option<DfmContract>,
+    rotation_scratch: Option<CudaSlice<f32>>,
 }
 
 pub(crate) struct ResolvedFaceAssignment {
@@ -686,6 +687,7 @@ impl LiveEngine {
             params: spec.params.clone(),
             enhancer,
             dfm,
+            rotation_scratch: None,
         })
     }
 
@@ -720,7 +722,11 @@ impl LiveEngine {
         } else {
             (width, height)
         };
-        let mut rotated = self.gpu.alloc_zeros(3 * height as usize * width as usize)?;
+        let elements = 3 * height as usize * width as usize;
+        let mut rotated = match self.rotation_scratch.take() {
+            Some(buffer) if buffer.len() == elements => buffer,
+            _ => self.gpu.alloc_zeros(elements)?,
+        };
         self.gpu
             .rotate_quadrants(frame, &mut rotated, height, width, turns)?;
         let result = process_frame_gpu(
@@ -742,6 +748,7 @@ impl LiveEngine {
             rotated_width,
             (4 - turns) & 3,
         )?;
+        self.rotation_scratch = Some(rotated);
         Ok(result)
     }
 

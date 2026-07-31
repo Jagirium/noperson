@@ -108,7 +108,6 @@ impl FaceRecognizer {
             let _ = session.run_binding(binding)?;
             binding.synchronize_outputs()?;
             binding.clear();
-            gpu.sync()?;
             drop(input_value);
             drop(output_value);
         }
@@ -202,7 +201,6 @@ impl FaceRecognizer {
             }
             let _ = session.run_binding(binding)?;
             binding.clear();
-            gpu.sync()?;
             drop(input_value);
             drop(output_value);
         }
