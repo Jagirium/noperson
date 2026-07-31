@@ -243,9 +243,9 @@ pub enum RestorerSize {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RestorerMode {
     /// Run GPEN for every frame. Best temporal detail, lower throughput.
+    #[default]
     Quality,
     /// Run GPEN on keyframes and reuse its aligned GPU output in between.
-    #[default]
     Realtime,
 }
 
@@ -466,9 +466,9 @@ impl Default for FaceSwapParams {
             landmark_score: default_landmark_score(),
             landmark_from_points: false,
             restorer_enabled: false,
-            restorer_size: RestorerSize::Gpen512,
+            restorer_size: RestorerSize::Gpen256,
             restorer_alpha: 1.0,
-            restorer_mode: RestorerMode::Realtime,
+            restorer_mode: RestorerMode::Quality,
             enhancer_enabled: false,
             enhancer_model: EnhancerModel::default(),
             enhancer_blend: default_enhancer_blend(),
