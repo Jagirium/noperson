@@ -3,8 +3,10 @@
 //! Port of crosswap/app/processors/face_landmark_detectors.py
 //! Each model has unique input size, normalization, and output decoding.
 
+use thiserror::Error;
+
 /// Landmark model types.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LandmarkModel {
     /// res50.onnx — 5 points, input 512×512, norm: subtract BGR mean [104,117,123]
     Points5,
@@ -22,7 +24,28 @@ pub enum LandmarkModel {
     Points478,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LandmarkError {
+    #[error("unsupported landmark mode {0}")]
+    UnsupportedMode(String),
+    #[error("landmark model expected {expected} points, got {actual}")]
+    PointCount { expected: usize, actual: usize },
+}
+
 impl LandmarkModel {
+    pub fn from_mode(mode: &str) -> Result<Self, LandmarkError> {
+        match mode {
+            "5" => Ok(Self::Points5),
+            "68" => Ok(Self::Points68),
+            "3d68" => Ok(Self::Points3d68),
+            "98" => Ok(Self::Points98),
+            "106" => Ok(Self::Points106),
+            "203" => Ok(Self::Points203),
+            "478" => Ok(Self::Points478),
+            _ => Err(LandmarkError::UnsupportedMode(mode.to_owned())),
+        }
+    }
+
     pub fn model_name(&self) -> &'static str {
         match self {
             Self::Points5 => "FaceLandmark5",
@@ -93,4 +116,41 @@ impl LandmarkModel {
             }
         }
     }
+
+    /// Reduce a model's dense output to CrossSwap's canonical ArcFace-5 order.
+    pub fn to_five(&self, points: &[[f32; 2]]) -> Result<[[f32; 2]; 5], LandmarkError> {
+        let expected = self.num_points();
+        if points.len() != expected {
+            return Err(LandmarkError::PointCount {
+                expected,
+                actual: points.len(),
+            });
+        }
+
+        let result = match self {
+            Self::Points5 => [points[0], points[1], points[2], points[3], points[4]],
+            Self::Points68 | Self::Points3d68 => [
+                mean_pair(points[36], points[39]),
+                mean_pair(points[42], points[45]),
+                points[30],
+                points[48],
+                points[54],
+            ],
+            Self::Points98 => [points[96], points[97], points[54], points[76], points[82]],
+            Self::Points106 => [points[38], points[88], points[86], points[52], points[61]],
+            Self::Points203 => [
+                points[197],
+                points[198],
+                points[201],
+                points[48],
+                points[66],
+            ],
+            Self::Points478 => [points[468], points[473], points[4], points[61], points[291]],
+        };
+        Ok(result)
+    }
+}
+
+fn mean_pair(left: [f32; 2], right: [f32; 2]) -> [f32; 2] {
+    [(left[0] + right[0]) * 0.5, (left[1] + right[1]) * 0.5]
 }
