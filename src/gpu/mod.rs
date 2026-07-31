@@ -2,7 +2,6 @@ pub mod interop;
 pub mod kernels;
 pub mod npp;
 pub mod ops;
-pub mod unified;
 
 use std::sync::Arc;
 

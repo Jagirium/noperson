@@ -7,7 +7,7 @@
 use crate::config::parameters::{
     FaceParserMaskParams, FaceSwapParams, RestoreEyesParams, RestoreMouthParams,
 };
-use crate::gpu::{ops::GpuOps, unified};
+use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
 use crate::pipeline::workspace::{GpuWorkspace, MAX_BLUR_KS};
 
@@ -575,10 +575,17 @@ pub fn gpu_generate_learned_mask_128(
 
     if params.occluder_enabled {
         prepare_learned_mask_input(gpu, ws)?;
-        let session = manager
-            .get_mut("Occluder")
-            .ok_or_else(|| anyhow::anyhow!("Occluder is not loaded"))?;
-        unified::run_occluder(session, &gpu.stream, &mut ws.face_256, &mut ws.mask_256)?;
+        crate::pipeline::ort_binding::run_bound_f32(
+            manager,
+            &gpu.stream,
+            "Occluder",
+            "img",
+            &ws.face_256,
+            &[1, 3, 256, 256],
+            "output",
+            &mut ws.mask_256,
+            &[1, 1, 256, 256],
+        )?;
         gpu.occluder_threshold(&mut ws.mask_256)?;
         gpu.morphology_mask(
             &mut ws.mask_256,
@@ -592,10 +599,17 @@ pub fn gpu_generate_learned_mask_128(
 
     if params.xseg_enabled {
         prepare_learned_mask_input(gpu, ws)?;
-        let session = manager
-            .get_mut("XSeg")
-            .ok_or_else(|| anyhow::anyhow!("XSeg is not loaded"))?;
-        unified::run_xseg(session, &gpu.stream, &mut ws.face_256, &mut ws.mask_256)?;
+        crate::pipeline::ort_binding::run_bound_f32(
+            manager,
+            &gpu.stream,
+            "XSeg",
+            "in_face:0",
+            &ws.face_256,
+            &[1, 3, 256, 256],
+            "out_mask:0",
+            &mut ws.mask_256,
+            &[1, 1, 256, 256],
+        )?;
         gpu.xseg_postprocess(&mut ws.mask_256)?;
         gpu.morphology_mask(
             &mut ws.mask_256,
@@ -845,14 +859,16 @@ fn compose_faceparser_gpu(
     gpu.stream
         .memcpy_dtod(&ws.face_512_pre_restorer, &mut ws.face_512_scratch)?;
     gpu.imagenet_normalize_512(&mut ws.face_512_scratch)?;
-    let session = manager
-        .get_mut("FaceParser")
-        .ok_or_else(|| anyhow::anyhow!("FaceParser is not loaded"))?;
-    unified::run_faceparser(
-        session,
+    crate::pipeline::ort_binding::run_bound_f32(
+        manager,
         &gpu.stream,
-        &mut ws.face_512_scratch,
+        "FaceParser",
+        "input",
+        &ws.face_512_scratch,
+        &[1, 3, 512, 512],
+        "output",
         &mut ws.parser_logits,
+        &[1, 19, 512, 512],
     )?;
     gpu.parser_argmax(&ws.parser_logits, &mut ws.parser_classes)?;
 

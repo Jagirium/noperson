@@ -255,7 +255,7 @@
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.run_occluder",
-          "rust": "noperson::gpu::unified::run_occluder",
+          "rust": "noperson::pipeline::ort_binding::run_bound_f32",
           "status": "partial",
           "evidence": [
             "tests/mask_contract.rs::occluder_and_xseg_postprocessing_match_crosswap"
@@ -272,7 +272,7 @@
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.run_dfl_xseg",
-          "rust": "noperson::gpu::unified::run_xseg",
+          "rust": "noperson::pipeline::ort_binding::run_bound_f32",
           "status": "partial",
           "evidence": [
             "tests/mask_contract.rs::occluder_and_xseg_postprocessing_match_crosswap"
@@ -290,7 +290,7 @@
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.run_faceparser",
-          "rust": "noperson::gpu::unified::run_faceparser",
+          "rust": "noperson::pipeline::ort_binding::run_bound_f32",
           "status": "partial",
           "evidence": [
             "tests/mask_contract.rs::face_parser_attribute_growth_masks_the_selected_class_neighborhood"
@@ -349,7 +349,7 @@
         },
         {
           "python": "crosswap.app.processors.face_restorers.FaceRestorers.run_GPEN_256",
-          "rust": "noperson::gpu::unified::run_gpen",
+          "rust": "noperson::pipeline::ort_binding::run_bound_f32",
           "status": "partial",
           "evidence": [
             "noperson::pipeline::frame_processor::tests::restorer_contract_maps_only_supported_runtime_sizes"
@@ -357,7 +357,7 @@
         },
         {
           "python": "crosswap.app.processors.face_restorers.FaceRestorers.run_GPEN_512",
-          "rust": "noperson::gpu::unified::run_gpen",
+          "rust": "noperson::pipeline::ort_binding::run_bound_f32",
           "status": "verified",
           "evidence": [
             "tests/live_engine_contract.rs::elon_self_swap_meets_photo_and_camera_quality_gates",

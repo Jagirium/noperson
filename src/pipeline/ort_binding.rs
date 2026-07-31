@@ -6,9 +6,12 @@
 
 use std::ffi::CString;
 
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut};
 use ort::AsPointer;
-use ort::memory::MemoryInfo;
+use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::IoBinding;
+
+use crate::models::manager::ModelManager;
 
 /// RAII wrapper around an OrtValue — releases the underlying tensor on drop.
 pub struct OrtValueGuard(pub(crate) *mut ort_sys::OrtValue);
@@ -91,5 +94,41 @@ pub unsafe fn bind_output_raw(
     let status =
         unsafe { (ort::api().BindOutput)(binding.ptr().cast_mut(), cname.as_ptr(), value.0) };
     anyhow::ensure!(status.0.is_null(), "BindOutput {} failed", name);
+    Ok(())
+}
+
+/// Run a one-input/one-output model directly against caller-owned CUDA buffers.
+/// The cached IoBinding avoids an ORT output allocation and the following D2D copy.
+#[allow(clippy::too_many_arguments)]
+pub fn run_bound_f32(
+    manager: &mut ModelManager,
+    stream: &CudaStream,
+    session_name: &str,
+    input_name: &str,
+    input: &CudaSlice<f32>,
+    input_shape: &[i64],
+    output_name: &str,
+    output: &mut CudaSlice<f32>,
+    output_shape: &[i64],
+) -> anyhow::Result<()> {
+    let memory = MemoryInfo::new(
+        AllocationDevice::CUDA,
+        manager.device_id(),
+        AllocatorType::Device,
+        MemoryType::Default,
+    )?;
+    let (input_ptr, _input_guard) = input.device_ptr(stream);
+    let (output_ptr, _output_guard) = output.device_ptr_mut(stream);
+    let input_value = unsafe { create_cuda_tensor_f32(&memory, input_ptr, input_shape)? };
+    let output_value = unsafe { create_cuda_tensor_f32(&memory, output_ptr, output_shape)? };
+    let (session, binding) = manager.session_and_binding(session_name)?;
+    unsafe {
+        bind_input_raw(binding, input_name, &input_value)?;
+        bind_output_raw(binding, output_name, &output_value)?;
+    }
+    binding.synchronize_inputs()?;
+    let _ = session.run_binding(binding)?;
+    binding.synchronize_outputs()?;
+    binding.clear();
     Ok(())
 }

@@ -6,7 +6,7 @@ use thiserror::Error;
 
 pub use crate::config::parameters::EnhancerModel;
 use crate::config::settings::ExecutionProvider;
-use crate::gpu::{ops::GpuOps, unified};
+use crate::gpu::ops::GpuOps;
 use crate::models::{manager::ModelManager, registry::find_model};
 
 /// Tile size selected by CrossSwap's production `FrameWorker.enhance_core`.
@@ -258,16 +258,23 @@ impl FrameEnhancer {
         )?;
         self.gpu.normalize(&mut workspace.tiles_in)?;
 
-        let session = self
-            .manager
-            .get_mut(self.model.registry_name())
-            .ok_or_else(|| anyhow::anyhow!("enhancer session disappeared"))?;
-        unified::run_enhancer(
-            session,
+        let input_shape = plan.input_shape().map(|dimension| dimension as i64);
+        let output_shape = [
+            plan.tiles.len() as i64,
+            3,
+            plan.output_tile_size as i64,
+            plan.output_tile_size as i64,
+        ];
+        crate::pipeline::ort_binding::run_bound_f32(
+            &mut self.manager,
             &self.gpu.stream,
-            &mut workspace.tiles_in,
-            &plan.input_shape(),
+            self.model.registry_name(),
+            "input",
+            &workspace.tiles_in,
+            &input_shape,
+            "output",
             &mut workspace.tiles_out,
+            &output_shape,
         )?;
         self.gpu.enhancer_scatter_tiles(
             &workspace.tiles_out,

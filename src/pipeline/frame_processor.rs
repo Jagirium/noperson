@@ -7,7 +7,6 @@ use cudarc::driver::CudaSlice;
 
 use crate::config::parameters::{FaceSwapParams, RestorerAlignment, RestorerSize, SwapperModel};
 use crate::gpu::ops::GpuOps;
-use crate::gpu::unified;
 use crate::math::affine;
 use crate::models::manager::ModelManager;
 use crate::pipeline::dfm::DfmContract;
@@ -16,6 +15,7 @@ use crate::pipeline::face_landmark::LandmarkModel;
 use crate::pipeline::face_mask;
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::face_swapper::FaceSwapper;
+use crate::pipeline::ort_binding::run_bound_f32;
 use crate::pipeline::workspace::GpuWorkspace;
 
 /// Source face identity: pre-computed embedding for matching.
@@ -450,10 +450,6 @@ fn apply_restorer_gpu(
     alpha: f32,
     alignment: RestorerAlignmentPlan,
 ) -> anyhow::Result<()> {
-    let session = manager
-        .get_mut(session_name)
-        .ok_or_else(|| anyhow::anyhow!("{session_name} is not loaded"))?;
-
     if let RestorerAlignmentPlan::Aligned(matrix) = alignment {
         gpu.warp_affine_npp(
             &ws.face_512,
@@ -473,12 +469,16 @@ fn apply_restorer_gpu(
         };
         gpu.resize_npp(source, &mut ws.restorer_256_input, 512, 512, 256, 256)?;
         gpu.affine_scale(&mut ws.restorer_256_input, 1.0 / 127.5, -1.0)?;
-        unified::run_gpen(
-            session,
+        run_bound_f32(
+            manager,
             &gpu.stream,
-            &mut ws.restorer_256_input,
+            session_name,
+            "input",
+            &ws.restorer_256_input,
+            &[1, 3, 256, 256],
+            "output",
             &mut ws.restorer_256_output,
-            256,
+            &[1, 3, 256, 256],
         )?;
         gpu.affine_scale(&mut ws.restorer_256_output, 127.5, 127.5)?;
         gpu.resize_npp(
@@ -495,12 +495,16 @@ fn apply_restorer_gpu(
                 .memcpy_dtod(&ws.face_512, &mut ws.face_512_scratch)?;
         }
         gpu.affine_scale(&mut ws.face_512_scratch, 1.0 / 127.5, -1.0)?;
-        unified::run_gpen(
-            session,
+        run_bound_f32(
+            manager,
             &gpu.stream,
-            &mut ws.face_512_scratch,
+            session_name,
+            "input",
+            &ws.face_512_scratch,
+            &[1, 3, size as i64, size as i64],
+            "output",
             &mut ws.restorer_cache,
-            size,
+            &[1, 3, size as i64, size as i64],
         )?;
         gpu.affine_scale(&mut ws.restorer_cache, 127.5, 127.5)?;
     }
