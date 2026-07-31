@@ -204,8 +204,10 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                             .memcpy_dtod(&ws.face_512_scratch, &mut ws.face_256)?;
                     }
                     for iteration in 0..iterations {
-                        gpu.stream
-                            .memcpy_dtod(&ws.face_256, &mut ws.face_512_scratch)?;
+                        if needs_strength_snapshot(iteration, iterations, fractional_blend) {
+                            gpu.stream
+                                .memcpy_dtod(&ws.face_256, &mut ws.face_512_scratch)?;
+                        }
                         FaceSwapper::swap_gpu_cached(
                             manager,
                             gpu,
@@ -555,6 +557,10 @@ fn strength_plan(amount: f32) -> (u32, f32) {
     (iterations, if fraction == 0.0 { 1.0 } else { fraction })
 }
 
+fn needs_strength_snapshot(iteration: u32, iterations: u32, fractional_blend: f32) -> bool {
+    fractional_blend < 1.0 && iteration + 1 == iterations
+}
+
 /// Compute face alignment template at target size.
 /// Match Crosswap's actual `get_arcface_template(..., mode="arcface128")`
 /// output: scale both coordinates, then shift the X coordinate of all points.
@@ -573,7 +579,8 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 mod tests {
     use super::{
         SourceFace, adjusted_keypoints, assignment_matches, blend_restorer_affine,
-        crosswap_similarity, restorer_contract, scaled_arcface_template, strength_plan,
+        crosswap_similarity, needs_strength_snapshot, restorer_contract, scaled_arcface_template,
+        strength_plan,
     };
     use crate::config::parameters::FaceSwapParams;
     use crate::config::parameters::RestorerSize;
@@ -625,6 +632,13 @@ mod tests {
         assert_eq!(strength_plan(1.25), (2, 0.25));
         assert_eq!(strength_plan(2.0), (2, 1.0));
         assert_eq!(strength_plan(5.0), (5, 1.0));
+    }
+
+    #[test]
+    fn strength_snapshot_is_only_kept_for_the_fractional_final_pass() {
+        assert!(!needs_strength_snapshot(0, 1, 1.0));
+        assert!(!needs_strength_snapshot(0, 2, 0.25));
+        assert!(needs_strength_snapshot(1, 2, 0.25));
     }
 
     #[test]
