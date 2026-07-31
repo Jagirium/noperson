@@ -22,6 +22,8 @@ pub struct GpuWorkspace {
     pub detect_input: CudaSlice<f32>, // [1, 3, 640, 640]
     /// YoloFace output: [1, 20, 8400] for 640 input — 4 bbox + 1 score + 15 kps
     pub detect_output: CudaSlice<f32>, // [1, 20, 8400]
+    pub anchor_output: CudaSlice<f32>, // packed RetinaFace/SCRFD outputs
+    pub host_anchor_output: Vec<f32>,
 
     pub landmark_input: CudaSlice<f32>,
     pub landmark_output_a: CudaSlice<f32>,
@@ -123,6 +125,8 @@ impl GpuWorkspace {
             face_112_batch: stream.alloc_zeros::<f32>(MAX_FACES * face_112_size)?,
             arcface_embeddings_batch: stream.alloc_zeros::<f32>(MAX_FACES * 512)?,
             detect_output: stream.alloc_zeros::<f32>(det_output_size)?,
+            anchor_output: stream.alloc_zeros::<f32>(252_000)?,
+            host_anchor_output: vec![0.0; 252_000],
             landmark_input: stream.alloc_zeros::<f32>(3 * 512 * 512)?,
             landmark_output_a: stream.alloc_zeros::<f32>(278_528)?,
             landmark_output_b: stream.alloc_zeros::<f32>(278_528)?,

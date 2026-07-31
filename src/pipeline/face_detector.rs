@@ -275,6 +275,33 @@ pub enum AnchorDetectorKind {
     Scrfd,
 }
 
+impl AnchorDetectorKind {
+    pub const fn input_name(self) -> &'static str {
+        "input.1"
+    }
+
+    pub const fn output_names(self) -> [&'static str; 9] {
+        match self {
+            Self::RetinaFace => [
+                "448", "471", "494", "451", "474", "497", "454", "477", "500",
+            ],
+            Self::Scrfd => [
+                "446", "466", "486", "449", "469", "489", "452", "472", "492",
+            ],
+        }
+    }
+
+    pub const fn output_lengths() -> [usize; 9] {
+        [
+            12_800, 3_200, 800, 51_200, 12_800, 3_200, 128_000, 32_000, 8_000,
+        ]
+    }
+
+    pub const fn packed_output_len() -> usize {
+        252_000
+    }
+}
+
 impl AnchorDetector {
     pub fn new(kind: AnchorDetectorKind, score_threshold: f32) -> Self {
         Self {
@@ -337,7 +364,8 @@ impl AnchorDetector {
             all_outputs.push(data.to_vec());
         }
 
-        self.decode_anchor(&all_outputs, is as u32, scale)
+        let output_refs: Vec<&[f32]> = all_outputs.iter().map(Vec::as_slice).collect();
+        self.decode_anchor(&output_refs, is as u32, scale)
     }
 
     pub fn detect_gpu(
@@ -345,26 +373,89 @@ impl AnchorDetector {
         mgr: &mut ModelManager,
         gpu: &GpuOps,
         frame_chw: &CudaSlice<f32>,
-        _ws: &mut GpuWorkspace,
+        ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
     ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
-        let frame = gpu.download(frame_chw)?;
-        let active = 3 * frame_h as usize * frame_w as usize;
-        anyhow::ensure!(
-            frame.len() >= active,
-            "detector frame buffer is shorter than {frame_w}x{frame_h}"
-        );
-        let (input, scale) = self.preprocess(&frame[..active], frame_h, frame_w);
-        let faces = self.detect(mgr, &input, scale)?;
-        Ok((faces, scale))
+        let target = self.input_size;
+        let (new_w, new_h, det_scale) = compute_letterbox_dims(frame_h, frame_w, target);
+        let (mul, add) = match self.kind {
+            AnchorDetectorKind::RetinaFace => (1.0 / 128.0, -127.5 / 128.0),
+            AnchorDetectorKind::Scrfd => (1.0, 0.0),
+        };
+        gpu.letterbox_resize(
+            frame_chw,
+            &mut ws.detect_input,
+            frame_h,
+            frame_w,
+            target,
+            new_h,
+            new_w,
+            mul,
+            add,
+        )?;
+
+        let memory = MemoryInfo::new(
+            AllocationDevice::CUDA,
+            mgr.device_id(),
+            AllocatorType::Device,
+            MemoryType::Default,
+        )?;
+        {
+            let (input_ptr, _input_guard) = ws.detect_input.device_ptr(&gpu.stream);
+            let (output_ptr, _output_guard) = ws.anchor_output.device_ptr_mut(&gpu.stream);
+            let input = unsafe {
+                create_cuda_tensor_f32(&memory, input_ptr, &[1, 3, target as i64, target as i64])?
+            };
+            let lengths = AnchorDetectorKind::output_lengths();
+            let columns = [1usize, 1, 1, 4, 4, 4, 10, 10, 10];
+            let mut offset = 0usize;
+            let mut outputs = Vec::with_capacity(9);
+            for (length, columns) in lengths.into_iter().zip(columns) {
+                let pointer = output_ptr + (offset * core::mem::size_of::<f32>()) as u64;
+                let rows = length / columns;
+                outputs.push(unsafe {
+                    create_cuda_tensor_f32(&memory, pointer, &[rows as i64, columns as i64])?
+                });
+                offset += length;
+            }
+            debug_assert_eq!(offset, AnchorDetectorKind::packed_output_len());
+
+            let model_name = match self.kind {
+                AnchorDetectorKind::RetinaFace => "RetinaFace",
+                AnchorDetectorKind::Scrfd => "SCRFD2.5g",
+            };
+            let (session, binding) = mgr.session_and_binding(model_name)?;
+            unsafe {
+                bind_input_raw(binding, self.kind.input_name(), &input)?;
+                for (name, output) in self.kind.output_names().into_iter().zip(outputs.iter()) {
+                    bind_output_raw(binding, name, output)?;
+                }
+            }
+            binding.synchronize_inputs()?;
+            let _ = session.run_binding(binding)?;
+            binding.synchronize_outputs()?;
+            binding.clear();
+        }
+
+        gpu.download_into(&ws.anchor_output, &mut ws.host_anchor_output)?;
+        let lengths = AnchorDetectorKind::output_lengths();
+        let mut offsets = [0usize; 9];
+        for index in 1..offsets.len() {
+            offsets[index] = offsets[index - 1] + lengths[index - 1];
+        }
+        let outputs: [&[f32]; 9] = std::array::from_fn(|index| {
+            &ws.host_anchor_output[offsets[index]..offsets[index] + lengths[index]]
+        });
+        let faces = self.decode_anchor(&outputs, target, det_scale)?;
+        Ok((faces, det_scale))
     }
 
     /// Decode 3-stride anchor-based outputs.
     /// Output layout: [scores_s8, scores_s16, scores_s32, bbox_s8, bbox_s16, bbox_s32, kps_s8, kps_s16, kps_s32]
     fn decode_anchor(
         &self,
-        outputs: &[Vec<f32>],
+        outputs: &[&[f32]],
         input_size: u32,
         det_scale: f32,
     ) -> anyhow::Result<Vec<DetectedFace>> {
@@ -395,7 +486,7 @@ impl AnchorDetector {
 
             for i in 0..n_anchors {
                 let score = scores[i]; // score is already sigmoid in model output
-                if score <= self.score_threshold {
+                if score < self.score_threshold {
                     continue;
                 }
 
@@ -554,4 +645,35 @@ fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     let area_a = (a[2] - a[0] + 1.0) * (a[3] - a[1] + 1.0);
     let area_b = (b[2] - b[0] + 1.0) * (b[3] - b[1] + 1.0);
     inter / (area_a + area_b - inter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnchorDetector, AnchorDetectorKind};
+
+    #[test]
+    fn anchor_decoder_matches_crossswap_stride_geometry_and_inclusive_threshold() {
+        let lengths = AnchorDetectorKind::output_lengths();
+        let mut owned: Vec<Vec<f32>> = lengths.into_iter().map(|len| vec![0.0; len]).collect();
+        owned[0][0] = 0.5;
+        owned[3][..4].copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        owned[6][..10].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+        let outputs: Vec<&[f32]> = owned.iter().map(Vec::as_slice).collect();
+
+        let detector = AnchorDetector::new(AnchorDetectorKind::RetinaFace, 0.5);
+        let faces = detector.decode_anchor(&outputs, 512, 2.0).unwrap();
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].bbox, [-4.0, -8.0, 12.0, 16.0]);
+        assert_eq!(
+            faces[0].kps_5,
+            [
+                [4.0, 8.0],
+                [12.0, 16.0],
+                [20.0, 24.0],
+                [28.0, 32.0],
+                [36.0, 40.0]
+            ]
+        );
+        assert_eq!(faces[0].score, 0.5);
+    }
 }

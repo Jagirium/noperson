@@ -31,3 +31,28 @@ fn anchor_preprocessing_matches_crosswap_normalization() {
     assert_eq!(retina_scale, 512.0);
     assert_eq!(scrfd_scale, 512.0);
 }
+
+#[test]
+fn anchor_iobinding_contract_matches_supplied_onnx_graphs() {
+    assert_eq!(AnchorDetectorKind::RetinaFace.input_name(), "input.1");
+    assert_eq!(AnchorDetectorKind::Scrfd.input_name(), "input.1");
+    assert_eq!(
+        AnchorDetectorKind::RetinaFace.output_names(),
+        [
+            "448", "471", "494", "451", "474", "497", "454", "477", "500"
+        ]
+    );
+    assert_eq!(
+        AnchorDetectorKind::Scrfd.output_names(),
+        [
+            "446", "466", "486", "449", "469", "489", "452", "472", "492"
+        ]
+    );
+    assert_eq!(
+        AnchorDetectorKind::output_lengths(),
+        [
+            12_800, 3_200, 800, 51_200, 12_800, 3_200, 128_000, 32_000, 8_000
+        ]
+    );
+    assert_eq!(AnchorDetectorKind::packed_output_len(), 252_000);
+}
