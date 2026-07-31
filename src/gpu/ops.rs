@@ -26,6 +26,13 @@ pub const PROFILE_STAGES: &[&str] = &[
     "after_paste_back",
 ];
 
+fn profiling_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.to_string_lossy();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
+}
+
 /// Per-stage CUDA events for in-stream profiling (no serialization).
 pub struct ProfilingState {
     pub events: Vec<CudaEvent>,
@@ -92,7 +99,7 @@ pub struct GpuOps {
     semantic_region_stats_fn: CudaFunction,
     semantic_composite_fn: CudaFunction,
     // Profiling (cell for interior mutability — methods only take &self)
-    profiling: RefCell<ProfilingState>,
+    profiling: Option<RefCell<ProfilingState>>,
 }
 
 // SAFETY: `GpuOps` holds a `RefCell<ProfilingState>` which is `!Sync` by default.
@@ -131,11 +138,24 @@ impl GpuOps {
                 .unwrap_or_else(|e| panic!("Failed to load {entry} from {name}.ptx: {e}"))
         };
 
-        // Create timing-enabled events (CU_EVENT_DEFAULT = 0 allows elapsed_ms)
-        let mut events = Vec::with_capacity(PROFILE_STAGES.len());
-        for _ in 0..PROFILE_STAGES.len() {
-            events.push(ctx.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?);
-        }
+        // Profiling inserts eight CUDA events per face and an intentional
+        // synchronization every report window. Keep it entirely off the
+        // production hot path unless explicitly requested.
+        let profiling = if profiling_requested(std::env::var_os("NOPERSON_PROFILE_GPU").as_deref())
+        {
+            let mut events = Vec::with_capacity(PROFILE_STAGES.len());
+            for _ in 0..PROFILE_STAGES.len() {
+                events.push(ctx.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?);
+            }
+            Some(RefCell::new(ProfilingState {
+                events,
+                frame_count: 0,
+                report_every: 30,
+                last_active_idx: 0,
+            }))
+        } else {
+            None
+        };
 
         Ok(Self {
             stream,
@@ -190,12 +210,7 @@ impl GpuOps {
             semantic_mark_valid_fn: load("mask_postprocess", "semantic_mark_valid_kernel"),
             semantic_region_stats_fn: load("mask_postprocess", "semantic_region_stats_kernel"),
             semantic_composite_fn: load("mask_postprocess", "semantic_composite_kernel"),
-            profiling: RefCell::new(ProfilingState {
-                events,
-                frame_count: 0,
-                report_every: 30,
-                last_active_idx: 0,
-            }),
+            profiling,
         })
     }
 
@@ -203,7 +218,10 @@ impl GpuOps {
 
     /// Record a CUDA event at this point in the stream. Cheap (~µs).
     pub fn profile_mark(&self, idx: usize) -> Result<(), DriverError> {
-        let prof = self.profiling.borrow();
+        let Some(profiling) = &self.profiling else {
+            return Ok(());
+        };
+        let prof = profiling.borrow();
         if idx < prof.events.len() {
             prof.events[idx].record(&self.stream)?;
         }
@@ -212,13 +230,18 @@ impl GpuOps {
 
     /// Update last_active_idx (must be called with highest recorded index).
     pub fn profile_set_active(&self, idx: usize) {
-        self.profiling.borrow_mut().last_active_idx = idx;
+        if let Some(profiling) = &self.profiling {
+            profiling.borrow_mut().last_active_idx = idx;
+        }
     }
 
     /// Tick frame counter; every `report_every` frames, synchronize the last
     /// event, compute elapsed times between consecutive events, and log them.
     pub fn profile_tick(&self) -> Result<(), DriverError> {
-        let mut prof = self.profiling.borrow_mut();
+        let Some(profiling) = &self.profiling else {
+            return Ok(());
+        };
+        let mut prof = profiling.borrow_mut();
         prof.frame_count += 1;
         if !prof.frame_count.is_multiple_of(prof.report_every) {
             return Ok(());
@@ -1443,5 +1466,20 @@ impl GpuOps {
     /// Synchronize the CUDA stream.
     pub fn sync(&self) -> Result<(), DriverError> {
         self.stream.synchronize()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profiling_requested;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn gpu_profiling_is_explicitly_opt_in() {
+        assert!(!profiling_requested(None));
+        assert!(!profiling_requested(Some(OsStr::new("0"))));
+        assert!(!profiling_requested(Some(OsStr::new("false"))));
+        assert!(profiling_requested(Some(OsStr::new("1"))));
+        assert!(profiling_requested(Some(OsStr::new("TRUE"))));
     }
 }
