@@ -42,6 +42,8 @@ pub struct GpuOps {
     denormalize_fn: CudaFunction,
     interlace_extract_fn: CudaFunction,
     interlace_scatter_fn: CudaFunction,
+    enhancer_pack_tiles_fn: CudaFunction,
+    enhancer_scatter_tiles_fn: CudaFunction,
     warp_affine_fn: CudaFunction,
     matmul_512_fn: CudaFunction,
     l2_normalize_fn: CudaFunction,
@@ -108,6 +110,8 @@ impl GpuOps {
             denormalize_fn: load("normalize", "denormalize_kernel"),
             interlace_extract_fn: load("interlace", "interlace_extract_kernel"),
             interlace_scatter_fn: load("interlace", "interlace_scatter_kernel"),
+            enhancer_pack_tiles_fn: load("enhancer_tiles", "enhancer_pack_tiles_kernel"),
+            enhancer_scatter_tiles_fn: load("enhancer_tiles", "enhancer_scatter_tiles_kernel"),
             warp_affine_fn: load("warp_affine", "warp_affine_chw_kernel"),
             resize_fn: load("warp_affine", "resize_chw_kernel"),
             paste_back_fn: load("paste_back", "paste_back_kernel"),
@@ -536,6 +540,53 @@ impl GpuOps {
         b.arg(&tile_size);
         b.arg(&n);
         unsafe { b.launch(LaunchConfig::for_num_elems(n)) }?;
+        Ok(())
+    }
+
+    /// Pack a CHW frame into row-major contiguous tiles, zero-padding edges.
+    pub fn enhancer_pack_tiles(
+        &self,
+        frame: &CudaSlice<f32>,
+        tiles: &mut CudaSlice<f32>,
+        frame_h: u32,
+        frame_w: u32,
+        tiles_x: u32,
+        tile_size: u32,
+        tile_count: u32,
+    ) -> Result<(), DriverError> {
+        let total = tile_count * 3 * tile_size * tile_size;
+        let mut b = self.stream.launch_builder(&self.enhancer_pack_tiles_fn);
+        b.arg(frame);
+        b.arg(tiles);
+        b.arg(&frame_h);
+        b.arg(&frame_w);
+        b.arg(&tiles_x);
+        b.arg(&tile_size);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    /// Scatter batched enhanced tiles into a cropped CHW output frame.
+    pub fn enhancer_scatter_tiles(
+        &self,
+        tiles: &CudaSlice<f32>,
+        frame: &mut CudaSlice<f32>,
+        output_h: u32,
+        output_w: u32,
+        tiles_x: u32,
+        output_tile: u32,
+    ) -> Result<(), DriverError> {
+        let total = 3 * output_h * output_w;
+        let mut b = self.stream.launch_builder(&self.enhancer_scatter_tiles_fn);
+        b.arg(tiles);
+        b.arg(frame);
+        b.arg(&output_h);
+        b.arg(&output_w);
+        b.arg(&tiles_x);
+        b.arg(&output_tile);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())
     }
 

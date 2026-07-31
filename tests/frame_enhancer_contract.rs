@@ -1,4 +1,9 @@
-use noperson::pipeline::frame_enhancer::{EnhancerModel, TilePlan};
+use noperson::pipeline::frame_enhancer::{CROSSSWAP_TILE_SIZE, EnhancerModel, TilePlan};
+
+#[test]
+fn production_enhancer_uses_crosswap_frame_worker_tile_size() {
+    assert_eq!(CROSSSWAP_TILE_SIZE, 512);
+}
 
 #[test]
 fn crosswap_enhancer_names_select_the_exact_registry_model_and_scale() {
@@ -44,6 +49,16 @@ fn tile_plan_matches_crosswap_batch_order_padding_and_output_crop() {
         .map(|tile| (tile.output_x, tile.output_y))
         .collect();
     assert_eq!(output_origins, [(0, 0), (1024, 0), (0, 1024), (1024, 1024)]);
+}
+
+#[test]
+fn tile_plan_sizes_one_persistent_batched_workspace() {
+    let plan = TilePlan::new(500, 300, 256, 4).unwrap();
+
+    assert_eq!(plan.input_shape(), [4, 3, 256, 256]);
+    assert_eq!(plan.batched_input_elements().unwrap(), 4 * 3 * 256 * 256);
+    assert_eq!(plan.batched_output_elements().unwrap(), 4 * 3 * 1024 * 1024);
+    assert_eq!(plan.output_elements().unwrap(), 3 * 2000 * 1200);
 }
 
 #[test]

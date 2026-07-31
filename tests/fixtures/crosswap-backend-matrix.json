@@ -340,7 +340,7 @@
         },
         {
           "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_realesrganx2",
-          "rust": "noperson::pipeline::frame_enhancer::EnhancerModel::RealEsrganX2Plus",
+          "rust": "noperson::pipeline::frame_enhancer::FrameEnhancer::enhance_into",
           "status": "partial",
           "evidence": [
             "tests/frame_enhancer_contract.rs::crosswap_enhancer_names_select_the_exact_registry_model_and_scale"
@@ -348,7 +348,7 @@
         },
         {
           "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_realesrganx4",
-          "rust": "noperson::pipeline::frame_enhancer::EnhancerModel::RealEsrganX4Plus",
+          "rust": "noperson::pipeline::frame_enhancer::FrameEnhancer::enhance_into",
           "status": "partial",
           "evidence": [
             "tests/frame_enhancer_contract.rs::crosswap_enhancer_names_select_the_exact_registry_model_and_scale"
@@ -356,7 +356,7 @@
         },
         {
           "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_realesrx4v3",
-          "rust": "noperson::pipeline::frame_enhancer::EnhancerModel::RealEsrGeneralX4V3",
+          "rust": "noperson::pipeline::frame_enhancer::FrameEnhancer::enhance_into",
           "status": "partial",
           "evidence": [
             "tests/frame_enhancer_contract.rs::crosswap_enhancer_names_select_the_exact_registry_model_and_scale"
@@ -364,7 +364,7 @@
         },
         {
           "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_bsrganx2",
-          "rust": "noperson::pipeline::frame_enhancer::EnhancerModel::BsrganX2",
+          "rust": "noperson::pipeline::frame_enhancer::FrameEnhancer::enhance_into",
           "status": "partial",
           "evidence": [
             "tests/frame_enhancer_contract.rs::crosswap_enhancer_names_select_the_exact_registry_model_and_scale"
@@ -372,7 +372,7 @@
         },
         {
           "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_bsrganx4",
-          "rust": "noperson::pipeline::frame_enhancer::EnhancerModel::BsrganX4",
+          "rust": "noperson::pipeline::frame_enhancer::FrameEnhancer::enhance_into",
           "status": "partial",
           "evidence": [
             "tests/frame_enhancer_contract.rs::crosswap_enhancer_names_select_the_exact_registry_model_and_scale"
@@ -380,7 +380,7 @@
         },
         {
           "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_ultrasharpx4",
-          "rust": "noperson::pipeline::frame_enhancer::EnhancerModel::UltraSharpX4",
+          "rust": "noperson::pipeline::frame_enhancer::FrameEnhancer::enhance_into",
           "status": "partial",
           "evidence": [
             "tests/frame_enhancer_contract.rs::crosswap_enhancer_names_select_the_exact_registry_model_and_scale"
@@ -388,7 +388,7 @@
         },
         {
           "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_ultramixx4",
-          "rust": "noperson::pipeline::frame_enhancer::EnhancerModel::UltraMixX4",
+          "rust": "noperson::pipeline::frame_enhancer::FrameEnhancer::enhance_into",
           "status": "partial",
           "evidence": [
             "tests/frame_enhancer_contract.rs::crosswap_enhancer_names_select_the_exact_registry_model_and_scale"
