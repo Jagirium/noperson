@@ -184,5 +184,9 @@ sha256sum "${RELEASE_ARTIFACT}.tar.gz" >"${RELEASE_ARTIFACT}.tar.gz.sha256"
 chown "$HOST_UID:$HOST_GID" "${RELEASE_ARTIFACT}.tar.gz" "${RELEASE_ARTIFACT}.tar.gz.sha256"
 BUILD
 
+test -f "$repo_root/dist/${artifact}.tar.gz" \
+    || die 'container did not export archive'
+test -f "$repo_root/dist/${artifact}.tar.gz.sha256" \
+    || die 'container did not export checksum'
 printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.gz"
 printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.gz.sha256"

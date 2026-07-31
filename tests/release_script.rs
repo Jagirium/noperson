@@ -14,6 +14,8 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
         "--group=0",
         "sha256sum",
         "git diff-index --quiet HEAD --",
+        "container did not export archive",
+        "container did not export checksum",
     ] {
         assert!(
             script.contains(required),
