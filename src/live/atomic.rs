@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use cudarc::driver::{CudaSlice, CudaStream};
 
 use super::{LiveEngine, ProcessedRgb, sha256_file};
 use crate::engine::{
     ActivationError, ActivationOutcome, BuildCancellation, BuildRequestOutcome, BuildSnapshot,
-    EngineGeneration, EngineSpec, EngineSupervisor, FrameOutcome, ShadowBuild, ShadowBuildQueue,
-    SupervisorPhase, SupervisorSnapshot,
+    EngineGeneration, EngineSpec, FrameOutcome, OwnedEngineSupervisor, ShadowBuild,
+    ShadowBuildQueue, SupervisorPhase, SupervisorSnapshot,
 };
 use crate::gpu::ops::GpuOps;
 use crate::pipeline::frame_processor::FrameResult;
@@ -60,14 +60,14 @@ impl LiveShadowBuilder {
     }
 }
 
-impl ShadowBuild<Mutex<LiveEngine>> for LiveShadowBuilder {
+impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
     type Error = anyhow::Error;
 
     fn build(
         &mut self,
         spec: &EngineSpec,
         cancellation: &BuildCancellation,
-    ) -> Result<Mutex<LiveEngine>, Self::Error> {
+    ) -> Result<LiveEngine, Self::Error> {
         anyhow::ensure!(!cancellation.is_cancelled(), "shadow build cancelled");
         let identity_path = self
             .identities
@@ -82,16 +82,15 @@ impl ShadowBuild<Mutex<LiveEngine>> for LiveShadowBuilder {
             cancellation,
         )?;
         anyhow::ensure!(!cancellation.is_cancelled(), "shadow build cancelled");
-        Ok(Mutex::new(engine))
+        Ok(engine)
     }
 }
 
-/// Real live backend controlled by an atomic generation pointer.
+/// Real live backend with frame-boundary generation activation.
 pub struct AtomicLiveEngine {
-    supervisor: EngineSupervisor<Mutex<LiveEngine>>,
-    builds: ShadowBuildQueue<Mutex<LiveEngine>>,
+    supervisor: OwnedEngineSupervisor<LiveEngine>,
+    builds: ShadowBuildQueue<LiveEngine>,
     identities: Arc<IdentityCatalog>,
-    activation_gate: Mutex<()>,
 }
 
 impl AtomicLiveEngine {
@@ -107,10 +106,9 @@ impl AtomicLiveEngine {
         let identities = Arc::clone(&builder.identities);
         let builds = ShadowBuildQueue::spawn(builder)?;
         Ok(Self {
-            supervisor: EngineSupervisor::new(initial, probation_frames),
+            supervisor: OwnedEngineSupervisor::new(initial, probation_frames),
             builds,
             identities,
-            activation_gate: Mutex::new(()),
         })
     }
 
@@ -129,11 +127,7 @@ impl AtomicLiveEngine {
     }
 
     /// Activate a ready shadow only at the caller's next frame boundary.
-    pub fn poll_activation(&self) -> Result<Option<ActivationOutcome>, ActivationError> {
-        let _activation = self
-            .activation_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub fn poll_activation(&mut self) -> Result<Option<ActivationOutcome>, ActivationError> {
         if self.supervisor.snapshot().phase != SupervisorPhase::Stable {
             return Ok(None);
         }
@@ -144,52 +138,40 @@ impl AtomicLiveEngine {
     }
 
     pub fn process_chw(
-        &self,
+        &mut self,
         frame: &mut CudaSlice<f32>,
         height: u32,
         width: u32,
     ) -> anyhow::Result<FrameResult> {
         self.poll_activation()?;
-        let generation = self.supervisor.begin_frame();
-        let id = generation.id().to_owned();
-        let result = generation
-            .engine()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("live engine generation lock poisoned"))?
-            .process_chw(frame, height, width);
-        self.supervisor.record_frame(
-            &id,
-            if result.is_ok() {
-                FrameOutcome::Success
-            } else {
-                FrameOutcome::Failure
-            },
-        );
+        let result = {
+            let (_, engine) = self.supervisor.active_mut();
+            engine.process_chw(frame, height, width)
+        };
+        self.supervisor.record_frame(if result.is_ok() {
+            FrameOutcome::Success
+        } else {
+            FrameOutcome::Failure
+        });
         result
     }
 
     pub fn process_rgb(
-        &self,
+        &mut self,
         data: &[u8],
         width: u32,
         height: u32,
     ) -> anyhow::Result<ProcessedRgb> {
         self.poll_activation()?;
-        let generation = self.supervisor.begin_frame();
-        let id = generation.id().to_owned();
-        let result = generation
-            .engine()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("live engine generation lock poisoned"))?
-            .process_rgb(data, width, height);
-        self.supervisor.record_frame(
-            &id,
-            if result.is_ok() {
-                FrameOutcome::Success
-            } else {
-                FrameOutcome::Failure
-            },
-        );
+        let result = {
+            let (_, engine) = self.supervisor.active_mut();
+            engine.process_rgb(data, width, height)
+        };
+        self.supervisor.record_frame(if result.is_ok() {
+            FrameOutcome::Success
+        } else {
+            FrameOutcome::Failure
+        });
         result
     }
 

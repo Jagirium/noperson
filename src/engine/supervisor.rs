@@ -124,6 +124,107 @@ pub struct EngineSupervisor<E> {
     probation_frames: u32,
 }
 
+/// Single-owner supervisor for mutable engines on a dedicated frame worker.
+///
+/// Unlike `EngineSupervisor`, this variant needs neither `ArcSwap` nor a lock
+/// on frame processing. Ready generations cross the background queue once and
+/// are then moved between active, probation, and rollback slots.
+pub struct OwnedEngineSupervisor<E> {
+    active: EngineGeneration<E>,
+    rollback: Option<EngineGeneration<E>>,
+    probation_frames: u32,
+    probation_remaining: u32,
+}
+
+impl<E> OwnedEngineSupervisor<E> {
+    pub fn new(initial: EngineGeneration<E>, probation_frames: u32) -> Self {
+        Self {
+            active: initial,
+            rollback: None,
+            probation_frames,
+            probation_remaining: 0,
+        }
+    }
+
+    pub fn active_id(&self) -> &str {
+        self.active.id()
+    }
+
+    pub fn active_mut(&mut self) -> (&str, &mut E) {
+        (&self.active.id, &mut self.active.engine)
+    }
+
+    pub fn activate(
+        &mut self,
+        candidate: EngineGeneration<E>,
+    ) -> Result<ActivationOutcome, ActivationError> {
+        if self.active.id() == candidate.id() {
+            return Ok(ActivationOutcome::AlreadyActive);
+        }
+        if self.rollback.is_some() {
+            return Err(ActivationError::ProbationInProgress {
+                candidate_generation: self.active.id().to_owned(),
+            });
+        }
+
+        if self.probation_frames == 0 {
+            self.active = candidate;
+        } else {
+            let previous = std::mem::replace(&mut self.active, candidate);
+            self.rollback = Some(previous);
+            self.probation_remaining = self.probation_frames;
+        }
+        Ok(ActivationOutcome::Activated)
+    }
+
+    pub fn record_frame(&mut self, outcome: FrameOutcome) -> ProbationUpdate {
+        let Some(mut previous) = self.rollback.take() else {
+            return ProbationUpdate::Ignored;
+        };
+
+        match outcome {
+            FrameOutcome::Failure => {
+                let rejected_generation = self.active.id().to_owned();
+                std::mem::swap(&mut self.active, &mut previous);
+                self.probation_remaining = 0;
+                ProbationUpdate::RolledBack {
+                    rejected_generation,
+                    restored_generation: self.active.id().to_owned(),
+                }
+            }
+            FrameOutcome::Success if self.probation_remaining <= 1 => {
+                self.probation_remaining = 0;
+                ProbationUpdate::Promoted {
+                    generation: self.active.id().to_owned(),
+                }
+            }
+            FrameOutcome::Success => {
+                self.probation_remaining -= 1;
+                self.rollback = Some(previous);
+                ProbationUpdate::Pending {
+                    remaining_frames: self.probation_remaining,
+                }
+            }
+        }
+    }
+
+    pub fn snapshot(&self) -> SupervisorSnapshot {
+        SupervisorSnapshot {
+            phase: if self.rollback.is_some() {
+                SupervisorPhase::Probation
+            } else {
+                SupervisorPhase::Stable
+            },
+            active_generation: self.active.id().to_owned(),
+            rollback_generation: self
+                .rollback
+                .as_ref()
+                .map(|generation| generation.id().to_owned()),
+            probation_remaining_frames: self.rollback.as_ref().map(|_| self.probation_remaining),
+        }
+    }
+}
+
 impl<E> EngineSupervisor<E> {
     pub fn new(initial: EngineGeneration<E>, probation_frames: u32) -> Self {
         Self {

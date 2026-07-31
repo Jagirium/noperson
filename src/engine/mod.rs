@@ -11,5 +11,5 @@ pub use builder::{
 pub use spec::{EngineSpec, EngineSpecError, ModelArtifact, ModelRole};
 pub use supervisor::{
     ActivationError, ActivationOutcome, EngineFrame, EngineGeneration, EngineSupervisor,
-    FrameOutcome, ProbationUpdate, SupervisorPhase, SupervisorSnapshot,
+    FrameOutcome, OwnedEngineSupervisor, ProbationUpdate, SupervisorPhase, SupervisorSnapshot,
 };

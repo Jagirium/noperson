@@ -4,7 +4,8 @@ use noperson::config::parameters::FaceSwapParams;
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
 use noperson::engine::{
     ActivationError, ActivationOutcome, EngineGeneration, EngineSpec, EngineSupervisor,
-    FrameOutcome, ModelArtifact, ModelRole, ProbationUpdate, SupervisorPhase,
+    FrameOutcome, ModelArtifact, ModelRole, OwnedEngineSupervisor, ProbationUpdate,
+    SupervisorPhase,
 };
 
 fn spec(seed: char) -> EngineSpec {
@@ -127,4 +128,23 @@ fn activating_current_generation_is_idempotent() {
         ActivationOutcome::AlreadyActive
     );
     assert_eq!(*supervisor.begin_frame().engine(), "old");
+}
+
+#[test]
+fn single_owner_supervisor_exposes_the_active_engine_without_a_lock() {
+    let mut supervisor = OwnedEngineSupervisor::new(generation('a', "old"), 2);
+    let old_id = supervisor.active_id().to_owned();
+    assert_eq!(*supervisor.active_mut().1, "old");
+
+    supervisor.activate(generation('b', "new")).unwrap();
+    let candidate_id = supervisor.active_id().to_owned();
+    assert_ne!(candidate_id, old_id);
+    assert_eq!(*supervisor.active_mut().1, "new");
+
+    assert!(matches!(
+        supervisor.record_frame(FrameOutcome::Failure),
+        ProbationUpdate::RolledBack { .. }
+    ));
+    assert_eq!(supervisor.active_id(), old_id);
+    assert_eq!(*supervisor.active_mut().1, "old");
 }
