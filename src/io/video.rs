@@ -3,9 +3,11 @@
 //! Uses ffmpeg-next for video decoding/encoding when available.
 //! The pipeline operates on raw RGB frames via the `FrameSource` trait.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
 
@@ -46,6 +48,236 @@ pub fn ffmpeg_encode_args(path: &Path, width: u32, height: u32, fps: f32) -> Vec
     ]
 }
 
+pub fn ffmpeg_remux_args(video_only: &Path, original: &Path, output: &Path) -> Vec<String> {
+    vec![
+        "-v".to_owned(),
+        "error".to_owned(),
+        "-i".to_owned(),
+        video_only.to_string_lossy().into_owned(),
+        "-i".to_owned(),
+        original.to_string_lossy().into_owned(),
+        "-map".to_owned(),
+        "0:v:0".to_owned(),
+        "-map".to_owned(),
+        "1:a?".to_owned(),
+        "-c:v".to_owned(),
+        "copy".to_owned(),
+        "-c:a".to_owned(),
+        "copy".to_owned(),
+        "-shortest".to_owned(),
+        "-y".to_owned(),
+        output.to_string_lossy().into_owned(),
+    ]
+}
+
+pub fn remux_original_audio(
+    video_only: &Path,
+    original: &Path,
+    output: &Path,
+) -> anyhow::Result<()> {
+    let result = Command::new("ffmpeg")
+        .args(ffmpeg_remux_args(video_only, original, output))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+    anyhow::ensure!(
+        result.status.success(),
+        "ffmpeg audio remux failed: {}",
+        String::from_utf8_lossy(&result.stderr).trim()
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct Timeline<T> {
+    initial: T,
+    markers: BTreeMap<u64, T>,
+}
+
+impl<T> Timeline<T> {
+    pub fn new(initial: T) -> Self {
+        Self {
+            initial,
+            markers: BTreeMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, frame: u64, value: T) -> Option<T> {
+        self.markers.insert(frame, value)
+    }
+
+    pub fn at(&self, frame: u64) -> &T {
+        self.markers
+            .range(..=frame)
+            .next_back()
+            .map_or(&self.initial, |(_, value)| value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum VideoState {
+    #[default]
+    Idle,
+    Running {
+        processed: u64,
+        total: Option<u64>,
+    },
+    Cancelling {
+        processed: u64,
+        total: Option<u64>,
+    },
+    Cancelled {
+        processed: u64,
+    },
+    Completed {
+        processed: u64,
+    },
+    Failed {
+        processed: u64,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VideoLifecycle {
+    state: VideoState,
+}
+
+impl VideoLifecycle {
+    pub fn state(&self) -> &VideoState {
+        &self.state
+    }
+
+    pub fn start(&mut self, total: Option<u64>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(self.state, VideoState::Idle),
+            "video job already started"
+        );
+        self.state = VideoState::Running {
+            processed: 0,
+            total,
+        };
+        Ok(())
+    }
+
+    pub fn frame_completed(&mut self) -> anyhow::Result<()> {
+        match &mut self.state {
+            VideoState::Running { processed, .. } => {
+                *processed += 1;
+                Ok(())
+            }
+            _ => anyhow::bail!("frame completed outside a running video job"),
+        }
+    }
+
+    pub fn request_cancel(&mut self) -> anyhow::Result<()> {
+        let state = std::mem::take(&mut self.state);
+        self.state = match state {
+            VideoState::Running { processed, total } => VideoState::Cancelling { processed, total },
+            state => {
+                self.state = state;
+                anyhow::bail!("video job is not running")
+            }
+        };
+        Ok(())
+    }
+
+    pub fn finish_cancelled(&mut self) -> anyhow::Result<()> {
+        let state = std::mem::take(&mut self.state);
+        self.state = match state {
+            VideoState::Cancelling { processed, .. } => VideoState::Cancelled { processed },
+            state => {
+                self.state = state;
+                anyhow::bail!("video cancellation was not requested")
+            }
+        };
+        Ok(())
+    }
+
+    pub fn complete(&mut self) -> anyhow::Result<()> {
+        let state = std::mem::take(&mut self.state);
+        self.state = match state {
+            VideoState::Running { processed, .. } => VideoState::Completed { processed },
+            state => {
+                self.state = state;
+                anyhow::bail!("video job is not running")
+            }
+        };
+        Ok(())
+    }
+
+    pub fn fail(&mut self, message: impl Into<String>) -> anyhow::Result<()> {
+        let state = std::mem::take(&mut self.state);
+        self.state = match state {
+            VideoState::Running { processed, .. } | VideoState::Cancelling { processed, .. } => {
+                VideoState::Failed {
+                    processed,
+                    message: message.into(),
+                }
+            }
+            state => {
+                self.state = state;
+                anyhow::bail!("video job is not active")
+            }
+        };
+        Ok(())
+    }
+}
+
+/// Drive decode → transform → encode while exposing deterministic frame
+/// markers and cancellation only at complete frame boundaries.
+pub fn process_video_frames<S, K, T, F>(
+    source: &mut S,
+    sink: &mut K,
+    lifecycle: &mut VideoLifecycle,
+    cancel: &AtomicBool,
+    timeline: &Timeline<T>,
+    mut transform: F,
+) -> anyhow::Result<()>
+where
+    S: FrameSource,
+    K: FrameSink,
+    F: FnMut(Frame, &T, u64) -> anyhow::Result<Frame>,
+{
+    lifecycle.start(source.frame_count())?;
+    let mut frame_index = 0_u64;
+    let (width, height) = source.dimensions();
+    let mut frame = Frame::new(width, height);
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            lifecycle.request_cancel()?;
+            lifecycle.finish_cancelled()?;
+            return Ok(());
+        }
+        let has_frame = match source.next_frame_into(&mut frame) {
+            Ok(has_frame) => has_frame,
+            Err(error) => {
+                lifecycle.fail(error.to_string())?;
+                return Err(error);
+            }
+        };
+        if !has_frame {
+            lifecycle.complete()?;
+            return Ok(());
+        }
+        let processed = match transform(frame, timeline.at(frame_index), frame_index) {
+            Ok(frame) => frame,
+            Err(error) => {
+                lifecycle.fail(error.to_string())?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = sink.write_frame(&processed.data, processed.width, processed.height) {
+            lifecycle.fail(error.to_string())?;
+            return Err(error);
+        }
+        lifecycle.frame_completed()?;
+        frame_index += 1;
+        frame = processed;
+    }
+}
+
 /// Frame source — produces RGB frames one at a time.
 ///
 /// NOT `Send` on Linux — webcam backends hold raw fds in thread-local state.
@@ -53,6 +285,23 @@ pub fn ffmpeg_encode_args(path: &Path, width: u32, height: u32, fps: f32) -> Vec
 pub trait FrameSource {
     /// Get the next frame as HWC u8 RGB. Returns None at EOF.
     fn next_frame(&mut self) -> Option<Frame>;
+
+    /// Fallible decode path used by batch processing.
+    fn next_frame_result(&mut self) -> anyhow::Result<Option<Frame>> {
+        Ok(self.next_frame())
+    }
+
+    /// Fill a caller-owned frame buffer. Streaming decoders override this to
+    /// avoid allocating one RGB vector per frame.
+    fn next_frame_into(&mut self, frame: &mut Frame) -> anyhow::Result<bool> {
+        match self.next_frame_result()? {
+            Some(next) => {
+                *frame = next;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
 
     /// Frame dimensions (width, height).
     fn dimensions(&self) -> (u32, u32);
@@ -194,6 +443,7 @@ pub struct FfmpegVideoSource {
     height: u32,
     fps: f32,
     frame_count: Option<u64>,
+    finished: bool,
 }
 
 impl FfmpegVideoSource {
@@ -244,21 +494,71 @@ impl FfmpegVideoSource {
             height: stream.height,
             fps,
             frame_count,
+            finished: false,
         })
+    }
+
+    fn read_frame_into(&mut self, frame: &mut Frame) -> anyhow::Result<bool> {
+        if self.finished {
+            return Ok(false);
+        }
+        frame.width = self.width;
+        frame.height = self.height;
+        frame
+            .data
+            .resize(self.width as usize * self.height as usize * 3, 0);
+        let mut offset = 0;
+        while offset < frame.data.len() {
+            match self.stdout.read(&mut frame.data[offset..]) {
+                Ok(0) if offset == 0 => {
+                    let status = self.child.wait()?;
+                    self.finished = true;
+                    let mut stderr = String::new();
+                    if let Some(mut pipe) = self.child.stderr.take() {
+                        pipe.read_to_string(&mut stderr)?;
+                    }
+                    anyhow::ensure!(
+                        status.success(),
+                        "ffmpeg decoder exited with {status}: {}",
+                        stderr.trim()
+                    );
+                    return Ok(false);
+                }
+                Ok(0) => anyhow::bail!(
+                    "ffmpeg produced a truncated RGB frame: {offset}/{} bytes",
+                    frame.data.len()
+                ),
+                Ok(read) => offset += read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(true)
+    }
+
+    fn read_frame_result(&mut self) -> anyhow::Result<Option<Frame>> {
+        let mut frame = Frame::new(self.width, self.height);
+        Ok(self.read_frame_into(&mut frame)?.then_some(frame))
     }
 }
 
 impl FrameSource for FfmpegVideoSource {
     fn next_frame(&mut self) -> Option<Frame> {
-        let mut data = vec![0_u8; self.width as usize * self.height as usize * 3];
-        match self.stdout.read_exact(&mut data) {
-            Ok(()) => Some(Frame::from_data(data, self.width, self.height)),
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => None,
+        match self.read_frame_result() {
+            Ok(frame) => frame,
             Err(error) => {
                 tracing::error!("ffmpeg decode failed: {error}");
                 None
             }
         }
+    }
+
+    fn next_frame_result(&mut self) -> anyhow::Result<Option<Frame>> {
+        self.read_frame_result()
+    }
+
+    fn next_frame_into(&mut self, frame: &mut Frame) -> anyhow::Result<bool> {
+        self.read_frame_into(frame)
     }
 
     fn dimensions(&self) -> (u32, u32) {
@@ -276,8 +576,10 @@ impl FrameSource for FfmpegVideoSource {
 
 impl Drop for FfmpegVideoSource {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if !self.finished {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
