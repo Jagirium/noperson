@@ -43,7 +43,6 @@ fn init_pipeline() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager)> {
     manager.set_compute_stream(stream.cu_stream() as *mut ());
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
-    manager.load("Inswapper128ArcFaceBatch", "w600k_r50_b4.onnx")?;
     manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
     manager.load_emap(CANONICAL_SWAPPER_FILENAME)?;
     Ok((stream, gpu, manager))
@@ -572,62 +571,6 @@ fn test_swap_changes_face() -> anyhow::Result<()> {
     assert!(
         changed > pre_active / 10,
         "Swap should change at least 10% of pixels, got {pct:.1}%"
-    );
-    Ok(())
-}
-
-/// Test: batched ArcFace recognize — 3 copies of the same face must produce
-/// identical embeddings, and each must match the single-face recognize_gpu result.
-#[test]
-#[ignore = "requires CUDA + ONNX models"]
-fn test_recognize_batch_gpu() -> anyhow::Result<()> {
-    init_tracing();
-
-    let (stream, gpu, mut manager) = init_pipeline()?;
-    let (d_frame_chw, kps, h, w) = load_and_detect(&gpu, &mut manager, &stream)?;
-
-    let mut ws = GpuWorkspace::new(&stream)?;
-
-    // 1. Single-face embedding (ground truth)
-    let emb_single =
-        FaceRecognizer::recognize_gpu(&mut manager, &gpu, &d_frame_chw, h, w, &kps, &mut ws)?;
-
-    // 2. Batch: 3 copies of the same face
-    let batch_kps = vec![kps, kps, kps];
-    let emb_batch = FaceRecognizer::recognize_batch_gpu(
-        &mut manager,
-        &gpu,
-        &d_frame_chw,
-        h,
-        w,
-        &batch_kps,
-        &mut ws,
-    )?;
-
-    assert_eq!(emb_batch.len(), 3, "Batch must return 3 embeddings");
-
-    // 3. All batch embeddings must match the single-face embedding
-    for (i, emb) in emb_batch.iter().enumerate() {
-        let cos = FaceRecognizer::cosine_similarity(&emb_single, emb);
-        eprintln!("Batch embedding {i}: cos with single = {cos:.6}");
-        assert!(
-            cos > 0.99,
-            "Batch embedding {i} must match single: cos={cos:.4}"
-        );
-    }
-
-    // 4. Batch embeddings must be identical to each other
-    let cos01 = FaceRecognizer::cosine_similarity(&emb_batch[0], &emb_batch[1]);
-    let cos02 = FaceRecognizer::cosine_similarity(&emb_batch[0], &emb_batch[2]);
-    eprintln!("Batch 0↔1: {cos01:.6}, 0↔2: {cos02:.6}");
-    assert!(
-        cos01 > 0.99 && cos02 > 0.99,
-        "Batch embeddings must be identical"
-    );
-
-    eprintln!(
-        "Batch recognize: {} faces in 1 ort call — all match single-face",
-        emb_batch.len()
     );
     Ok(())
 }

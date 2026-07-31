@@ -11,8 +11,6 @@ use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DriverError, PinnedHost
 pub const MAX_WIDTH: usize = 1920;
 pub const MAX_HEIGHT: usize = 1080;
 pub const MAX_SWAP_DIM: usize = 4;
-/// Maximum faces processed per frame (ArcFace batch size).
-pub const MAX_FACES: usize = 8;
 
 /// Pre-allocated GPU buffers for the entire pipeline.
 /// Note: the main frame buffers (frame_chw, frame_u8_in/out) live OUTSIDE the
@@ -47,12 +45,6 @@ pub struct GpuWorkspace {
 
     // ArcFace output: [1, 512] — pre-allocated for IoBinding path
     pub arcface_embedding: CudaSlice<f32>, // [1, 512]
-
-    // Batched ArcFace buffers — for recognize_batch_gpu (multiple faces in 1 ort call)
-    pub face_112_batch: CudaSlice<f32>, // [MAX_FACES, 3, 112, 112]
-    pub arcface_embeddings_batch: CudaSlice<f32>, // [MAX_FACES, 512]
-    pub host_face_112_batch: Vec<f32>,  // [MAX_FACES * 3 * 112 * 112]
-    pub host_embeddings_batch: Vec<f32>, // [MAX_FACES * 512]
 
     // Swap (batched dim=1..4 → up to 16 tiles)
     pub swap_batch_in: CudaSlice<f32>,     // [16, 3, 128, 128]
@@ -126,8 +118,6 @@ impl GpuWorkspace {
 
         Ok(Self {
             detect_input: stream.alloc_zeros::<f32>(detect_size)?,
-            face_112_batch: stream.alloc_zeros::<f32>(MAX_FACES * face_112_size)?,
-            arcface_embeddings_batch: stream.alloc_zeros::<f32>(MAX_FACES * 512)?,
             detect_output: stream.alloc_zeros::<f32>(det_output_size)?,
             anchor_output: stream.alloc_zeros::<f32>(252_000)?,
             host_anchor_output: vec![0.0; 252_000],
@@ -180,8 +170,6 @@ impl GpuWorkspace {
             mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
 
             blur_kernel: stream.alloc_zeros::<f32>(MAX_BLUR_KS)?,
-            host_face_112_batch: vec![0.0f32; MAX_FACES * face_112_size],
-            host_embeddings_batch: vec![0.0f32; MAX_FACES * 512],
             blur_ks_current: 0,
             blur_sigma_current: -1.0,
 

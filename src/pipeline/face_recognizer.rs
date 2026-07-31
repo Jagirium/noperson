@@ -10,7 +10,7 @@ use crate::math::affine;
 use crate::math::constants::ARCFACE_DST;
 use crate::models::manager::ModelManager;
 use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
-use crate::pipeline::workspace::{GpuWorkspace, MAX_FACES};
+use crate::pipeline::workspace::GpuWorkspace;
 
 /// Face recognition and latent computation.
 pub struct FaceRecognizer;
@@ -114,107 +114,6 @@ impl FaceRecognizer {
 
         gpu.download_into(&ws.arcface_embedding, &mut ws.host_embedding)?;
         Ok(ws.host_embedding.clone())
-    }
-
-    /// Batched GPU recognize: extract embeddings for multiple faces in 1 ort call.
-    ///
-    /// Warps each face to 112×112, stacks into [N, 3, 112, 112], runs 1 ort inference,
-    /// downloads [N, 512] embeddings.
-    ///
-    /// `faces_kps` = slice of 5-point landmark sets, one per face.
-    /// Returns Vec of embeddings (len = faces_kps.len(), each 512-dim).
-    pub fn recognize_batch_gpu(
-        manager: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw_gpu: &CudaSlice<f32>,
-        frame_h: u32,
-        frame_w: u32,
-        faces_kps: &[[[f32; 2]; 5]],
-        ws: &mut GpuWorkspace,
-    ) -> anyhow::Result<Vec<Vec<f32>>> {
-        let n = faces_kps.len();
-        if n == 0 {
-            return Ok(Vec::new());
-        }
-        anyhow::ensure!(
-            n <= MAX_FACES,
-            "batch size {n} exceeds MAX_FACES {MAX_FACES}"
-        );
-
-        let face_size = 3 * 112 * 112;
-        let total_input = n * face_size;
-
-        // 1. Download frame to CPU once — reuse for all face warps.
-        //    TODO: replace with GPU warp_affine_npp into batch buffer slices.
-        let frame_cpu = gpu.download(frame_chw_gpu)?;
-        let frame_slice = frame_cpu.as_slice();
-
-        // 2. Warp each face to 112×112 and normalize, store into host_face_112_batch
-        for (i, kps) in faces_kps.iter().enumerate() {
-            let affine_mat = affine::estimate_face_affine(kps, &ARCFACE_DST);
-            let offset = i * face_size;
-            let slot = &mut ws.host_face_112_batch[offset..offset + face_size];
-            warp_affine_chw(frame_slice, frame_h, frame_w, slot, 112, 112, &affine_mat);
-            for v in slot.iter_mut() {
-                *v = (*v - 127.5) / 127.5;
-            }
-        }
-
-        // 3. Upload batched faces to GPU
-        gpu.upload_into(
-            &ws.host_face_112_batch[..total_input],
-            &mut ws.face_112_batch,
-        )?;
-
-        // 4. IoBinding inference — input [N, 3, 112, 112], output [N, 512]
-        let input_shape = [n as i64, 3, 112, 112];
-        let output_shape = [n as i64, 512];
-        let cuda_mem_info = MemoryInfo::new(
-            AllocationDevice::CUDA,
-            0,
-            AllocatorType::Device,
-            MemoryType::Default,
-        )
-        .map_err(|e| anyhow::anyhow!("MemoryInfo: {e}"))?;
-
-        {
-            let (input_dev, _g1) = ws.face_112_batch.device_ptr(&gpu.stream);
-            let (output_dev, _g2) = ws.arcface_embeddings_batch.device_ptr_mut(&gpu.stream);
-            let input_value =
-                unsafe { create_cuda_tensor_f32(&cuda_mem_info, input_dev, &input_shape)? };
-            let output_value =
-                unsafe { create_cuda_tensor_f32(&cuda_mem_info, output_dev, &output_shape)? };
-            let (session, binding) = manager.session_and_binding("Inswapper128ArcFaceBatch")?;
-            let input_name = session
-                .inputs()
-                .first()
-                .map(|i| i.name().to_string())
-                .unwrap_or_else(|| "input.1".to_string());
-            let output_name = session
-                .outputs()
-                .first()
-                .map(|o| o.name().to_string())
-                .unwrap_or_else(|| "683".to_string());
-            unsafe {
-                bind_input_raw(binding, &input_name, &input_value)?;
-                bind_output_raw(binding, &output_name, &output_value)?;
-            }
-            let _ = session.run_binding(binding)?;
-            binding.clear();
-            drop(input_value);
-            drop(output_value);
-        }
-
-        // 5. Download [N, 512] embeddings
-        gpu.download_into(&ws.arcface_embeddings_batch, &mut ws.host_embeddings_batch)?;
-
-        // 6. Split into Vec<Vec<f32>>
-        let mut result = Vec::with_capacity(n);
-        for i in 0..n {
-            let offset = i * 512;
-            result.push(ws.host_embeddings_batch[offset..offset + 512].to_vec());
-        }
-        Ok(result)
     }
 
     /// Compute Inswapper latent from ArcFace embedding (CPU).
