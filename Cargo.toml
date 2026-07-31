@@ -56,6 +56,9 @@ bytemuck = { version = "1", features = ["derive"] }
 # ── Hashing (model integrity verification) ──────────────────────────
 sha2 = "0.10"
 
+# ── Lock-free engine generation reads ──────────────────────────────
+arc-swap = "1.7"
+
 # ── Platform I/O ────────────────────────────────────────────────────
 [target.'cfg(target_os = "linux")'.dependencies]
 nokhwa = { version = "0.10", default-features = false, features = ["input-v4l"] }
