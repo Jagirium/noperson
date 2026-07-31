@@ -47,10 +47,9 @@ pub struct GpuWorkspace {
     pub arcface_embedding: CudaSlice<f32>, // [1, 512]
 
     // Swap (batched dim=1..4 → up to 16 tiles)
-    pub swap_batch_in: CudaSlice<f32>,     // [16, 3, 128, 128]
-    pub swap_batch_out: CudaSlice<f32>,    // [16, 3, 128, 128]
-    pub swap_latent_batch: CudaSlice<f32>, // [16, 512]
-    pub swap_latent_gpu: CudaSlice<f32>,   // [16, 512] — replicated latent for IoBinding input
+    pub swap_batch_in: CudaSlice<f32>,   // [16, 3, 128, 128]
+    pub swap_batch_out: CudaSlice<f32>,  // [16, 3, 128, 128]
+    pub swap_latent_gpu: CudaSlice<f32>, // [16, 512] — replicated latent for IoBinding input
 
     // Masks
     pub mask_128: CudaSlice<f32>,                // [128, 128]
@@ -85,9 +84,7 @@ pub struct GpuWorkspace {
     pub emap: CudaSlice<f32>, // [512*512]
 
     // Pre-allocated host staging buffers (reused to avoid per-frame Vec alloc)
-    pub host_det_input: Vec<f32>,      // [3*640*640]
     pub host_det_output: Vec<f32>,     // [1*20*8400] — YoloFace output
-    pub host_face_112: Vec<f32>,       // [3*112*112]
     pub host_embedding: Vec<f32>,      // [512] — ArcFace embedding
     pub host_swap_tiles: Vec<f32>,     // [16*3*128*128]
     pub host_color_original: Vec<f32>, // [3*512*512], exact histogram fallback
@@ -143,7 +140,6 @@ impl GpuWorkspace {
 
             swap_batch_in: stream.alloc_zeros::<f32>(swap_batch_size)?,
             swap_batch_out: stream.alloc_zeros::<f32>(swap_batch_size)?,
-            swap_latent_batch: stream.alloc_zeros::<f32>(max_swap_tiles * 512)?,
             swap_latent_gpu: stream.alloc_zeros::<f32>(max_swap_tiles * 512)?,
 
             mask_128: stream.alloc_zeros::<f32>(128 * 128)?,
@@ -175,9 +171,7 @@ impl GpuWorkspace {
 
             emap: stream.alloc_zeros::<f32>(512 * 512)?,
 
-            host_det_input: vec![0.0f32; 3 * 640 * 640],
             host_det_output: vec![0.0f32; det_output_size],
-            host_face_112: vec![0.0f32; 3 * 112 * 112],
             host_embedding: vec![0.0f32; 512],
             host_swap_tiles: vec![0.0f32; swap_batch_size],
             host_color_original: vec![0.0f32; face_512_size],
@@ -193,10 +187,9 @@ impl GpuWorkspace {
 /// Frame-sized buffers (held separately from the scratch workspace so borrows
 /// can be split).
 pub struct FrameBuffers {
-    pub u8_in: CudaSlice<u8>,     // [H, W, 3]
-    pub u8_out: CudaSlice<u8>,    // [H, W, 3]
-    pub chw: CudaSlice<f32>,      // [3, H, W]
-    pub chw_last: CudaSlice<f32>, // [3, H, W] snapshot for Find Faces
+    pub u8_in: CudaSlice<u8>,  // [H, W, 3]
+    pub u8_out: CudaSlice<u8>, // [H, W, 3]
+    pub chw: CudaSlice<f32>,   // [3, H, W]
 }
 
 impl FrameBuffers {
@@ -207,7 +200,6 @@ impl FrameBuffers {
             u8_in: stream.alloc_zeros::<u8>(frame_u8)?,
             u8_out: stream.alloc_zeros::<u8>(frame_u8)?,
             chw: stream.alloc_zeros::<f32>(frame_f32)?,
-            chw_last: stream.alloc_zeros::<f32>(frame_f32)?,
         })
     }
 }
