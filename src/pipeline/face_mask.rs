@@ -856,9 +856,7 @@ fn compose_faceparser_gpu(
     ws: &mut GpuWorkspace,
     params: &FaceParserMaskParams,
 ) -> anyhow::Result<()> {
-    gpu.stream
-        .memcpy_dtod(&ws.face_512_pre_restorer, &mut ws.face_512_scratch)?;
-    gpu.imagenet_normalize_512(&mut ws.face_512_scratch)?;
+    gpu.imagenet_normalize_copy_512(&ws.face_512_pre_restorer, &mut ws.face_512_scratch)?;
     crate::pipeline::ort_binding::run_bound_f32(
         manager,
         &gpu.stream,

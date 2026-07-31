@@ -84,7 +84,7 @@ pub struct GpuOps {
     mask_mul_fn: CudaFunction,
     occluder_threshold_fn: CudaFunction,
     xseg_postprocess_fn: CudaFunction,
-    imagenet_normalize_fn: CudaFunction,
+    imagenet_normalize_copy_fn: CudaFunction,
     landmark_normalize_fn: CudaFunction,
     parser_argmax_fn: CudaFunction,
     parser_class_mask_fn: CudaFunction,
@@ -195,7 +195,7 @@ impl GpuOps {
             mask_mul_fn: load("gaussian_blur", "mask_mul_kernel"),
             occluder_threshold_fn: load("mask_postprocess", "occluder_threshold_kernel"),
             xseg_postprocess_fn: load("mask_postprocess", "xseg_postprocess_kernel"),
-            imagenet_normalize_fn: load("mask_postprocess", "imagenet_normalize_kernel"),
+            imagenet_normalize_copy_fn: load("mask_postprocess", "imagenet_normalize_copy_kernel"),
             landmark_normalize_fn: load("mask_postprocess", "landmark_normalize_kernel"),
             parser_argmax_fn: load("mask_postprocess", "parser_argmax_kernel"),
             parser_class_mask_fn: load("mask_postprocess", "parser_class_mask_kernel"),
@@ -1098,11 +1098,16 @@ impl GpuOps {
         Ok(())
     }
 
-    pub fn imagenet_normalize_512(&self, image: &mut CudaSlice<f32>) -> Result<(), DriverError> {
+    pub fn imagenet_normalize_copy_512(
+        &self,
+        source: &CudaSlice<f32>,
+        destination: &mut CudaSlice<f32>,
+    ) -> Result<(), DriverError> {
         let plane = 512 * 512u32;
         let total = 3 * plane;
-        let mut b = self.stream.launch_builder(&self.imagenet_normalize_fn);
-        b.arg(image);
+        let mut b = self.stream.launch_builder(&self.imagenet_normalize_copy_fn);
+        b.arg(source);
+        b.arg(destination);
         b.arg(&plane);
         b.arg(&total);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;

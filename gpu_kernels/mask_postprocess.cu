@@ -22,8 +22,9 @@ void xseg_postprocess_kernel(
 }
 
 extern "C" __global__
-void imagenet_normalize_kernel(
-    float* __restrict__ image,
+void imagenet_normalize_copy_kernel(
+    const float* __restrict__ source,
+    float* __restrict__ destination,
     const unsigned int plane,
     const unsigned int total
 ) {
@@ -32,7 +33,7 @@ void imagenet_normalize_kernel(
     const unsigned int channel = idx / plane;
     const float means[3] = {0.485f, 0.456f, 0.406f};
     const float stds[3] = {0.229f, 0.224f, 0.225f};
-    image[idx] = (image[idx] * (1.0f / 255.0f) - means[channel]) / stds[channel];
+    destination[idx] = (source[idx] * (1.0f / 255.0f) - means[channel]) / stds[channel];
 }
 
 extern "C" __global__
