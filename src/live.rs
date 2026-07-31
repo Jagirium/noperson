@@ -1,16 +1,21 @@
 //! Shared Rust-native engine used by both photo and webcam live paths.
 
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream};
 use image::GenericImageView;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::parameters::{FaceSwapParams, RestorerSize};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
+use crate::engine::{EngineSpec, ModelArtifact, ModelRole};
 use crate::gpu::ops::GpuOps;
-use crate::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
+use crate::models::live_catalog::{CANONICAL_SWAPPER_FILENAME, validate_model_file};
 use crate::models::manager::ModelManager;
 use crate::pipeline::face_detector::{FaceDetector, FaceDetectorBackend};
 use crate::pipeline::face_recognizer::FaceRecognizer;
@@ -56,6 +61,137 @@ pub struct LiveEngine {
     workspace: GpuWorkspace,
     source_faces: Vec<SourceFace>,
     params: FaceSwapParams,
+}
+
+pub fn build_live_spec(
+    models_dir: &Path,
+    identity_path: &Path,
+    params: FaceSwapParams,
+    provider: ExecutionProvider,
+    detector: DetectorModel,
+    device_id: i32,
+) -> anyhow::Result<EngineSpec> {
+    let mut models = BTreeMap::new();
+    let (detector_name, detector_filename) = match detector {
+        DetectorModel::YoloFace8n => ("YoloFace8n", "yoloface_8n.onnx"),
+        DetectorModel::RetinaFace => ("RetinaFace", "det_10g.onnx"),
+        DetectorModel::Scrfd2_5g => ("SCRFD2.5g", "scrfd_2.5g_bnkps.onnx"),
+    };
+    insert_artifact(
+        &mut models,
+        models_dir,
+        ModelRole::Detector,
+        detector_name,
+        detector_filename,
+    )?;
+    for (role, logical_name, filename) in [
+        (
+            ModelRole::Recognizer,
+            "Inswapper128ArcFace",
+            "w600k_r50.onnx",
+        ),
+        (
+            ModelRole::Swapper,
+            "Inswapper128",
+            CANONICAL_SWAPPER_FILENAME,
+        ),
+        (ModelRole::Emap, "InswapperEMap", "emap.bin"),
+    ] {
+        insert_artifact(&mut models, models_dir, role, logical_name, filename)?;
+    }
+
+    if params.restorer_enabled {
+        let (name, filename) = match params.restorer_size {
+            RestorerSize::Gpen256 => ("GPENBFR256", "GPEN-BFR-256.onnx"),
+            RestorerSize::Gpen512 => ("GPENBFR512", "GPEN-BFR-512.onnx"),
+            RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
+        };
+        insert_artifact(&mut models, models_dir, ModelRole::Restorer, name, filename)?;
+    }
+    for (enabled, role, name, filename) in [
+        (
+            params.occluder_enabled,
+            ModelRole::Occluder,
+            "Occluder",
+            "occluder.onnx",
+        ),
+        (
+            params.xseg_enabled,
+            ModelRole::Xseg,
+            "XSeg",
+            "XSeg_model.onnx",
+        ),
+        (
+            params.faceparser_enabled,
+            ModelRole::FaceParser,
+            "FaceParser",
+            "faceparser_resnet34.onnx",
+        ),
+    ] {
+        if enabled {
+            insert_artifact(&mut models, models_dir, role, name, filename)?;
+        }
+    }
+
+    let spec = EngineSpec {
+        provider,
+        device_id,
+        detector,
+        identity_sha256: sha256_file(identity_path)?,
+        models,
+        params,
+    };
+    spec.validate()?;
+    Ok(spec)
+}
+
+fn insert_artifact(
+    models: &mut BTreeMap<ModelRole, ModelArtifact>,
+    root: &Path,
+    role: ModelRole,
+    logical_name: &str,
+    filename: &str,
+) -> anyhow::Result<()> {
+    models.insert(
+        role,
+        ModelArtifact {
+            logical_name: logical_name.to_owned(),
+            filename: filename.to_owned(),
+            sha256: sha256_file(&root.join(filename))?,
+        },
+    );
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn required_artifact(spec: &EngineSpec, role: ModelRole) -> anyhow::Result<&ModelArtifact> {
+    spec.models
+        .get(&role)
+        .ok_or_else(|| anyhow::anyhow!("engine generation is missing {}", role.as_str()))
+}
+
+fn restorer_session_name(params: &FaceSwapParams) -> anyhow::Result<Option<&'static str>> {
+    if !params.restorer_enabled {
+        return Ok(None);
+    }
+    match params.restorer_size {
+        RestorerSize::Gpen256 => Ok(Some("GPENBFR256")),
+        RestorerSize::Gpen512 => Ok(Some("GPENBFR512")),
+        RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
+    }
 }
 
 impl LiveEngine {
@@ -106,31 +242,74 @@ impl LiveEngine {
         device_id: i32,
         stream: &Arc<CudaStream>,
     ) -> anyhow::Result<Self> {
-        let mut manager = ModelManager::with_execution(models_dir, provider, device_id);
-        manager.set_compute_stream(stream.cu_stream() as *mut ());
-        match detector_model {
-            DetectorModel::YoloFace8n => manager.load("YoloFace8n", "yoloface_8n.onnx")?,
-            DetectorModel::RetinaFace => manager.load("RetinaFace", "det_10g.onnx")?,
-            DetectorModel::Scrfd2_5g => manager.load("SCRFD2.5g", "scrfd_2.5g_bnkps.onnx")?,
-        }
-        manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
-        manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
-        manager.load_emap(CANONICAL_SWAPPER_FILENAME)?;
-        if params.restorer_enabled {
-            match params.restorer_size {
-                RestorerSize::Gpen256 => {
-                    manager.load("GPENBFR256", "GPEN-BFR-256.onnx")?;
-                }
-                RestorerSize::Gpen512 => {
-                    manager.load("GPENBFR512", "GPEN-BFR-512.onnx")?;
-                }
-                RestorerSize::Gpen1024 => {
-                    anyhow::bail!("GPEN-1024 is excluded from the runtime")
-                }
+        let spec = build_live_spec(
+            models_dir,
+            identity_path,
+            params,
+            provider,
+            detector_model,
+            device_id,
+        )?;
+        Self::new_from_spec_inner(gpu, models_dir, identity_path, &spec, stream, false)
+    }
+
+    /// Build a fully content-verified generation before it becomes eligible for activation.
+    pub fn new_from_spec(
+        gpu: Arc<GpuOps>,
+        models_dir: &Path,
+        identity_path: &Path,
+        spec: &EngineSpec,
+        stream: &Arc<CudaStream>,
+    ) -> anyhow::Result<Self> {
+        Self::new_from_spec_inner(gpu, models_dir, identity_path, spec, stream, true)
+    }
+
+    fn new_from_spec_inner(
+        gpu: Arc<GpuOps>,
+        models_dir: &Path,
+        identity_path: &Path,
+        spec: &EngineSpec,
+        stream: &Arc<CudaStream>,
+        verify_files: bool,
+    ) -> anyhow::Result<Self> {
+        spec.validate()?;
+        if verify_files {
+            validate_model_file(identity_path, &spec.identity_sha256)?;
+            for artifact in spec.models.values() {
+                validate_model_file(&models_dir.join(&artifact.filename), &artifact.sha256)?;
             }
         }
 
-        let detector = FaceDetector::from_model(detector_model, 0.5);
+        let mut manager = ModelManager::with_execution(models_dir, spec.provider, spec.device_id);
+        manager.set_compute_stream(stream.cu_stream() as *mut ());
+        let detector_artifact = required_artifact(spec, ModelRole::Detector)?;
+        match spec.detector {
+            DetectorModel::YoloFace8n => manager.load("YoloFace8n", &detector_artifact.filename)?,
+            DetectorModel::RetinaFace => manager.load("RetinaFace", &detector_artifact.filename)?,
+            DetectorModel::Scrfd2_5g => manager.load("SCRFD2.5g", &detector_artifact.filename)?,
+        }
+        manager.load(
+            "Inswapper128ArcFace",
+            &required_artifact(spec, ModelRole::Recognizer)?.filename,
+        )?;
+        manager.load(
+            "Inswapper128",
+            &required_artifact(spec, ModelRole::Swapper)?.filename,
+        )?;
+        manager.load_emap_file(&required_artifact(spec, ModelRole::Emap)?.filename)?;
+
+        for (role, session_name) in [
+            (ModelRole::Restorer, restorer_session_name(&spec.params)?),
+            (ModelRole::Occluder, Some("Occluder")),
+            (ModelRole::Xseg, Some("XSeg")),
+            (ModelRole::FaceParser, Some("FaceParser")),
+        ] {
+            if let (Some(artifact), Some(session_name)) = (spec.models.get(&role), session_name) {
+                manager.load(session_name, &artifact.filename)?;
+            }
+        }
+
+        let detector = FaceDetector::from_model(spec.detector, 0.5);
         let mut workspace = GpuWorkspace::new(stream)?;
         let identity = image::open(identity_path)?;
         let (width, height) = identity.dimensions();
@@ -169,7 +348,7 @@ impl LiveEngine {
             detector,
             workspace,
             source_faces,
-            params,
+            params: spec.params.clone(),
         })
     }
 

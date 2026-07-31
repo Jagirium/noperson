@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -69,6 +70,8 @@ pub enum EngineSpecError {
     InvalidSha256 { field: String, value: String },
     #[error("{0} must not be empty")]
     EmptyField(String),
+    #[error("model filename for {role:?} must stay inside the generation root: {filename}")]
+    InvalidFilename { role: ModelRole, filename: String },
     #[error("CUDA device id must be non-negative, got {0}")]
     InvalidDeviceId(i32),
     #[error("restorer {0} is excluded from new engine generations")]
@@ -113,6 +116,16 @@ impl EngineSpec {
                     "models.{}.filename",
                     role.as_str()
                 )));
+            }
+            if Path::new(&artifact.filename).is_absolute()
+                || Path::new(&artifact.filename)
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err(EngineSpecError::InvalidFilename {
+                    role: *role,
+                    filename: artifact.filename.clone(),
+                });
             }
             validate_sha256(
                 &format!("models.{}.sha256", role.as_str()),

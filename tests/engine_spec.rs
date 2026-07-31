@@ -115,3 +115,28 @@ fn enabled_optional_stage_requires_its_artifact() {
         Err(EngineSpecError::MissingModel(ModelRole::Restorer))
     );
 }
+
+#[test]
+fn model_filenames_cannot_escape_the_generation_root() {
+    let mut absolute = valid_spec(false);
+    absolute
+        .models
+        .get_mut(&ModelRole::Detector)
+        .unwrap()
+        .filename = "/tmp/detector.onnx".to_owned();
+    assert!(matches!(
+        absolute.validate(),
+        Err(EngineSpecError::InvalidFilename { .. })
+    ));
+
+    let mut parent = valid_spec(false);
+    parent
+        .models
+        .get_mut(&ModelRole::Detector)
+        .unwrap()
+        .filename = "../detector.onnx".to_owned();
+    assert!(matches!(
+        parent.validate(),
+        Err(EngineSpecError::InvalidFilename { .. })
+    ));
+}

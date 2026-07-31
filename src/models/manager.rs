@@ -223,8 +223,12 @@ impl ModelManager {
             model_path.display()
         );
 
-        // The emap was pre-extracted to emap.bin (from ONNX graph's last initializer).
-        let emap_path = self.models_dir.join("emap.bin");
+        self.load_emap_file("emap.bin")
+    }
+
+    /// Load a pre-extracted Inswapper emap selected by an immutable generation.
+    pub fn load_emap_file(&mut self, filename: &str) -> anyhow::Result<()> {
+        let emap_path = self.models_dir.join(filename);
         if emap_path.exists() {
             let emap_bytes = std::fs::read(&emap_path)?;
             anyhow::ensure!(emap_bytes.len() == 512 * 512 * 4, "emap.bin wrong size");
@@ -237,9 +241,8 @@ impl ModelManager {
         // Fallback: extract from ONNX protobuf (last initializer)
         // The emap was previously extracted in crosswap-core/build.rs
         anyhow::bail!(
-            "emap.bin not found at {}. Extract it from {} using the build script.",
-            emap_path.display(),
-            model_path.display()
+            "Inswapper emap not found at {}. Extract it from the swapper ONNX graph.",
+            emap_path.display()
         );
     }
 }
