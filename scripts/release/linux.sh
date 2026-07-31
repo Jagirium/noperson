@@ -29,7 +29,7 @@ case "$machine" in
     x86_64)
         oci_arch=amd64
         artifact_arch=x86_64
-        cuda_image=nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43
+        cuda_image=docker.io/nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:4b9ed5fa8361736996499f64ecebf25d4ec37ff56e4d11323ccde10aa36e0c43
         ;;
     *) die "unsupported Linux architecture: $machine" ;;
 esac

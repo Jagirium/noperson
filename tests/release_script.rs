@@ -5,7 +5,7 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
     let script = fs::read_to_string("scripts/release/linux.sh").expect("release builder exists");
     for required in [
         "RUST_TOOLCHAIN=1.97.1",
-        "nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:",
+        "docker.io/nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:",
         "--native",
         "cargo build --locked --release",
         "SOURCE_DATE_EPOCH",
