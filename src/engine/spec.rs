@@ -87,6 +87,13 @@ pub enum EngineSpecError {
         min: i64,
         max: i64,
     },
+    #[error("mask control {control} must be finite and inside {min}..={max}, got {value}")]
+    InvalidFloatControl {
+        control: String,
+        value: String,
+        min: String,
+        max: String,
+    },
     #[error("failed to serialize engine spec: {0}")]
     Serialization(String),
 }
@@ -156,6 +163,110 @@ impl EngineSpec {
             ("face_blur", self.params.faceparser.face_blur),
         ] {
             validate_range(&format!("faceparser.{control}"), value as i64, 0, 100)?;
+        }
+        for (control, value, min, max) in [
+            (
+                "restore_mouth.blend",
+                self.params.restore_mouth_params.blend,
+                0.0,
+                1.0,
+            ),
+            (
+                "restore_mouth.size_factor",
+                self.params.restore_mouth_params.size_factor,
+                0.05,
+                0.60,
+            ),
+            (
+                "restore_mouth.radius_x",
+                self.params.restore_mouth_params.radius_x,
+                0.3,
+                3.0,
+            ),
+            (
+                "restore_mouth.radius_y",
+                self.params.restore_mouth_params.radius_y,
+                0.3,
+                3.0,
+            ),
+            (
+                "restore_eyes.blend",
+                self.params.restore_eyes_params.blend,
+                0.0,
+                1.0,
+            ),
+            (
+                "restore_eyes.size_factor",
+                self.params.restore_eyes_params.size_factor,
+                2.0,
+                4.0,
+            ),
+            (
+                "restore_eyes.radius_x",
+                self.params.restore_eyes_params.radius_x,
+                0.3,
+                3.0,
+            ),
+            (
+                "restore_eyes.radius_y",
+                self.params.restore_eyes_params.radius_y,
+                0.3,
+                3.0,
+            ),
+        ] {
+            validate_float_range(control, value, min, max)?;
+        }
+        for (control, value, min, max) in [
+            (
+                "restore_mouth.feather",
+                self.params.restore_mouth_params.feather as i64,
+                1,
+                100,
+            ),
+            (
+                "restore_mouth.offset_x",
+                self.params.restore_mouth_params.offset_x as i64,
+                -300,
+                300,
+            ),
+            (
+                "restore_mouth.offset_y",
+                self.params.restore_mouth_params.offset_y as i64,
+                -300,
+                300,
+            ),
+            (
+                "restore_eyes.feather",
+                self.params.restore_eyes_params.feather as i64,
+                1,
+                100,
+            ),
+            (
+                "restore_eyes.offset_x",
+                self.params.restore_eyes_params.offset_x as i64,
+                -300,
+                300,
+            ),
+            (
+                "restore_eyes.offset_y",
+                self.params.restore_eyes_params.offset_y as i64,
+                -300,
+                300,
+            ),
+            (
+                "restore_eyes.spacing_offset",
+                self.params.restore_eyes_params.spacing_offset as i64,
+                -200,
+                200,
+            ),
+            (
+                "restore_eyes_mouth_blur",
+                self.params.restore_eyes_mouth_blur as i64,
+                0,
+                50,
+            ),
+        ] {
+            validate_range(control, value, min, max)?;
         }
 
         for (role, artifact) in &self.models {
@@ -241,6 +352,24 @@ fn validate_range(control: &str, value: i64, min: i64, max: i64) -> Result<(), E
             value,
             min,
             max,
+        })
+    }
+}
+
+fn validate_float_range(
+    control: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+) -> Result<(), EngineSpecError> {
+    if value.is_finite() && (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        Err(EngineSpecError::InvalidFloatControl {
+            control: control.to_owned(),
+            value: value.to_string(),
+            min: min.to_string(),
+            max: max.to_string(),
         })
     }
 }

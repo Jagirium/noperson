@@ -84,3 +84,97 @@ void mask_invert_kernel(
     if (idx >= total) return;
     mask[idx] = 1.0f - mask[idx];
 }
+
+extern "C" __global__
+void semantic_region_mask_kernel(
+    const unsigned char* __restrict__ classes,
+    float* __restrict__ mask,
+    unsigned int* __restrict__ count,
+    const unsigned int pixels,
+    const unsigned int region
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= pixels) return;
+    unsigned int actual = (unsigned int)classes[idx];
+    bool selected = region == 0
+        ? (actual == 4 || actual == 5)
+        : (actual == 11 || actual == 12 || actual == 13);
+    mask[idx] = selected ? 1.0f : 0.0f;
+    if (selected) atomicAdd(count, 1u);
+}
+
+extern "C" __global__
+void semantic_temporal_mask_kernel(
+    float* __restrict__ current,
+    float* __restrict__ previous,
+    const unsigned int* __restrict__ count,
+    const unsigned int* __restrict__ valid,
+    const unsigned int pixels,
+    const float alpha
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= pixels) return;
+    if (*count < 10u) {
+        current[idx] = 0.0f;
+        return;
+    }
+    float value = current[idx];
+    if (*valid != 0u) value = alpha * value + (1.0f - alpha) * previous[idx];
+    current[idx] = value;
+    previous[idx] = value;
+}
+
+extern "C" __global__
+void semantic_mark_valid_kernel(
+    unsigned int* __restrict__ valid,
+    const unsigned int* __restrict__ count
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0 && *count >= 10u) *valid = 1u;
+}
+
+extern "C" __global__
+void semantic_region_stats_kernel(
+    const float* __restrict__ swapped,
+    const float* __restrict__ original,
+    const float* __restrict__ mask,
+    float* __restrict__ stats,
+    const unsigned int pixels
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= pixels) return;
+    float region = mask[idx];
+    float surround = fminf(fmaxf(1.0f - region, 0.0f), 1.0f);
+    atomicAdd(&stats[0], surround);
+    atomicAdd(&stats[1], region);
+    for (unsigned int channel = 0; channel < 3; ++channel) {
+        unsigned int offset = channel * pixels + idx;
+        atomicAdd(&stats[2 + channel], swapped[offset] * surround);
+        atomicAdd(&stats[5 + channel], original[offset] * region);
+    }
+}
+
+extern "C" __global__
+void semantic_composite_kernel(
+    float* __restrict__ swapped,
+    const float* __restrict__ original,
+    const float* __restrict__ mask,
+    const float* __restrict__ stats,
+    const unsigned int* __restrict__ count,
+    const unsigned int pixels,
+    const float blend,
+    const float luminance_factor,
+    const unsigned int total
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total || *count < 10u) return;
+    unsigned int channel = idx / pixels;
+    unsigned int pixel = idx % pixels;
+    float surround_sum = fmaxf(stats[0], 1.0f);
+    float region_sum = fmaxf(stats[1], 1.0f);
+    float surround_mean = stats[2 + channel] / surround_sum;
+    float original_mean = stats[5 + channel] / region_sum;
+    float shift = (surround_mean - original_mean) * luminance_factor;
+    float matched = fminf(fmaxf(original[idx] + shift, 0.0f), 255.0f);
+    float effective = mask[pixel] * blend;
+    swapped[idx] = effective * matched + (1.0f - effective) * swapped[idx];
+}

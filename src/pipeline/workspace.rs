@@ -53,17 +53,23 @@ pub struct GpuWorkspace {
     pub swap_latent_gpu: CudaSlice<f32>,   // [16, 512] — replicated latent for IoBinding input
 
     // Masks
-    pub mask_128: CudaSlice<f32>,             // [128, 128]
-    pub mask_128_tmp: CudaSlice<f32>,         // [128, 128] blur scratch
-    pub mask_256: CudaSlice<f32>,             // [256, 256] — Occluder output
-    pub mask_256_tmp: CudaSlice<f32>,         // [256, 256] morphology scratch
-    pub mask_learned_128: CudaSlice<f32>,     // [128, 128] learned-mask composition
-    pub parser_logits: CudaSlice<f32>,        // [19, 512, 512]
-    pub parser_classes: CudaSlice<u8>,        // [512, 512]
-    pub parser_mask_512: CudaSlice<f32>,      // Final parser mask
-    pub parser_attribute_512: CudaSlice<f32>, // Current class mask
-    pub parser_tmp_512: CudaSlice<f32>,       // Morphology/blur scratch
-    pub mask_512: CudaSlice<f32>,             // [512, 512] — final face mask
+    pub mask_128: CudaSlice<f32>,                // [128, 128]
+    pub mask_128_tmp: CudaSlice<f32>,            // [128, 128] blur scratch
+    pub mask_256: CudaSlice<f32>,                // [256, 256] — Occluder output
+    pub mask_256_tmp: CudaSlice<f32>,            // [256, 256] morphology scratch
+    pub mask_learned_128: CudaSlice<f32>,        // [128, 128] learned-mask composition
+    pub parser_logits: CudaSlice<f32>,           // [19, 512, 512]
+    pub parser_classes: CudaSlice<u8>,           // [512, 512]
+    pub parser_mask_512: CudaSlice<f32>,         // Final parser mask
+    pub parser_attribute_512: CudaSlice<f32>,    // Current class mask
+    pub parser_tmp_512: CudaSlice<f32>,          // Morphology/blur scratch
+    pub semantic_previous_eyes: CudaSlice<f32>,  // Temporal eye mask
+    pub semantic_previous_mouth: CudaSlice<f32>, // Temporal mouth mask
+    pub semantic_stats: CudaSlice<f32>,          // Mask and RGB reduction totals
+    pub semantic_count: CudaSlice<u32>,          // Raw selected-class pixel count
+    pub semantic_eyes_valid: CudaSlice<u32>,
+    pub semantic_mouth_valid: CudaSlice<u32>,
+    pub mask_512: CudaSlice<f32>, // [512, 512] — final face mask
 
     // Blur kernel weights (uploaded once per param change)
     pub blur_kernel: CudaSlice<f32>, // [MAX_KS]
@@ -137,6 +143,12 @@ impl GpuWorkspace {
             parser_mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
             parser_attribute_512: stream.alloc_zeros::<f32>(512 * 512)?,
             parser_tmp_512: stream.alloc_zeros::<f32>(512 * 512)?,
+            semantic_previous_eyes: stream.alloc_zeros::<f32>(512 * 512)?,
+            semantic_previous_mouth: stream.alloc_zeros::<f32>(512 * 512)?,
+            semantic_stats: stream.alloc_zeros::<f32>(8)?,
+            semantic_count: stream.alloc_zeros::<u32>(1)?,
+            semantic_eyes_valid: stream.alloc_zeros::<u32>(1)?,
+            semantic_mouth_valid: stream.alloc_zeros::<u32>(1)?,
             mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
 
             blur_kernel: stream.alloc_zeros::<f32>(MAX_BLUR_KS)?,

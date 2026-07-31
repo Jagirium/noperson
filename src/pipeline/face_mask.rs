@@ -24,6 +24,25 @@ pub fn postprocess_xseg_mask(mask: &mut [f32]) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticRegion {
+    Eyes,
+    Mouth,
+}
+
+pub fn semantic_region_mask(classes: &[u8], region: SemanticRegion) -> Vec<f32> {
+    classes
+        .iter()
+        .map(|class| {
+            let selected = match region {
+                SemanticRegion::Eyes => matches!(*class, 4 | 5),
+                SemanticRegion::Mouth => matches!(*class, 11 | 12 | 13),
+            };
+            f32::from(selected)
+        })
+        .collect()
+}
+
 /// CPU oracle for CrossSwap's FaceParser class-mask composition.
 pub fn compose_face_parser_mask(
     classes: &[u8],
@@ -414,6 +433,117 @@ pub fn gpu_generate_learned_mask_128(
     }
 
     Ok(true)
+}
+
+pub fn gpu_restore_semantic_regions(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<()> {
+    if !params.faceparser_enabled {
+        return Ok(());
+    }
+    if params.restore_mouth {
+        restore_semantic_region(gpu, ws, params, SemanticRegion::Mouth)?;
+    }
+    if params.restore_eyes {
+        restore_semantic_region(gpu, ws, params, SemanticRegion::Eyes)?;
+    }
+    Ok(())
+}
+
+fn restore_semantic_region(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+    region: SemanticRegion,
+) -> anyhow::Result<()> {
+    let (region_code, dilation, feather, temporal_alpha, luminance_factor, blend) = match region {
+        SemanticRegion::Eyes => (
+            0,
+            2,
+            params.restore_eyes_params.feather,
+            0.4,
+            0.6,
+            params.restore_eyes_params.blend,
+        ),
+        SemanticRegion::Mouth => (
+            1,
+            3,
+            params.restore_mouth_params.feather,
+            0.5,
+            0.5,
+            params.restore_mouth_params.blend,
+        ),
+    };
+    gpu.semantic_region_mask(
+        &ws.parser_classes,
+        &mut ws.parser_attribute_512,
+        &mut ws.semantic_count,
+        region_code,
+    )?;
+    gpu.morphology_mask(
+        &mut ws.parser_attribute_512,
+        &mut ws.parser_tmp_512,
+        512,
+        512,
+        dilation,
+    )?;
+
+    let minimum_kernel = match region {
+        SemanticRegion::Eyes => 3,
+        SemanticRegion::Mouth => 5,
+    };
+    let kernel_size = feather
+        .saturating_mul(2)
+        .saturating_add(1)
+        .max(minimum_kernel);
+    let sigma = (kernel_size as f32 / 3.0).max(match region {
+        SemanticRegion::Eyes => 1.0,
+        SemanticRegion::Mouth => 1.5,
+    });
+    let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
+    gpu.gaussian_blur_mask(
+        &mut ws.parser_attribute_512,
+        &mut ws.parser_tmp_512,
+        512,
+        512,
+        &ws.blur_kernel,
+        ks,
+    )?;
+
+    match region {
+        SemanticRegion::Eyes => gpu.semantic_temporal_mask(
+            &mut ws.parser_attribute_512,
+            &mut ws.semantic_previous_eyes,
+            &ws.semantic_count,
+            &mut ws.semantic_eyes_valid,
+            temporal_alpha,
+        )?,
+        SemanticRegion::Mouth => gpu.semantic_temporal_mask(
+            &mut ws.parser_attribute_512,
+            &mut ws.semantic_previous_mouth,
+            &ws.semantic_count,
+            &mut ws.semantic_mouth_valid,
+            temporal_alpha,
+        )?,
+    }
+    gpu.semantic_region_stats(
+        &ws.face_512,
+        &ws.face_512_original,
+        &ws.parser_attribute_512,
+        &mut ws.semantic_stats,
+    )?;
+    gpu.semantic_composite(
+        &mut ws.face_512,
+        &ws.face_512_original,
+        &ws.parser_attribute_512,
+        &ws.semantic_stats,
+        &ws.semantic_count,
+        blend,
+        luminance_factor,
+    )?;
+    Ok(())
 }
 
 fn compose_faceparser_gpu(

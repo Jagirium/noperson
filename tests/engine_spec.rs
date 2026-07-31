@@ -209,6 +209,57 @@ fn face_parser_controls_are_validated_before_gpu_allocation() {
 }
 
 #[test]
+fn restore_region_controls_are_validated_before_gpu_allocation() {
+    let mut spec = valid_spec(false);
+    spec.params.restore_eyes_params.blend = f32::NAN;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. })
+            if control == "restore_eyes.blend"
+    ));
+
+    spec.params.restore_eyes_params.blend = 0.5;
+    spec.params.restore_mouth_params.size_factor = 0.61;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. })
+            if control == "restore_mouth.size_factor"
+    ));
+
+    spec.params.restore_mouth_params.size_factor = 0.25;
+    spec.params.restore_eyes_params.radius_x = 0.29;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. })
+            if control == "restore_eyes.radius_x"
+    ));
+
+    spec.params.restore_eyes_params.radius_x = 1.0;
+    spec.params.restore_mouth_params.offset_y = 301;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "restore_mouth.offset_y"
+    ));
+
+    spec.params.restore_mouth_params.offset_y = 0;
+    spec.params.restore_eyes_params.spacing_offset = -201;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "restore_eyes.spacing_offset"
+    ));
+
+    spec.params.restore_eyes_params.spacing_offset = 0;
+    spec.params.restore_eyes_mouth_blur = 51;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "restore_eyes_mouth_blur"
+    ));
+}
+
+#[test]
 fn model_filenames_cannot_escape_the_generation_root() {
     let mut absolute = valid_spec(false);
     absolute

@@ -212,6 +212,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         let blur_ks = params.border_blur * 2 + 1;
         let blur_sigma = (params.border_blur as f32 + 1.0) * 0.2;
         let learned_mask = face_mask::gpu_generate_learned_mask_128(gpu, manager, ws, params)?;
+        face_mask::gpu_restore_semantic_regions(gpu, ws, params)?;
         face_mask::gpu_generate_mask_512(
             gpu,
             ws,

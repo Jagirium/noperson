@@ -299,15 +299,23 @@
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.restore_mouth",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::face_mask::gpu_restore_semantic_regions",
+          "status": "partial",
+          "evidence": [
+            "tests/mask_contract.rs::semantic_restore_regions_use_crossswap_parser_classes",
+            "tests/mask_contract.rs::restore_region_defaults_match_crossswap_controls",
+            "tests/engine_spec.rs::restore_region_controls_are_validated_before_gpu_allocation"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.restore_eyes",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::face_mask::gpu_restore_semantic_regions",
+          "status": "partial",
+          "evidence": [
+            "tests/mask_contract.rs::semantic_restore_regions_use_crossswap_parser_classes",
+            "tests/mask_contract.rs::restore_region_defaults_match_crossswap_controls",
+            "tests/engine_spec.rs::restore_region_controls_are_validated_before_gpu_allocation"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.apply_fake_diff",

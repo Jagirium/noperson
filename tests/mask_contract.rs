@@ -1,7 +1,7 @@
 use noperson::config::parameters::{FaceParserMaskParams, FaceSwapParams};
 use noperson::pipeline::face_mask::{
-    compose_face_parser_mask, generate_border_mask, postprocess_occluder_mask,
-    postprocess_xseg_mask,
+    SemanticRegion, compose_face_parser_mask, generate_border_mask, postprocess_occluder_mask,
+    postprocess_xseg_mask, semantic_region_mask,
 };
 
 #[test]
@@ -100,4 +100,29 @@ fn face_parser_background_growth_and_shrink_follow_crossswap_direction() {
         compose_face_parser_mask(&classes, 3, 3, &shrink).unwrap(),
         [0.0; 9]
     );
+}
+
+#[test]
+fn semantic_restore_regions_use_crossswap_parser_classes() {
+    let classes = [0, 4, 5, 6, 11, 12, 13, 17];
+    assert_eq!(
+        semantic_region_mask(&classes, SemanticRegion::Eyes),
+        [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    );
+    assert_eq!(
+        semantic_region_mask(&classes, SemanticRegion::Mouth),
+        [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0]
+    );
+}
+
+#[test]
+fn restore_region_defaults_match_crossswap_controls() {
+    let params = FaceSwapParams::default();
+    assert_eq!(params.restore_eyes_params.blend, 0.5);
+    assert_eq!(params.restore_eyes_params.feather, 10);
+    assert_eq!(params.restore_eyes_params.size_factor, 3.0);
+    assert_eq!(params.restore_mouth_params.blend, 0.5);
+    assert_eq!(params.restore_mouth_params.feather, 10);
+    assert_eq!(params.restore_mouth_params.size_factor, 0.25);
+    assert_eq!(params.restore_eyes_mouth_blur, 0);
 }

@@ -69,6 +69,11 @@ pub struct GpuOps {
     parser_argmax_fn: CudaFunction,
     parser_class_mask_fn: CudaFunction,
     mask_invert_fn: CudaFunction,
+    semantic_region_mask_fn: CudaFunction,
+    semantic_temporal_mask_fn: CudaFunction,
+    semantic_mark_valid_fn: CudaFunction,
+    semantic_region_stats_fn: CudaFunction,
+    semantic_composite_fn: CudaFunction,
     // Profiling (cell for interior mutability — methods only take &self)
     profiling: RefCell<ProfilingState>,
 }
@@ -141,6 +146,11 @@ impl GpuOps {
             parser_argmax_fn: load("mask_postprocess", "parser_argmax_kernel"),
             parser_class_mask_fn: load("mask_postprocess", "parser_class_mask_kernel"),
             mask_invert_fn: load("mask_postprocess", "mask_invert_kernel"),
+            semantic_region_mask_fn: load("mask_postprocess", "semantic_region_mask_kernel"),
+            semantic_temporal_mask_fn: load("mask_postprocess", "semantic_temporal_mask_kernel"),
+            semantic_mark_valid_fn: load("mask_postprocess", "semantic_mark_valid_kernel"),
+            semantic_region_stats_fn: load("mask_postprocess", "semantic_region_stats_kernel"),
+            semantic_composite_fn: load("mask_postprocess", "semantic_composite_kernel"),
             profiling: RefCell::new(ProfilingState {
                 events,
                 frame_count: 0,
@@ -872,6 +882,96 @@ impl GpuOps {
         let total = mask.len() as u32;
         let mut b = self.stream.launch_builder(&self.mask_invert_fn);
         b.arg(mask);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn semantic_region_mask(
+        &self,
+        classes: &CudaSlice<u8>,
+        mask: &mut CudaSlice<f32>,
+        count: &mut CudaSlice<u32>,
+        region: u32,
+    ) -> Result<(), DriverError> {
+        let pixels = 512 * 512u32;
+        self.stream.memcpy_htod(&[0u32], count)?;
+        let mut b = self.stream.launch_builder(&self.semantic_region_mask_fn);
+        b.arg(classes);
+        b.arg(mask);
+        b.arg(count);
+        b.arg(&pixels);
+        b.arg(&region);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    pub fn semantic_temporal_mask(
+        &self,
+        current: &mut CudaSlice<f32>,
+        previous: &mut CudaSlice<f32>,
+        count: &CudaSlice<u32>,
+        valid: &mut CudaSlice<u32>,
+        alpha: f32,
+    ) -> Result<(), DriverError> {
+        let pixels = 512 * 512u32;
+        let mut temporal = self.stream.launch_builder(&self.semantic_temporal_mask_fn);
+        temporal.arg(current);
+        temporal.arg(previous);
+        temporal.arg(count);
+        temporal.arg(&*valid);
+        temporal.arg(&pixels);
+        temporal.arg(&alpha);
+        unsafe { temporal.launch(LaunchConfig::for_num_elems(pixels)) }?;
+
+        let mut mark = self.stream.launch_builder(&self.semantic_mark_valid_fn);
+        mark.arg(valid);
+        mark.arg(count);
+        unsafe { mark.launch(LaunchConfig::for_num_elems(1)) }?;
+        Ok(())
+    }
+
+    pub fn semantic_region_stats(
+        &self,
+        swapped: &CudaSlice<f32>,
+        original: &CudaSlice<f32>,
+        mask: &CudaSlice<f32>,
+        stats: &mut CudaSlice<f32>,
+    ) -> Result<(), DriverError> {
+        let pixels = 512 * 512u32;
+        self.stream.memcpy_htod(&[0.0f32; 8], stats)?;
+        let mut b = self.stream.launch_builder(&self.semantic_region_stats_fn);
+        b.arg(swapped);
+        b.arg(original);
+        b.arg(mask);
+        b.arg(stats);
+        b.arg(&pixels);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    pub fn semantic_composite(
+        &self,
+        swapped: &mut CudaSlice<f32>,
+        original: &CudaSlice<f32>,
+        mask: &CudaSlice<f32>,
+        stats: &CudaSlice<f32>,
+        count: &CudaSlice<u32>,
+        blend: f32,
+        luminance_factor: f32,
+    ) -> Result<(), DriverError> {
+        let pixels = 512 * 512u32;
+        let total = 3 * pixels;
+        let blend = blend.clamp(0.0, 1.0);
+        let mut b = self.stream.launch_builder(&self.semantic_composite_fn);
+        b.arg(swapped);
+        b.arg(original);
+        b.arg(mask);
+        b.arg(stats);
+        b.arg(count);
+        b.arg(&pixels);
+        b.arg(&blend);
+        b.arg(&luminance_factor);
         b.arg(&total);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())

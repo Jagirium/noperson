@@ -113,6 +113,58 @@ impl Default for FaceParserMaskParams {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreMouthParams {
+    pub blend: f32,
+    pub feather: u32,
+    pub size_factor: f32,
+    pub radius_x: f32,
+    pub radius_y: f32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+}
+
+impl Default for RestoreMouthParams {
+    fn default() -> Self {
+        Self {
+            blend: 0.5,
+            feather: 10,
+            size_factor: 0.25,
+            radius_x: 1.0,
+            radius_y: 1.0,
+            offset_x: 0,
+            offset_y: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreEyesParams {
+    pub blend: f32,
+    pub feather: u32,
+    pub size_factor: f32,
+    pub radius_x: f32,
+    pub radius_y: f32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub spacing_offset: i32,
+}
+
+impl Default for RestoreEyesParams {
+    fn default() -> Self {
+        Self {
+            blend: 0.5,
+            feather: 10,
+            size_factor: 3.0,
+            radius_x: 1.0,
+            radius_y: 1.0,
+            offset_x: 0,
+            offset_y: 0,
+            spacing_offset: 0,
+        }
+    }
+}
+
 /// Swap resolution: how many tiles for Inswapper128.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SwapDim {
@@ -179,6 +231,12 @@ pub struct FaceSwapParams {
     pub faceparser: FaceParserMaskParams,
     pub restore_mouth: bool,
     pub restore_eyes: bool,
+    #[serde(default)]
+    pub restore_mouth_params: RestoreMouthParams,
+    #[serde(default)]
+    pub restore_eyes_params: RestoreEyesParams,
+    #[serde(default)]
+    pub restore_eyes_mouth_blur: u32,
 
     // Border mask
     pub border_top: u32,
@@ -219,6 +277,9 @@ impl Default for FaceSwapParams {
             faceparser: FaceParserMaskParams::default(),
             restore_mouth: false,
             restore_eyes: false,
+            restore_mouth_params: RestoreMouthParams::default(),
+            restore_eyes_params: RestoreEyesParams::default(),
+            restore_eyes_mouth_blur: 0,
             border_top: 10,
             border_bottom: 10,
             border_left: 10,
