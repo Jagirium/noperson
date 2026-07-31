@@ -8,6 +8,7 @@ pub mod face_landmark;
 pub mod face_mask;
 pub mod face_recognizer;
 pub mod face_swapper;
+pub mod frame_enhancer;
 pub mod frame_processor;
 pub mod ort_binding;
 pub mod workspace;
