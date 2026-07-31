@@ -256,7 +256,6 @@ impl FrameEnhancer {
             plan.tile_size,
             tile_count,
         )?;
-        self.gpu.normalize(&mut workspace.tiles_in)?;
 
         let input_shape = plan.input_shape().map(|dimension| dimension as i64);
         let output_shape = [
@@ -284,7 +283,6 @@ impl FrameEnhancer {
             tiles_x,
             plan.output_tile_size,
         )?;
-        self.gpu.denormalize(&mut workspace.enhanced_frame)?;
 
         self.gpu.resize(
             input,

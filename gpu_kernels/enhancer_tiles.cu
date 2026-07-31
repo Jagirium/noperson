@@ -29,7 +29,7 @@ void enhancer_pack_tiles_kernel(
     if (frame_y < frame_h && frame_x < frame_w) {
         const unsigned int frame_idx =
             channel * frame_h * frame_w + frame_y * frame_w + frame_x;
-        tiles[idx] = frame[frame_idx];
+        tiles[idx] = frame[frame_idx] * (1.0f / 255.0f);
     } else {
         tiles[idx] = 0.0f;
     }
@@ -62,5 +62,6 @@ void enhancer_scatter_tiles_kernel(
     const unsigned int tile_elements = 3 * tile_pixels;
     const unsigned int tile_offset =
         tile_idx * tile_elements + channel * tile_pixels + local_y * output_tile + local_x;
-    frame[idx] = tiles[tile_offset];
+    const float value = tiles[tile_offset] * 255.0f;
+    frame[idx] = fminf(fmaxf(value, 0.0f), 255.0f);
 }

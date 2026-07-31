@@ -46,7 +46,6 @@ pub struct GpuOps {
     pub stream: Arc<CudaStream>,
     // Kernels
     normalize_fn: CudaFunction,
-    denormalize_fn: CudaFunction,
     interlace_extract_fn: CudaFunction,
     interlace_scatter_fn: CudaFunction,
     enhancer_pack_tiles_fn: CudaFunction,
@@ -160,7 +159,6 @@ impl GpuOps {
         Ok(Self {
             stream,
             normalize_fn: load("normalize", "normalize_kernel"),
-            denormalize_fn: load("normalize", "denormalize_kernel"),
             interlace_extract_fn: load("interlace", "interlace_extract_normalized_kernel"),
             interlace_scatter_fn: load("interlace", "interlace_scatter_denormalized_kernel"),
             enhancer_pack_tiles_fn: load("enhancer_tiles", "enhancer_pack_tiles_kernel"),
@@ -287,26 +285,6 @@ impl GpuOps {
         assert!(len <= data.len());
         let n = len as u32;
         let mut b = self.stream.launch_builder(&self.normalize_fn);
-        b.arg(data);
-        b.arg(&n);
-        unsafe { b.launch(LaunchConfig::for_num_elems(n)) }?;
-        Ok(())
-    }
-
-    /// Denormalize in-place: data[i] = clamp(data[i] * 255, 0, 255)
-    pub fn denormalize(&self, data: &mut CudaSlice<f32>) -> Result<(), DriverError> {
-        self.denormalize_prefix(data, data.len())
-    }
-
-    /// Denormalize only the active prefix of a larger scratch buffer.
-    pub fn denormalize_prefix(
-        &self,
-        data: &mut CudaSlice<f32>,
-        len: usize,
-    ) -> Result<(), DriverError> {
-        assert!(len <= data.len());
-        let n = len as u32;
-        let mut b = self.stream.launch_builder(&self.denormalize_fn);
         b.arg(data);
         b.arg(&n);
         unsafe { b.launch(LaunchConfig::for_num_elems(n)) }?;
