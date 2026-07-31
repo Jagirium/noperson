@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::parameters::{FaceSwapParams, RestorerSize, SwapperModel};
@@ -52,16 +51,16 @@ impl ModelRole {
 pub struct ModelArtifact {
     pub logical_name: String,
     pub filename: String,
-    pub sha256: String,
+    pub blake3: String,
 }
 
 /// One immutable source-to-target identity assignment.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaceAssignmentSpec {
     /// Identity to render into the selected target face.
-    pub source_identity_sha256: String,
+    pub source_identity_blake3: String,
     /// Reference identity used to select a target. `None` explicitly means all faces.
-    pub target_identity_sha256: Option<String>,
+    pub target_identity_blake3: Option<String>,
     /// CrossSwap similarity score in the normalized `[0, 1]` domain.
     pub similarity_threshold: f32,
     /// Optional target-local controls. `None` inherits generation defaults.
@@ -79,7 +78,7 @@ pub struct EngineSpec {
     pub provider: ExecutionProvider,
     pub device_id: i32,
     pub detector: DetectorModel,
-    pub identity_sha256: String,
+    pub identity_blake3: String,
     /// Empty preserves the legacy single-source, swap-all generation contract.
     #[serde(default)]
     pub assignments: Vec<FaceAssignmentSpec>,
@@ -91,8 +90,8 @@ pub struct EngineSpec {
 pub enum EngineSpecError {
     #[error("engine spec requires model role {0:?}")]
     MissingModel(ModelRole),
-    #[error("{field} must be a lowercase SHA-256 digest, got {value}")]
-    InvalidSha256 { field: String, value: String },
+    #[error("{field} must be a lowercase BLAKE3 digest, got {value}")]
+    InvalidBlake3 { field: String, value: String },
     #[error("{0} must not be empty")]
     EmptyField(String),
     #[error("model filename for {role:?} must stay inside the generation root: {filename}")]
@@ -172,15 +171,15 @@ impl EngineSpec {
             self.require(ModelRole::RestorerLandmark)?;
         }
 
-        validate_sha256("identity_sha256", &self.identity_sha256)?;
+        validate_blake3("identity_blake3", &self.identity_blake3)?;
         for (index, assignment) in self.assignments.iter().enumerate() {
-            validate_sha256(
-                &format!("assignments[{index}].source_identity_sha256"),
-                &assignment.source_identity_sha256,
+            validate_blake3(
+                &format!("assignments[{index}].source_identity_blake3"),
+                &assignment.source_identity_blake3,
             )?;
-            if let Some(target) = &assignment.target_identity_sha256 {
-                validate_sha256(
-                    &format!("assignments[{index}].target_identity_sha256"),
+            if let Some(target) = &assignment.target_identity_blake3 {
+                validate_blake3(
+                    &format!("assignments[{index}].target_identity_blake3"),
                     target,
                 )?;
             }
@@ -190,7 +189,7 @@ impl EngineSpec {
                 0.0,
                 1.0,
             )?;
-            if assignment.target_identity_sha256.is_none() && index + 1 != self.assignments.len() {
+            if assignment.target_identity_blake3.is_none() && index + 1 != self.assignments.len() {
                 return Err(EngineSpecError::InvalidAssignments(
                     "an unscoped swap-all assignment must be last".to_owned(),
                 ));
@@ -201,7 +200,7 @@ impl EngineSpec {
                         "assignments[{index}] overrides generation-wide detection, rotation, or enhancement controls"
                     )));
                 }
-                if params.face_likeness_enabled && assignment.target_identity_sha256.is_none() {
+                if params.face_likeness_enabled && assignment.target_identity_blake3.is_none() {
                     return Err(EngineSpecError::InvalidAssignments(format!(
                         "assignments[{index}] enables face likeness without a target identity"
                     )));
@@ -224,7 +223,7 @@ impl EngineSpec {
         if self
             .assignments
             .iter()
-            .any(|assignment| assignment.target_identity_sha256.is_some())
+            .any(|assignment| assignment.target_identity_blake3.is_some())
             && !self.models.contains_key(&ModelRole::Recognizer)
             && !self
                 .assignments
@@ -282,7 +281,7 @@ impl EngineSpec {
                 || self
                     .assignments
                     .iter()
-                    .any(|assignment| assignment.target_identity_sha256.is_none()))
+                    .any(|assignment| assignment.target_identity_blake3.is_none()))
         {
             return Err(EngineSpecError::InvalidAssignments(
                 "face likeness requires a target identity for every assignment".to_owned(),
@@ -582,9 +581,9 @@ impl EngineSpec {
                     filename: artifact.filename.clone(),
                 });
             }
-            validate_sha256(
-                &format!("models.{}.sha256", role.as_str()),
-                &artifact.sha256,
+            validate_blake3(
+                &format!("models.{}.blake3", role.as_str()),
+                &artifact.blake3,
             )?;
 
             if matches!(role, ModelRole::Restorer | ModelRole::Restorer2) {
@@ -633,7 +632,7 @@ impl EngineSpec {
         self.validate()?;
         let bytes = serde_json::to_vec(self)
             .map_err(|error| EngineSpecError::Serialization(error.to_string()))?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        Ok(blake3::hash(&bytes).to_hex().to_string())
     }
 
     fn require(&self, role: ModelRole) -> Result<&ModelArtifact, EngineSpecError> {
@@ -712,8 +711,8 @@ fn register_runtime_sessions(
         let Some(artifact) = models.get(&role) else {
             continue;
         };
-        if let Some(previous) = sessions.insert(session.clone(), artifact.sha256.clone())
-            && previous != artifact.sha256
+        if let Some(previous) = sessions.insert(session.clone(), artifact.blake3.clone())
+            && previous != artifact.blake3
         {
             return Err(EngineSpecError::InvalidAssignments(format!(
                 "runtime session {session} maps to multiple model digests"
@@ -754,7 +753,7 @@ fn validate_float_range(
     }
 }
 
-fn validate_sha256(field: &str, value: &str) -> Result<(), EngineSpecError> {
+fn validate_blake3(field: &str, value: &str) -> Result<(), EngineSpecError> {
     if value.len() == 64
         && value
             .as_bytes()
@@ -763,7 +762,7 @@ fn validate_sha256(field: &str, value: &str) -> Result<(), EngineSpecError> {
     {
         Ok(())
     } else {
-        Err(EngineSpecError::InvalidSha256 {
+        Err(EngineSpecError::InvalidBlake3 {
             field: field.to_owned(),
             value: value.to_owned(),
         })

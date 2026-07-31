@@ -24,7 +24,7 @@ fn spec(seed: char) -> EngineSpec {
             ModelArtifact {
                 logical_name: role.as_str().to_owned(),
                 filename: format!("{}.bin", role.as_str()),
-                sha256: digest.clone(),
+                blake3: digest.clone(),
             },
         )
     })
@@ -33,7 +33,7 @@ fn spec(seed: char) -> EngineSpec {
         provider: ExecutionProvider::Cuda,
         device_id: 0,
         detector: DetectorModel::YoloFace8n,
-        identity_sha256: digest,
+        identity_blake3: digest,
         assignments: Vec::new(),
         models,
         params: FaceSwapParams::default(),
@@ -53,7 +53,7 @@ impl ShadowBuild<String> for ScriptedBuilder {
         spec: &EngineSpec,
         cancellation: &BuildCancellation,
     ) -> Result<String, Self::Error> {
-        let seed = spec.identity_sha256.chars().next().unwrap();
+        let seed = spec.identity_blake3.chars().next().unwrap();
         self.started.send(seed).unwrap();
         match seed {
             'a' => {

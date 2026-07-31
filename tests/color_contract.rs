@@ -5,7 +5,6 @@ use noperson::{
         jpeg_roundtrip_reference,
     },
 };
-use sha2::{Digest, Sha256};
 
 #[test]
 #[allow(clippy::excessive_precision)] // Values captured verbatim from CrossSwap's Kornia path.
@@ -138,8 +137,8 @@ fn jpeg_roundtrip_matches_torchvision_libjpeg_oracle() {
     let decoded = jpeg_roundtrip_reference(&rgb, 8, 8, 50).unwrap();
     let bytes: Vec<u8> = decoded.iter().flatten().copied().collect();
     assert_eq!(
-        format!("{:x}", Sha256::digest(bytes)),
-        "68d4b54625f3fb103841a70f8ddc9fedaea0c4f2830362e5e70356fa3701ed04"
+        blake3::hash(&bytes).to_hex().to_string(),
+        "95356540fe783343bd9603fd6a896dfb24c6ac4d6d508e0c12a106390e7f87fa"
     );
 }
 

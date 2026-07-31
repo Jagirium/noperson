@@ -5,20 +5,18 @@ mod atomic;
 pub use atomic::{AtomicLiveEngine, FaceAssignmentPaths, LiveShadowBuilder};
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream};
 use image::GenericImageView;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::parameters::{FaceSwapParams, RestorerSize, SwapperModel};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 use crate::engine::{BuildCancellation, EngineSpec, ModelArtifact, ModelRole};
 use crate::gpu::ops::GpuOps;
+use crate::models::digest::file_blake3;
 use crate::models::live_catalog::{CANONICAL_SWAPPER_FILENAME, validate_model_file};
 use crate::models::manager::ModelManager;
 use crate::models::registry::find_model;
@@ -246,7 +244,7 @@ pub fn build_live_spec(
         provider,
         device_id,
         detector,
-        identity_sha256: sha256_file(identity_path)?,
+        identity_blake3: blake3_file(identity_path)?,
         assignments: Vec::new(),
         models,
         params,
@@ -267,7 +265,7 @@ fn insert_artifact(
         ModelArtifact {
             logical_name: logical_name.to_owned(),
             filename: filename.to_owned(),
-            sha256: sha256_file(&root.join(filename))?,
+            blake3: blake3_file(&root.join(filename))?,
         },
     );
     Ok(())
@@ -288,18 +286,8 @@ fn artifact_path(models_dir: &Path, role: ModelRole, filename: &str) -> std::pat
     }
 }
 
-fn sha256_file(path: &Path) -> anyhow::Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+fn blake3_file(path: &Path) -> anyhow::Result<String> {
+    Ok(file_blake3(path)?)
 }
 
 fn required_artifact(spec: &EngineSpec, role: ModelRole) -> anyhow::Result<&ModelArtifact> {
@@ -309,7 +297,7 @@ fn required_artifact(spec: &EngineSpec, role: ModelRole) -> anyhow::Result<&Mode
 }
 
 fn dfm_session_name(artifact: &ModelArtifact) -> String {
-    format!("DFM-{}", &artifact.sha256[..16])
+    format!("DFM-{}", &artifact.blake3[..16])
 }
 
 fn restorer_session_name(params: &FaceSwapParams) -> anyhow::Result<Option<&'static str>> {
@@ -517,14 +505,14 @@ impl LiveEngine {
         ensure_build_active(cancellation)?;
         spec.validate()?;
         if verify_files {
-            validate_model_file(identity_path, &spec.identity_sha256)?;
+            validate_model_file(identity_path, &spec.identity_blake3)?;
             anyhow::ensure!(
                 assignments.len() == spec.assignments.len(),
                 "resolved face assignments do not match the generation spec"
             );
             for (resolved, assignment) in assignments.iter().zip(&spec.assignments) {
-                validate_model_file(&resolved.source_path, &assignment.source_identity_sha256)?;
-                match (&resolved.target_path, &assignment.target_identity_sha256) {
+                validate_model_file(&resolved.source_path, &assignment.source_identity_blake3)?;
+                match (&resolved.target_path, &assignment.target_identity_blake3) {
                     (Some(path), Some(digest)) => validate_model_file(path, digest)?,
                     (None, None) => {}
                     _ => anyhow::bail!("resolved target identity does not match generation spec"),
@@ -535,7 +523,7 @@ impl LiveEngine {
             for (role, artifact) in &spec.models {
                 validate_model_file(
                     &artifact_path(models_dir, *role, &artifact.filename),
-                    &artifact.sha256,
+                    &artifact.blake3,
                 )?;
                 ensure_build_active(cancellation)?;
             }
@@ -543,7 +531,7 @@ impl LiveEngine {
                 for (role, artifact) in &assignment.models {
                     validate_model_file(
                         &artifact_path(models_dir, *role, &artifact.filename),
-                        &artifact.sha256,
+                        &artifact.blake3,
                     )?;
                     ensure_build_active(cancellation)?;
                 }

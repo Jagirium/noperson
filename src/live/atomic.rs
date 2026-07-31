@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use cudarc::driver::{CudaSlice, CudaStream};
 
-use super::{LiveEngine, ProcessedRgb, ResolvedFaceAssignment, sha256_file};
+use super::{LiveEngine, ProcessedRgb, ResolvedFaceAssignment, blake3_file};
 use crate::config::parameters::FaceSwapParams;
 use crate::engine::{
     ActivationError, ActivationOutcome, BuildCancellation, BuildRequestOutcome, BuildSnapshot,
@@ -32,7 +32,7 @@ struct IdentityCatalog {
 
 impl IdentityCatalog {
     fn register(&self, path: &Path) -> anyhow::Result<String> {
-        let digest = sha256_file(path)?;
+        let digest = blake3_file(path)?;
         self.paths
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -83,7 +83,7 @@ impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
         anyhow::ensure!(!cancellation.is_cancelled(), "shadow build cancelled");
         let identity_path = self
             .identities
-            .resolve(&spec.identity_sha256)
+            .resolve(&spec.identity_blake3)
             .ok_or_else(|| anyhow::anyhow!("identity content is not registered"))?;
         let assignments = spec
             .assignments
@@ -92,12 +92,12 @@ impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
                 Ok(ResolvedFaceAssignment {
                     source_path: self
                         .identities
-                        .resolve(&assignment.source_identity_sha256)
+                        .resolve(&assignment.source_identity_blake3)
                         .ok_or_else(|| {
                             anyhow::anyhow!("source identity content is not registered")
                         })?,
                     target_path: assignment
-                        .target_identity_sha256
+                        .target_identity_blake3
                         .as_deref()
                         .map(|digest| {
                             self.identities.resolve(digest).ok_or_else(|| {
@@ -141,8 +141,8 @@ impl AtomicLiveEngine {
             .iter()
             .map(|assignment| {
                 Ok(FaceAssignmentSpec {
-                    source_identity_sha256: identities.register(&assignment.source_path)?,
-                    target_identity_sha256: assignment
+                    source_identity_blake3: identities.register(&assignment.source_path)?,
+                    target_identity_blake3: assignment
                         .target_path
                         .as_deref()
                         .map(|path| identities.register(path))
@@ -154,7 +154,7 @@ impl AtomicLiveEngine {
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
         if let Some(first) = spec.assignments.first() {
-            spec.identity_sha256 = first.source_identity_sha256.clone();
+            spec.identity_blake3 = first.source_identity_blake3.clone();
         }
         Ok(())
     }
@@ -165,7 +165,7 @@ impl AtomicLiveEngine {
         mut initial_spec: EngineSpec,
         probation_frames: u32,
     ) -> anyhow::Result<Self> {
-        initial_spec.identity_sha256 = builder.register_identity(identity_path)?;
+        initial_spec.identity_blake3 = builder.register_identity(identity_path)?;
         let initial_engine = builder.build(&initial_spec, &BuildCancellation::default())?;
         let initial = EngineGeneration::new(initial_spec, initial_engine)?;
         let identities = Arc::clone(&builder.identities);
@@ -204,7 +204,7 @@ impl AtomicLiveEngine {
         mut spec: EngineSpec,
         identity_path: &Path,
     ) -> anyhow::Result<BuildRequestOutcome> {
-        spec.identity_sha256 = self.identities.register(identity_path)?;
+        spec.identity_blake3 = self.identities.register(identity_path)?;
         let generation = spec.generation_digest()?;
         if self.supervisor.snapshot().active_generation == generation {
             self.builds.cancel_pending();

@@ -6,14 +6,14 @@ use noperson::config::parameters::{
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
 use noperson::engine::{EngineSpec, EngineSpecError, FaceAssignmentSpec, ModelArtifact, ModelRole};
 
-const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const BLAKE3_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const BLAKE3_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-fn artifact(logical_name: &str, filename: &str, sha256: &str) -> ModelArtifact {
+fn artifact(logical_name: &str, filename: &str, blake3: &str) -> ModelArtifact {
     ModelArtifact {
         logical_name: logical_name.to_owned(),
         filename: filename.to_owned(),
-        sha256: sha256.to_owned(),
+        blake3: blake3.to_owned(),
     }
 }
 
@@ -21,19 +21,19 @@ fn required_models(reverse: bool) -> BTreeMap<ModelRole, ModelArtifact> {
     let entries = [
         (
             ModelRole::Detector,
-            artifact("YoloFace8n", "yoloface_8n.onnx", SHA_A),
+            artifact("YoloFace8n", "yoloface_8n.onnx", BLAKE3_A),
         ),
         (
             ModelRole::Recognizer,
-            artifact("ArcFaceW600kR50", "w600k_r50.onnx", SHA_A),
+            artifact("ArcFaceW600kR50", "w600k_r50.onnx", BLAKE3_A),
         ),
         (
             ModelRole::Swapper,
-            artifact("Inswapper128", "inswapper_128.fp16.onnx", SHA_B),
+            artifact("Inswapper128", "inswapper_128.fp16.onnx", BLAKE3_B),
         ),
         (
             ModelRole::Emap,
-            artifact("InswapperEmap", "emap.bin", SHA_B),
+            artifact("InswapperEmap", "emap.bin", BLAKE3_B),
         ),
     ];
     if reverse {
@@ -48,7 +48,7 @@ fn valid_spec(reverse: bool) -> EngineSpec {
         provider: ExecutionProvider::Cuda,
         device_id: 0,
         detector: DetectorModel::YoloFace8n,
-        identity_sha256: SHA_A.to_owned(),
+        identity_blake3: BLAKE3_A.to_owned(),
         assignments: Vec::new(),
         models: required_models(reverse),
         params: FaceSwapParams::default(),
@@ -71,15 +71,15 @@ fn face_assignments_are_generation_identity_and_swap_all_is_last() {
     let mut first = valid_spec(false);
     first.assignments = vec![
         FaceAssignmentSpec {
-            source_identity_sha256: SHA_A.to_owned(),
-            target_identity_sha256: Some(SHA_B.to_owned()),
+            source_identity_blake3: BLAKE3_A.to_owned(),
+            target_identity_blake3: Some(BLAKE3_B.to_owned()),
             similarity_threshold: 0.6,
             params: None,
             models: BTreeMap::new(),
         },
         FaceAssignmentSpec {
-            source_identity_sha256: SHA_B.to_owned(),
-            target_identity_sha256: None,
+            source_identity_blake3: BLAKE3_B.to_owned(),
+            target_identity_blake3: None,
             similarity_threshold: 0.5,
             params: None,
             models: BTreeMap::new(),
@@ -102,8 +102,8 @@ fn face_assignments_are_generation_identity_and_swap_all_is_last() {
 fn per_face_parameters_are_part_of_generation_identity() {
     let mut first = valid_spec(false);
     first.assignments = vec![FaceAssignmentSpec {
-        source_identity_sha256: SHA_A.to_owned(),
-        target_identity_sha256: Some(SHA_B.to_owned()),
+        source_identity_blake3: BLAKE3_A.to_owned(),
+        target_identity_blake3: Some(BLAKE3_B.to_owned()),
         similarity_threshold: 0.6,
         params: Some(FaceSwapParams::default()),
         models: BTreeMap::new(),
@@ -122,8 +122,8 @@ fn per_face_parameters_are_validated_and_can_select_content_addressed_models() {
         ..FaceSwapParams::default()
     };
     spec.assignments = vec![FaceAssignmentSpec {
-        source_identity_sha256: SHA_A.to_owned(),
-        target_identity_sha256: Some(SHA_B.to_owned()),
+        source_identity_blake3: BLAKE3_A.to_owned(),
+        target_identity_blake3: Some(BLAKE3_B.to_owned()),
         similarity_threshold: 0.6,
         params: Some(params),
         models: BTreeMap::new(),
@@ -133,9 +133,10 @@ fn per_face_parameters_are_validated_and_can_select_content_addressed_models() {
     spec.assignments[0].params.as_mut().unwrap().restorer_alpha = 1.0;
     spec.assignments[0].params.as_mut().unwrap().swapper_model = SwapperModel::Dfm;
     spec.assignments[0].params.as_mut().unwrap().dfm_model = "statham.dfm".to_owned();
-    spec.assignments[0]
-        .models
-        .insert(ModelRole::Dfm, artifact("StathamDFM", "statham.dfm", SHA_B));
+    spec.assignments[0].models.insert(
+        ModelRole::Dfm,
+        artifact("StathamDFM", "statham.dfm", BLAKE3_B),
+    );
     spec.validate().expect("assignment-local DFM is valid");
 
     let digest = spec.generation_digest().unwrap();
@@ -143,7 +144,7 @@ fn per_face_parameters_are_validated_and_can_select_content_addressed_models() {
         .models
         .get_mut(&ModelRole::Dfm)
         .unwrap()
-        .sha256 = SHA_A.to_owned();
+        .blake3 = BLAKE3_A.to_owned();
     assert_ne!(digest, spec.generation_digest().unwrap());
 }
 
@@ -166,11 +167,13 @@ fn targeted_dfm_generation_requires_arcface_for_assignment_matching() {
     spec.models.remove(&ModelRole::Swapper);
     spec.models.remove(&ModelRole::Emap);
     spec.models.remove(&ModelRole::Recognizer);
-    spec.models
-        .insert(ModelRole::Dfm, artifact("StathamDFM", "statham.dfm", SHA_B));
+    spec.models.insert(
+        ModelRole::Dfm,
+        artifact("StathamDFM", "statham.dfm", BLAKE3_B),
+    );
     spec.assignments = vec![FaceAssignmentSpec {
-        source_identity_sha256: SHA_A.to_owned(),
-        target_identity_sha256: Some(SHA_B.to_owned()),
+        source_identity_blake3: BLAKE3_A.to_owned(),
+        target_identity_blake3: Some(BLAKE3_B.to_owned()),
         similarity_threshold: 0.6,
         params: None,
         models: BTreeMap::new(),
@@ -190,23 +193,23 @@ fn assignment_model_union_rejects_runtime_session_name_collisions() {
     };
     spec.assignments = vec![
         FaceAssignmentSpec {
-            source_identity_sha256: SHA_A.to_owned(),
-            target_identity_sha256: Some(SHA_A.to_owned()),
+            source_identity_blake3: BLAKE3_A.to_owned(),
+            target_identity_blake3: Some(BLAKE3_A.to_owned()),
             similarity_threshold: 0.6,
             params: Some(params.clone()),
             models: BTreeMap::from([(
                 ModelRole::Occluder,
-                artifact("Occluder", "occluder-a.onnx", SHA_A),
+                artifact("Occluder", "occluder-a.onnx", BLAKE3_A),
             )]),
         },
         FaceAssignmentSpec {
-            source_identity_sha256: SHA_B.to_owned(),
-            target_identity_sha256: Some(SHA_B.to_owned()),
+            source_identity_blake3: BLAKE3_B.to_owned(),
+            target_identity_blake3: Some(BLAKE3_B.to_owned()),
             similarity_threshold: 0.6,
             params: Some(params),
             models: BTreeMap::from([(
                 ModelRole::Occluder,
-                artifact("Occluder", "occluder-b.onnx", SHA_B),
+                artifact("Occluder", "occluder-b.onnx", BLAKE3_B),
             )]),
         },
     ];
@@ -224,8 +227,8 @@ fn assignment_cannot_override_generation_wide_detection_or_enhancement() {
         ..FaceSwapParams::default()
     };
     spec.assignments = vec![FaceAssignmentSpec {
-        source_identity_sha256: SHA_A.to_owned(),
-        target_identity_sha256: Some(SHA_B.to_owned()),
+        source_identity_blake3: BLAKE3_A.to_owned(),
+        target_identity_blake3: Some(BLAKE3_B.to_owned()),
         similarity_threshold: 0.6,
         params: Some(params),
         models: BTreeMap::new(),
@@ -239,11 +242,11 @@ fn assignment_cannot_override_generation_wide_detection_or_enhancement() {
 #[test]
 fn malformed_digest_is_rejected_before_model_loading() {
     let mut spec = valid_spec(false);
-    spec.models.get_mut(&ModelRole::Detector).unwrap().sha256 = "A".repeat(64);
+    spec.models.get_mut(&ModelRole::Detector).unwrap().blake3 = "A".repeat(64);
 
     assert!(matches!(
         spec.validate(),
-        Err(EngineSpecError::InvalidSha256 { field, .. }) if field == "models.detector.sha256"
+        Err(EngineSpecError::InvalidBlake3 { field, .. }) if field == "models.detector.blake3"
     ));
 }
 
@@ -259,7 +262,7 @@ fn gpen_1024_and_2048_are_excluded_from_new_generations() {
     let mut by_artifact = valid_spec(false);
     by_artifact.models.insert(
         ModelRole::Restorer,
-        artifact("GPEN-2048", "gpen_2048.onnx", SHA_A),
+        artifact("GPEN-2048", "gpen_2048.onnx", BLAKE3_A),
     );
     assert_eq!(
         by_artifact.validate(),
@@ -290,7 +293,7 @@ fn enabled_second_restorer_requires_an_independent_artifact() {
 
     spec.models.insert(
         ModelRole::Restorer2,
-        artifact("GPENBFR256", "GPEN-BFR-256.onnx", SHA_A),
+        artifact("GPENBFR256", "GPEN-BFR-256.onnx", BLAKE3_A),
     );
     spec.validate().expect("valid second-restorer generation");
 }
@@ -302,7 +305,7 @@ fn reference_restorer_alignment_requires_five_point_landmarks() {
     spec.params.restorer_alignment = RestorerAlignment::Reference;
     spec.models.insert(
         ModelRole::Restorer,
-        artifact("GPENBFR256", "GPEN-BFR-256.onnx", SHA_A),
+        artifact("GPENBFR256", "GPEN-BFR-256.onnx", BLAKE3_A),
     );
 
     assert_eq!(
@@ -312,7 +315,7 @@ fn reference_restorer_alignment_requires_five_point_landmarks() {
 
     spec.models.insert(
         ModelRole::RestorerLandmark,
-        artifact("FaceLandmark5", "res50.onnx", SHA_B),
+        artifact("FaceLandmark5", "res50.onnx", BLAKE3_B),
     );
     spec.validate().expect("valid reference-aligned restorer");
 }
@@ -329,7 +332,7 @@ fn enabled_landmark_refiner_requires_its_generation_artifact() {
 
     spec.models.insert(
         ModelRole::Landmark,
-        artifact("FaceLandmark203", "landmark.onnx", SHA_A),
+        artifact("FaceLandmark203", "landmark.onnx", BLAKE3_A),
     );
     spec.validate().expect("valid landmark generation");
 
@@ -359,7 +362,7 @@ fn dfm_generation_replaces_the_inswapper_model_group() {
 
     spec.models.insert(
         ModelRole::Dfm,
-        artifact("JasonStatham320", "JasonStatham320.dfm", SHA_A),
+        artifact("JasonStatham320", "JasonStatham320.dfm", BLAKE3_A),
     );
     spec.validate().expect("valid DFM generation");
 }
@@ -372,7 +375,7 @@ fn dfm_controls_and_artifact_selection_are_generation_identity() {
     spec.params.dfm_morph = f32::NAN;
     spec.models.insert(
         ModelRole::Dfm,
-        artifact("JasonStatham320", "JasonStatham320.dfm", SHA_A),
+        artifact("JasonStatham320", "JasonStatham320.dfm", BLAKE3_A),
     );
     assert!(matches!(
         spec.validate(),
@@ -400,7 +403,7 @@ fn enabled_enhancer_requires_the_selected_model_artifact() {
 
     spec.models.insert(
         ModelRole::Enhancer,
-        artifact("RealEsrganx2Plus", "RealESRGAN_x2plus.fp16.onnx", SHA_A),
+        artifact("RealEsrganx2Plus", "RealESRGAN_x2plus.fp16.onnx", BLAKE3_A),
     );
     assert!(matches!(
         spec.validate(),
@@ -414,7 +417,7 @@ fn enhancer_selection_and_blend_are_generation_identity() {
     x2.params.enhancer_enabled = true;
     x2.models.insert(
         ModelRole::Enhancer,
-        artifact("RealEsrganx2Plus", "RealESRGAN_x2plus.fp16.onnx", SHA_A),
+        artifact("RealEsrganx2Plus", "RealESRGAN_x2plus.fp16.onnx", BLAKE3_A),
     );
     let mut blended = x2.clone();
     blended.params.enhancer_blend = 0.5;

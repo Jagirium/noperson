@@ -23,7 +23,7 @@ fn spec(seed: char) -> EngineSpec {
             ModelArtifact {
                 logical_name: role.as_str().to_owned(),
                 filename: format!("{}.bin", role.as_str()),
-                sha256: digest.clone(),
+                blake3: digest.clone(),
             },
         )
     })
@@ -32,7 +32,7 @@ fn spec(seed: char) -> EngineSpec {
         provider: ExecutionProvider::Cuda,
         device_id: 0,
         detector: DetectorModel::YoloFace8n,
-        identity_sha256: digest,
+        identity_blake3: digest,
         assignments: Vec::new(),
         models,
         params: FaceSwapParams::default(),

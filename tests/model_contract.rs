@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use noperson::models::live_catalog::{
-    CANONICAL_SWAPPER_FILENAME, CANONICAL_SWAPPER_SHA256, ModelContractError, validate_live_models,
+    CANONICAL_SWAPPER_BLAKE3, CANONICAL_SWAPPER_FILENAME, ModelContractError, validate_live_models,
     validate_model_file, validate_model_file_against_any, validate_swapper_multibatch_contract,
 };
 
@@ -17,7 +17,7 @@ fn wrong_digest_reports_the_model_path_and_both_digests() {
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
-    std::fs::write(&path, b"definitely not an ONNX model").unwrap();
+    std::fs::write(&path, b"abc").unwrap();
 
     let error = validate_model_file(&path, "00").unwrap_err();
     let _ = std::fs::remove_file(&path);
@@ -32,7 +32,7 @@ fn wrong_digest_reports_the_model_path_and_both_digests() {
             assert_eq!(expected, "00");
             assert_eq!(
                 actual,
-                "990e756c46e9ea4b6aebdc33b4ef5adb4cac3b97bfbcfb614134d8d2381f0901"
+                "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
             );
         }
         other => panic!("expected a digest mismatch, got {other}"),
@@ -46,13 +46,13 @@ fn release_digest_is_accepted_alongside_the_source_digest() {
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
-    std::fs::write(&path, b"release candidate").unwrap();
+    std::fs::write(&path, b"").unwrap();
 
     validate_model_file_against_any(
         &path,
         &[
             "source-digest",
-            "4b5297a5261624acded347f2aec687e6e3ac4153d1a056c571e48b7651197d40",
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
         ],
     )
     .unwrap();
@@ -63,8 +63,8 @@ fn release_digest_is_accepted_alongside_the_source_digest() {
 fn canonical_swapper_contract_matches_the_supplied_asset() {
     assert_eq!(CANONICAL_SWAPPER_FILENAME, "inswapper_128.fp16.onnx");
     assert_eq!(
-        CANONICAL_SWAPPER_SHA256,
-        "f29a902862df018264ad4fd0c25387acd0581e168a9baa0372d71c465b65bf27"
+        CANONICAL_SWAPPER_BLAKE3,
+        "65d91b580afffee6c0358c0fb48f9743a5502cbf8fff997e8051f76e07ae7bd0"
     );
     validate_swapper_multibatch_contract(Path::new("models").join(CANONICAL_SWAPPER_FILENAME))
         .expect("canonical swapper must expose a dynamic batch axis");

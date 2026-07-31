@@ -58,7 +58,7 @@ fn live_spec_is_content_addressed_before_gpu_allocation() {
         0,
     )
     .unwrap();
-    assert_ne!(first.identity_sha256, second.identity_sha256);
+    assert_ne!(first.identity_blake3, second.identity_blake3);
     assert_ne!(first_generation, second.generation_digest().unwrap());
 
     fs::remove_dir_all(root).unwrap();

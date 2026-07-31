@@ -53,8 +53,8 @@ nalgebra = "0.34"
 # ── Byte casting ───────────────────────────────────────────────────
 bytemuck = { version = "1", features = ["derive"] }
 
-# ── Hashing (model integrity verification) ──────────────────────────
-sha2 = "0.10"
+# ── Hashing (parallel model integrity verification) ─────────────────
+blake3 = { version = "1", features = ["rayon"] }
 
 # ── Lock-free engine generation reads ──────────────────────────────
 arc-swap = "1.7"
