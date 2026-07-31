@@ -21,7 +21,8 @@ use crate::pipeline::workspace::GpuWorkspace;
 /// Source face identity: pre-computed embedding for matching.
 #[derive(Clone)]
 pub struct SourceFace {
-    pub embedding: Vec<f32>,
+    /// Reference target identity. `None` is the explicit swap-all shortcut.
+    pub target_embedding: Option<Vec<f32>>,
     /// Inswapper latent is invariant for an identity. Compute it once when the
     /// source is loaded instead of doing a 512x512 CPU matmul for every face.
     pub latent: Vec<f32>,
@@ -98,25 +99,28 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
 
         // 2a. Match against sources
         let source = if params.swapper_model == SwapperModel::Inswapper128 {
-            Some(if sources.len() == 1 && sources[0].threshold <= 0.0 {
-                &sources[0]
-            } else {
-                let embedding = FaceRecognizer::recognize_gpu(
-                    manager,
-                    gpu,
-                    frame_chw,
-                    frame_h,
-                    frame_w,
-                    &effective_kps,
-                    ws,
-                )?;
-                match sources.iter().find(|src| {
-                    FaceRecognizer::cosine_similarity(&embedding, &src.embedding) >= src.threshold
-                }) {
-                    Some(source) => source,
-                    None => continue,
-                }
-            })
+            Some(
+                if sources.len() == 1 && sources[0].target_embedding.is_none() {
+                    &sources[0]
+                } else {
+                    let embedding = FaceRecognizer::recognize_gpu(
+                        manager,
+                        gpu,
+                        frame_chw,
+                        frame_h,
+                        frame_w,
+                        &effective_kps,
+                        ws,
+                    )?;
+                    match sources
+                        .iter()
+                        .find(|src| assignment_matches(src, &embedding))
+                    {
+                        Some(source) => source,
+                        None => continue,
+                    }
+                },
+            )
         } else {
             None
         };
@@ -370,6 +374,17 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     })
 }
 
+fn assignment_matches(assignment: &SourceFace, detected_embedding: &[f32]) -> bool {
+    assignment.target_embedding.as_ref().is_none_or(|target| {
+        let cosine = FaceRecognizer::cosine_similarity(detected_embedding, target);
+        crosswap_similarity(cosine) >= assignment.threshold
+    })
+}
+
+fn crosswap_similarity(cosine: f32) -> f32 {
+    (1.0 + cosine) * 0.5
+}
+
 fn restorer_contract(size: RestorerSize) -> anyhow::Result<(&'static str, usize)> {
     match size {
         RestorerSize::Gpen256 => Ok(("GPENBFR256", 256)),
@@ -404,7 +419,10 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 
 #[cfg(test)]
 mod tests {
-    use super::{restorer_contract, scaled_arcface_template, strength_plan};
+    use super::{
+        SourceFace, assignment_matches, crosswap_similarity, restorer_contract,
+        scaled_arcface_template, strength_plan,
+    };
     use crate::config::parameters::RestorerSize;
 
     #[test]
@@ -435,5 +453,36 @@ mod tests {
         assert_eq!(strength_plan(1.25), (2, 0.25));
         assert_eq!(strength_plan(2.0), (2, 1.0));
         assert_eq!(strength_plan(5.0), (5, 1.0));
+    }
+
+    #[test]
+    fn similarity_uses_crossswap_score_scale() {
+        assert_eq!(crosswap_similarity(1.0), 1.0);
+        assert_eq!(crosswap_similarity(0.0), 0.5);
+        assert_eq!(crosswap_similarity(-1.0), 0.0);
+    }
+
+    #[test]
+    fn target_assignment_is_separate_from_source_latent() {
+        let mut target = vec![0.0; 512];
+        target[0] = 1.0;
+        let mut same = vec![0.0; 512];
+        same[0] = 1.0;
+        let mut different = vec![0.0; 512];
+        different[1] = 1.0;
+        let scoped = SourceFace {
+            target_embedding: Some(target),
+            latent: vec![9.0, 8.0],
+            threshold: 0.75,
+        };
+        assert!(assignment_matches(&scoped, &same));
+        assert!(!assignment_matches(&scoped, &different));
+
+        let swap_all = SourceFace {
+            target_embedding: None,
+            latent: vec![9.0, 8.0],
+            threshold: 1.0,
+        };
+        assert!(assignment_matches(&swap_all, &different));
     }
 }

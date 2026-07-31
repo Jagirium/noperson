@@ -80,7 +80,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Target face: embedding + latent computed");
 
     let sources = vec![SourceFace {
-        embedding: target_emb,
+        target_embedding: None,
         latent,
         threshold: 0.0,
     }];

@@ -511,9 +511,9 @@ impl LiveEngine {
             let latent = FaceRecognizer::calc_latent(&embedding, emap);
             ensure_build_active(cancellation)?;
             vec![SourceFace {
-                embedding,
+                target_embedding: None,
                 latent,
-                threshold: 0.0,
+                threshold: spec.params.similarity_threshold,
             }]
         } else {
             Vec::new()

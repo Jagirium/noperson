@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
     let emap = manager.emap.as_ref().unwrap();
     let latent = FaceRecognizer::calc_latent(&target_emb, emap);
     let sources = vec![SourceFace {
-        embedding: target_emb,
+        target_embedding: None,
         latent,
         threshold: 0.0,
     }];
