@@ -59,7 +59,7 @@ impl FaceRecognizer {
         frame_w: u32,
         kps_5: &[[f32; 2]; 5],
         ws: &mut GpuWorkspace,
-    ) -> anyhow::Result<Vec<f32>> {
+    ) -> anyhow::Result<[f32; 512]> {
         let affine_mat = affine::estimate_face_affine(kps_5, &ARCFACE_DST);
         gpu.warp_affine_npp(
             frame_chw_gpu,
@@ -113,7 +113,7 @@ impl FaceRecognizer {
         }
 
         gpu.download_into(&ws.arcface_embedding, &mut ws.host_embedding)?;
-        Ok(ws.host_embedding.clone())
+        Ok(ws.host_embedding)
     }
 
     /// Compute Inswapper latent from ArcFace embedding (CPU).

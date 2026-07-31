@@ -372,6 +372,7 @@ fn identity_embedding_gpu(
         .filter(|landmarks| landmarks.is_preferred_to(face.score))
         .map_or(face.kps_5, |landmarks| landmarks.five);
     FaceRecognizer::recognize_gpu(manager, gpu, &chw, height, width, &keypoints, workspace)
+        .map(Vec::from)
 }
 
 fn apply_face_likeness(source_latent: &mut [f32], target_latent: &[f32], factor: f32) {

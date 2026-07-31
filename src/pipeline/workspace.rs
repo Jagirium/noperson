@@ -86,7 +86,7 @@ pub struct GpuWorkspace {
 
     // Pre-allocated host staging buffers (reused to avoid per-frame Vec alloc)
     pub host_detect_candidates: Vec<f32>, // [16800, 15]
-    pub host_embedding: Vec<f32>,         // [512] — ArcFace embedding
+    pub host_embedding: [f32; 512],       // ArcFace embedding
     pub host_swap_tiles: Vec<f32>,        // [16*3*128*128]
     pub host_color_original: Vec<f32>,    // [3*512*512], exact histogram fallback
     pub host_color_swapped: Vec<f32>,     // [3*512*512], exact histogram fallback
@@ -174,7 +174,7 @@ impl GpuWorkspace {
             emap: stream.alloc_zeros::<f32>(512 * 512)?,
 
             host_detect_candidates: vec![0.0f32; 16_800 * 15],
-            host_embedding: vec![0.0f32; 512],
+            host_embedding: [0.0f32; 512],
             host_swap_tiles: vec![0.0f32; swap_batch_size],
             host_color_original: vec![0.0f32; face_512_size],
             host_color_swapped: vec![0.0f32; face_512_size],

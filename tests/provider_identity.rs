@@ -112,6 +112,7 @@ fn identity_embedding(
         &face.kps_5,
         &mut workspace,
     )
+    .map(Vec::from)
 }
 
 fn tensor_similarity(reference: &[f32], candidate: &[f32]) -> (f32, f32, f32) {
