@@ -66,6 +66,7 @@ pub struct GpuOps {
     rotate_quadrants_fn: CudaFunction,
     affine_scale_fn: CudaFunction,
     affine_scale_copy_fn: CudaFunction,
+    yolo_face_compact_fn: CudaFunction,
     chw_rgb_to_nhwc_bgr_unit_fn: CudaFunction,
     nhwc_bgr_unit_to_chw_rgb_fn: CudaFunction,
     dfm_rct_stats_fn: CudaFunction,
@@ -177,6 +178,7 @@ impl GpuOps {
             rotate_quadrants_fn: load("rotate", "rotate_quadrants_chw_kernel"),
             affine_scale_fn: load("frame_convert", "affine_scale_kernel"),
             affine_scale_copy_fn: load("frame_convert", "affine_scale_copy_kernel"),
+            yolo_face_compact_fn: load("detector_decode", "yolo_face_compact_kernel"),
             chw_rgb_to_nhwc_bgr_unit_fn: load("layout_convert", "chw_rgb_to_nhwc_bgr_unit_kernel"),
             nhwc_bgr_unit_to_chw_rgb_fn: load("layout_convert", "nhwc_bgr_unit_to_chw_rgb_kernel"),
             dfm_rct_stats_fn: load("dfm_color", "dfm_rct_stats_kernel"),
@@ -328,6 +330,33 @@ impl GpuOps {
         b.arg(&mul);
         b.arg(&add);
         unsafe { b.launch(LaunchConfig::for_num_elems(n)) }?;
+        Ok(())
+    }
+
+    pub fn compact_yolo_faces(
+        &self,
+        output: &CudaSlice<f32>,
+        candidates: &mut CudaSlice<f32>,
+        count: &mut CudaSlice<u32>,
+        threshold: f32,
+        scale: f32,
+    ) -> Result<(), DriverError> {
+        let anchors = 8400u32;
+        debug_assert!(candidates.len() >= anchors as usize * 15);
+        let mut b = self.stream.launch_builder(&self.yolo_face_compact_fn);
+        b.arg(output);
+        b.arg(candidates);
+        b.arg(count);
+        b.arg(&anchors);
+        b.arg(&threshold);
+        b.arg(&scale);
+        unsafe {
+            b.launch(LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }?;
         Ok(())
     }
 

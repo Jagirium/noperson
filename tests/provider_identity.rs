@@ -244,7 +244,7 @@ fn provider_stage_cosines_locate_first_identity_divergence() -> anyhow::Result<(
         height,
         width,
     )?;
-    let cuda_detector_activation = cuda_workspace.host_det_output.clone();
+    let cuda_detector_activation = cuda_workspace.host_detect_candidates.clone();
     let (tensorrt_faces, _) = detector.detect_gpu(
         &mut tensorrt_manager,
         &gpu,
@@ -253,7 +253,7 @@ fn provider_stage_cosines_locate_first_identity_divergence() -> anyhow::Result<(
         height,
         width,
     )?;
-    let tensorrt_detector_activation = tensorrt_workspace.host_det_output.clone();
+    let tensorrt_detector_activation = tensorrt_workspace.host_detect_candidates.clone();
     let cuda_face = cuda_faces
         .first()
         .ok_or_else(|| anyhow::anyhow!("CUDA detector found no face"))?;

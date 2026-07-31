@@ -314,13 +314,52 @@ impl YoloFaceDetector {
             drop(output_value);
         }
 
-        // 3. Download only the output (168000 f32 = 672 KB) for CPU decode.
-        gpu.download_into(&ws.detect_output, &mut ws.host_det_output)?;
-        let data = ws.host_det_output.as_slice();
-        let shape = [1i64, 20, 8400];
-        let mut faces = self.decode_yolo(data, &shape, det_scale)?;
+        // 3. Deterministically compact thresholded candidates on-device. Most
+        // frames now transfer tens of floats instead of all 168000 outputs.
+        gpu.compact_yolo_faces(
+            &ws.detect_output,
+            &mut ws.detect_candidates,
+            &mut ws.detect_candidate_count,
+            self.score_threshold,
+            det_scale,
+        )?;
+        let mut count = [0u32; 1];
+        gpu.stream
+            .memcpy_dtoh(&ws.detect_candidate_count, &mut count)?;
+        let count = count[0] as usize;
+        anyhow::ensure!(
+            count <= 8400,
+            "YOLO candidate count exceeds output capacity"
+        );
+        let elements = count * 15;
+        if elements > 0 {
+            let candidates = ws.detect_candidates.slice(..elements);
+            gpu.stream
+                .memcpy_dtoh(&candidates, &mut ws.host_detect_candidates[..elements])?;
+        }
+        let mut faces = self.decode_compact_yolo(&ws.host_detect_candidates, count);
         select_center_faces(&mut faces, frame_h, frame_w, self.max_faces);
         Ok((faces, det_scale))
+    }
+
+    fn decode_compact_yolo(&self, data: &[f32], count: usize) -> Vec<DetectedFace> {
+        let mut dets = Vec::with_capacity(count);
+        for candidate in data[..count * 15].chunks_exact(15) {
+            let kps_5 =
+                std::array::from_fn(|index| [candidate[4 + index * 2], candidate[5 + index * 2]]);
+            dets.push(DetectedFace {
+                bbox: [candidate[0], candidate[1], candidate[2], candidate[3]],
+                kps_5,
+                score: candidate[14],
+            });
+        }
+        dets.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        nms(&mut dets, self.nms_iou_threshold);
+        dets
     }
 
     fn decode_yolo(
@@ -803,9 +842,28 @@ fn select_center_faces(
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorDetector, AnchorDetectorKind, DetectedFace, select_center_faces, unrotate_detection,
-        unrotate_point,
+        AnchorDetector, AnchorDetectorKind, DetectedFace, YoloFaceDetector, select_center_faces,
+        unrotate_detection, unrotate_point,
     };
+
+    #[test]
+    fn compact_yolo_candidates_preserve_geometry_score_sort_and_nms() {
+        let detector = YoloFaceDetector::new(0.5);
+        let mut candidates = vec![0.0f32; 3 * 15];
+        candidates[0..4].copy_from_slice(&[0.0, 0.0, 10.0, 10.0]);
+        candidates[4..14].copy_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+        candidates[14] = 0.8;
+        candidates[15..19].copy_from_slice(&[1.0, 1.0, 11.0, 11.0]);
+        candidates[29] = 0.7;
+        candidates[30..34].copy_from_slice(&[100.0, 100.0, 120.0, 120.0]);
+        candidates[44] = 0.9;
+
+        let faces = detector.decode_compact_yolo(&candidates, 3);
+        assert_eq!(faces.len(), 2);
+        assert_eq!(faces[0].score, 0.9);
+        assert_eq!(faces[1].bbox, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(faces[1].kps_5[0], [1.0, 2.0]);
+    }
 
     #[test]
     fn rotated_coordinates_map_back_to_the_original_frame() {
