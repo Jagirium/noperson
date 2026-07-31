@@ -205,6 +205,16 @@ impl EngineSpec {
         validate_float_range("dfm_morph", self.params.dfm_morph, 0.01, 1.0)?;
         validate_float_range("detector_score", self.params.detector_score, 0.01, 1.0)?;
         validate_range("max_faces", self.params.max_faces as i64, 1, 50)?;
+        if self.params.manual_rotation_angle > 270
+            || !self.params.manual_rotation_angle.is_multiple_of(90)
+        {
+            return Err(EngineSpecError::InvalidMaskControl {
+                control: "manual_rotation_angle".to_owned(),
+                value: self.params.manual_rotation_angle as i64,
+                min: 0,
+                max: 270,
+            });
+        }
         validate_float_range("landmark_score", self.params.landmark_score, 0.01, 1.0)?;
         validate_float_range("strength", self.params.strength, 0.0, 5.0)?;
         validate_float_range("auto_color.blend", self.params.auto_color.blend, 0.0, 1.0)?;

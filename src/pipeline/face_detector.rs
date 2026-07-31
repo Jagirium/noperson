@@ -30,6 +30,18 @@ pub trait FaceDetectorBackend {
         frame_h: u32,
         frame_w: u32,
     ) -> anyhow::Result<(Vec<DetectedFace>, f32)>;
+
+    fn detect_gpu_auto_rotation(
+        &self,
+        mgr: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw: &CudaSlice<f32>,
+        ws: &mut GpuWorkspace,
+        frame_h: u32,
+        frame_w: u32,
+    ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
+        self.detect_gpu(mgr, gpu, frame_chw, ws, frame_h, frame_w)
+    }
 }
 
 pub enum FaceDetector {
@@ -96,6 +108,79 @@ impl FaceDetectorBackend for FaceDetector {
             }
         }
     }
+
+    fn detect_gpu_auto_rotation(
+        &self,
+        mgr: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw: &CudaSlice<f32>,
+        ws: &mut GpuWorkspace,
+        frame_h: u32,
+        frame_w: u32,
+    ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
+        let (mut combined, scale) = self.detect_gpu(mgr, gpu, frame_chw, ws, frame_h, frame_w)?;
+        for turns in 1..4 {
+            let (rotated_h, rotated_w) = if turns % 2 == 0 {
+                (frame_h, frame_w)
+            } else {
+                (frame_w, frame_h)
+            };
+            let mut rotated = gpu.alloc_zeros(3 * frame_h as usize * frame_w as usize)?;
+            gpu.rotate_quadrants(frame_chw, &mut rotated, frame_h, frame_w, turns)?;
+            let (faces, _) = self.detect_gpu(mgr, gpu, &rotated, ws, rotated_h, rotated_w)?;
+            combined.extend(
+                faces
+                    .into_iter()
+                    .map(|face| unrotate_detection(face, frame_h, frame_w, turns)),
+            );
+        }
+        combined.sort_by(|left, right| right.score.total_cmp(&left.score));
+        nms(&mut combined, 0.4);
+        let max_faces = match self {
+            Self::Yolo(detector) => detector.max_faces,
+            Self::Anchor(detector) => detector.max_faces,
+        };
+        select_center_faces(&mut combined, frame_h, frame_w, max_faces);
+        Ok((combined, scale))
+    }
+}
+
+fn unrotate_point(point: [f32; 2], height: u32, width: u32, turns: u32) -> [f32; 2] {
+    let [x, y] = point;
+    match turns & 3 {
+        1 => [width as f32 - 1.0 - y, x],
+        2 => [width as f32 - 1.0 - x, height as f32 - 1.0 - y],
+        3 => [y, height as f32 - 1.0 - x],
+        _ => point,
+    }
+}
+
+fn unrotate_detection(mut face: DetectedFace, height: u32, width: u32, turns: u32) -> DetectedFace {
+    face.kps_5 = face
+        .kps_5
+        .map(|point| unrotate_point(point, height, width, turns));
+    let [x1, y1, x2, y2] = face.bbox;
+    let corners = [[x1, y1], [x2, y1], [x1, y2], [x2, y2]]
+        .map(|point| unrotate_point(point, height, width, turns));
+    face.bbox = [
+        corners
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::MAX, f32::min),
+        corners
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::MAX, f32::min),
+        corners
+            .iter()
+            .map(|point| point[0])
+            .fold(f32::MIN, f32::max),
+        corners
+            .iter()
+            .map(|point| point[1])
+            .fold(f32::MIN, f32::max),
+    ];
+    face
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -702,7 +787,26 @@ fn select_center_faces(
 
 #[cfg(test)]
 mod tests {
-    use super::{AnchorDetector, AnchorDetectorKind, DetectedFace, select_center_faces};
+    use super::{
+        AnchorDetector, AnchorDetectorKind, DetectedFace, select_center_faces, unrotate_detection,
+        unrotate_point,
+    };
+
+    #[test]
+    fn rotated_coordinates_map_back_to_the_original_frame() {
+        assert_eq!(unrotate_point([1.0, 1.0], 3, 4, 1), [2.0, 1.0]);
+        assert_eq!(unrotate_point([1.0, 1.0], 3, 4, 2), [2.0, 1.0]);
+        assert_eq!(unrotate_point([1.0, 2.0], 3, 4, 3), [2.0, 1.0]);
+
+        let rotated = DetectedFace {
+            bbox: [0.0, 1.0, 1.0, 3.0],
+            kps_5: [[1.0, 1.0]; 5],
+            score: 0.9,
+        };
+        let original = unrotate_detection(rotated, 3, 4, 1);
+        assert_eq!(original.bbox, [0.0, 0.0, 2.0, 1.0]);
+        assert_eq!(original.kps_5, [[2.0, 1.0]; 5]);
+    }
 
     #[test]
     fn anchor_decoder_matches_crossswap_stride_geometry_and_inclusive_threshold() {

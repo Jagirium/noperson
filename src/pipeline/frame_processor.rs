@@ -63,7 +63,11 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     let _ = gpu.profile_mark(0);
 
     // 1. Detect faces (letterbox on GPU, ort inference, decode on CPU)
-    let (faces, _det_scale) = detector.detect_gpu(manager, gpu, frame_chw, ws, frame_h, frame_w)?;
+    let (faces, _det_scale) = if params.auto_rotation {
+        detector.detect_gpu_auto_rotation(manager, gpu, frame_chw, ws, frame_h, frame_w)?
+    } else {
+        detector.detect_gpu(manager, gpu, frame_chw, ws, frame_h, frame_w)?
+    };
     let _ = gpu.profile_mark(1); // after_detect
 
     let mut faces_swapped = 0;

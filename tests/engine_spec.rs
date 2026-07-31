@@ -336,6 +336,14 @@ fn detector_controls_are_generation_validated() {
         spec.validate(),
         Err(EngineSpecError::InvalidMaskControl { control, .. }) if control == "max_faces"
     ));
+
+    spec.params.max_faces = 20;
+    spec.params.manual_rotation_angle = 45;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "manual_rotation_angle"
+    ));
 }
 
 #[test]

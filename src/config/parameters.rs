@@ -371,6 +371,12 @@ pub struct FaceSwapParams {
     pub detector_score: f32,
     #[serde(default = "default_max_faces")]
     pub max_faces: usize,
+    #[serde(default)]
+    pub auto_rotation: bool,
+    #[serde(default)]
+    pub manual_rotation_enabled: bool,
+    #[serde(default)]
+    pub manual_rotation_angle: u16,
 
     // Detailed face alignment
     #[serde(default)]
@@ -485,6 +491,9 @@ impl Default for FaceSwapParams {
             dfm_rct: false,
             detector_score: default_detector_score(),
             max_faces: default_max_faces(),
+            auto_rotation: false,
+            manual_rotation_enabled: false,
+            manual_rotation_angle: 0,
             landmark_enabled: false,
             landmark_mode: LandmarkMode::default(),
             landmark_score: default_landmark_score(),

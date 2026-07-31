@@ -57,6 +57,7 @@ pub struct GpuOps {
     chw_f32_to_hwc_u8_fn: CudaFunction,
     chw_f32_to_nv12_scaled_fn: CudaFunction,
     letterbox_fn: CudaFunction,
+    rotate_quadrants_fn: CudaFunction,
     affine_scale_fn: CudaFunction,
     chw_rgb_to_nhwc_bgr_unit_fn: CudaFunction,
     nhwc_bgr_unit_to_chw_rgb_fn: CudaFunction,
@@ -149,6 +150,7 @@ impl GpuOps {
             chw_f32_to_hwc_u8_fn: load("frame_convert", "chw_f32_to_hwc_u8_kernel"),
             chw_f32_to_nv12_scaled_fn: load("frame_convert", "chw_f32_to_nv12_scaled_kernel"),
             letterbox_fn: load("frame_convert", "letterbox_resize_kernel"),
+            rotate_quadrants_fn: load("rotate", "rotate_quadrants_chw_kernel"),
             affine_scale_fn: load("frame_convert", "affine_scale_kernel"),
             chw_rgb_to_nhwc_bgr_unit_fn: load("layout_convert", "chw_rgb_to_nhwc_bgr_unit_kernel"),
             nhwc_bgr_unit_to_chw_rgb_fn: load("layout_convert", "nhwc_bgr_unit_to_chw_rgb_kernel"),
@@ -424,6 +426,27 @@ impl GpuOps {
         b.arg(&mul);
         b.arg(&add);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    /// Exact CHW rotation by a multiple of 90 degrees.
+    pub fn rotate_quadrants(
+        &self,
+        src: &CudaSlice<f32>,
+        dst: &mut CudaSlice<f32>,
+        src_h: u32,
+        src_w: u32,
+        quarter_turns: u32,
+    ) -> Result<(), DriverError> {
+        let turns = quarter_turns & 3;
+        let total = 3 * src_h * src_w;
+        let mut builder = self.stream.launch_builder(&self.rotate_quadrants_fn);
+        builder.arg(src);
+        builder.arg(dst);
+        builder.arg(&src_h);
+        builder.arg(&src_w);
+        builder.arg(&turns);
+        unsafe { builder.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())
     }
 

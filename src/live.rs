@@ -676,18 +676,54 @@ impl LiveEngine {
         height: u32,
         width: u32,
     ) -> anyhow::Result<FrameResult> {
-        process_frame_gpu(
+        let turns = if self.params.manual_rotation_enabled {
+            u32::from(self.params.manual_rotation_angle / 90) & 3
+        } else {
+            0
+        };
+        if turns == 0 {
+            return process_frame_gpu(
+                &self.gpu,
+                &mut self.manager,
+                &self.detector,
+                frame,
+                height,
+                width,
+                &mut self.workspace,
+                &self.source_faces,
+                &self.params,
+                self.dfm,
+            );
+        }
+
+        let (rotated_height, rotated_width) = if turns.is_multiple_of(2) {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        let mut rotated = self.gpu.alloc_zeros(3 * height as usize * width as usize)?;
+        self.gpu
+            .rotate_quadrants(frame, &mut rotated, height, width, turns)?;
+        let result = process_frame_gpu(
             &self.gpu,
             &mut self.manager,
             &self.detector,
-            frame,
-            height,
-            width,
+            &mut rotated,
+            rotated_height,
+            rotated_width,
             &mut self.workspace,
             &self.source_faces,
             &self.params,
             self.dfm,
-        )
+        )?;
+        self.gpu.rotate_quadrants(
+            &rotated,
+            frame,
+            rotated_height,
+            rotated_width,
+            (4 - turns) & 3,
+        )?;
+        Ok(result)
     }
 
     pub fn process_rgb(
