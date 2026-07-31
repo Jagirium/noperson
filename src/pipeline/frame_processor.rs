@@ -182,6 +182,14 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                     .convert_gpu(manager, gpu, ws, params.dfm_morph, params.dfm_rct)?;
             }
         }
+        if params.strength < 1.0 {
+            gpu.scalar_blend_inplace(
+                &ws.face_512_original,
+                &mut ws.face_512,
+                3 * pipeline_size as usize * pipeline_size as usize,
+                1.0 - params.strength,
+            )?;
+        }
         let _ = gpu.profile_mark(4); // after_swap_ort
         gpu.stream
             .memcpy_dtod(&ws.face_512, &mut ws.face_512_pre_restorer)?;

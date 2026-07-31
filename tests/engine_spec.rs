@@ -269,6 +269,23 @@ fn detector_controls_are_generation_validated() {
 }
 
 #[test]
+fn strength_and_similarity_are_generation_validated() {
+    let mut spec = valid_spec(false);
+    spec.params.strength = 1.01;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. }) if control == "strength"
+    ));
+
+    spec.params.strength = 1.0;
+    spec.params.similarity_threshold = -0.01;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. }) if control == "similarity_threshold"
+    ));
+}
+
+#[test]
 fn face_parser_controls_are_validated_before_gpu_allocation() {
     let mut spec = valid_spec(false);
     spec.params.faceparser.background = 51;
