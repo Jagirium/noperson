@@ -12,11 +12,11 @@ pub enum LandmarkModel {
     Points5,
     /// 2dfan4.onnx — 68 points, input 256×256, norm: /255
     Points68,
-    /// 1k3d68.onnx — 68 3D points, input 192×192, ImageNet norm
+    /// 1k3d68.onnx — 68 3D points, input 192×192, identity normalization
     Points3d68,
     /// peppapig — 98 points, input 256×256, norm: /255
     Points98,
-    /// 2d106det.onnx — 106 points, input 192×192, ImageNet norm
+    /// 2d106det.onnx — 106 points, input 192×192, identity normalization
     Points106,
     /// landmark.onnx — 203 points, input 224×224, norm: /255
     Points203,
@@ -94,26 +94,17 @@ impl LandmarkModel {
     pub fn normalize(&self, pixel: f32, channel: u32) -> f32 {
         match self {
             Self::Points5 => {
-                // Subtract BGR mean (but we're in RGB, so swap channels)
+                // CrossSwap subtracts this vector after CHW→HWC, without a channel swap.
                 let mean = match channel {
-                    0 => 123.0, // R ← B mean
-                    1 => 117.0, // G ← G mean
-                    2 => 104.0, // B ← R mean
+                    0 => 104.0,
+                    1 => 117.0,
+                    2 => 123.0,
                     _ => 0.0,
                 };
                 pixel - mean
             }
             Self::Points68 | Self::Points98 | Self::Points203 | Self::Points478 => pixel / 255.0,
-            Self::Points3d68 | Self::Points106 => {
-                // ImageNet normalization: (pixel/255 - mean) / std
-                let (mean, std) = match channel {
-                    0 => (0.485, 0.229),
-                    1 => (0.456, 0.224),
-                    2 => (0.406, 0.225),
-                    _ => (0.0, 1.0),
-                };
-                (pixel / 255.0 - mean) / std
-            }
+            Self::Points3d68 | Self::Points106 => pixel,
         }
     }
 

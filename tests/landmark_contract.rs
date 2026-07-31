@@ -99,3 +99,14 @@ fn reduction_rejects_truncated_model_output() {
         })
     );
 }
+
+#[test]
+fn per_model_normalization_matches_the_python_oracle() {
+    assert_eq!(LandmarkModel::Points5.normalize(255.0, 0), 151.0);
+    assert_eq!(LandmarkModel::Points5.normalize(128.0, 1), 11.0);
+    assert_eq!(LandmarkModel::Points5.normalize(0.0, 2), -123.0);
+    assert_eq!(LandmarkModel::Points68.normalize(255.0, 0), 1.0);
+    assert_eq!(LandmarkModel::Points203.normalize(127.5, 2), 0.5);
+    assert_eq!(LandmarkModel::Points3d68.normalize(255.0, 0), 255.0);
+    assert_eq!(LandmarkModel::Points106.normalize(64.0, 2), 64.0);
+}
