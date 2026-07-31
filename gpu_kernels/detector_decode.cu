@@ -36,3 +36,49 @@ void yolo_face_compact_kernel(
     }
     *count = found;
 }
+
+extern "C" __global__
+void anchor_face_compact_kernel(
+    const float* __restrict__ output, // nine packed RetinaFace/SCRFD tensors
+    float* __restrict__ candidates,
+    unsigned int* __restrict__ count,
+    const float threshold,
+    const float scale
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const unsigned int strides[3] = {8, 16, 32};
+    const unsigned int score_offsets[3] = {0, 12800, 16000};
+    const unsigned int bbox_offsets[3] = {16800, 68000, 80800};
+    const unsigned int kps_offsets[3] = {84000, 212000, 244000};
+    unsigned int found = 0;
+
+    for (unsigned int level = 0; level < 3; ++level) {
+        const unsigned int stride = strides[level];
+        const unsigned int feature = 512 / stride;
+        const unsigned int anchors = feature * feature * 2;
+        const float s = (float)stride;
+        for (unsigned int i = 0; i < anchors; ++i) {
+            const float score = output[score_offsets[level] + i];
+            if (score < threshold) continue;
+            const unsigned int location = i / 2;
+            const float ax = (float)(location % feature) * s;
+            const float ay = (float)(location / feature) * s;
+            const float* bbox = output + bbox_offsets[level] + i * 4;
+            const float* keypoints = output + kps_offsets[level] + i * 10;
+            float* candidate = candidates + found * 15;
+            candidate[0] = (ax - bbox[0] * s) / scale;
+            candidate[1] = (ay - bbox[1] * s) / scale;
+            candidate[2] = (ax + bbox[2] * s) / scale;
+            candidate[3] = (ay + bbox[3] * s) / scale;
+            for (unsigned int keypoint = 0; keypoint < 5; ++keypoint) {
+                candidate[4 + keypoint * 2] =
+                    (ax + keypoints[keypoint * 2] * s) / scale;
+                candidate[5 + keypoint * 2] =
+                    (ay + keypoints[keypoint * 2 + 1] * s) / scale;
+            }
+            candidate[14] = score;
+            ++found;
+        }
+    }
+    *count = found;
+}

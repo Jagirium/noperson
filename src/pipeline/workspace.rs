@@ -20,10 +20,9 @@ pub struct GpuWorkspace {
     pub detect_input: CudaSlice<f32>, // [1, 3, 640, 640]
     /// YoloFace output: [1, 20, 8400] for 640 input — 4 bbox + 1 score + 15 kps
     pub detect_output: CudaSlice<f32>, // [1, 20, 8400]
-    pub detect_candidates: CudaSlice<f32>, // [8400, bbox4+kps10+score]
+    pub detect_candidates: CudaSlice<f32>, // [16800, bbox4+kps10+score]
     pub detect_candidate_count: CudaSlice<u32>,
     pub anchor_output: CudaSlice<f32>, // packed RetinaFace/SCRFD outputs
-    pub host_anchor_output: Vec<f32>,
 
     pub landmark_input: CudaSlice<f32>,
     pub landmark_output_a: CudaSlice<f32>,
@@ -86,7 +85,7 @@ pub struct GpuWorkspace {
     pub emap: CudaSlice<f32>, // [512*512]
 
     // Pre-allocated host staging buffers (reused to avoid per-frame Vec alloc)
-    pub host_detect_candidates: Vec<f32>, // [8400, 15]
+    pub host_detect_candidates: Vec<f32>, // [16800, 15]
     pub host_embedding: Vec<f32>,         // [512] — ArcFace embedding
     pub host_swap_tiles: Vec<f32>,        // [16*3*128*128]
     pub host_color_original: Vec<f32>,    // [3*512*512], exact histogram fallback
@@ -118,10 +117,9 @@ impl GpuWorkspace {
         Ok(Self {
             detect_input: stream.alloc_zeros::<f32>(detect_size)?,
             detect_output: stream.alloc_zeros::<f32>(det_output_size)?,
-            detect_candidates: stream.alloc_zeros::<f32>(8400 * 15)?,
+            detect_candidates: stream.alloc_zeros::<f32>(16_800 * 15)?,
             detect_candidate_count: stream.alloc_zeros::<u32>(1)?,
             anchor_output: stream.alloc_zeros::<f32>(252_000)?,
-            host_anchor_output: vec![0.0; 252_000],
             landmark_input: stream.alloc_zeros::<f32>(3 * 512 * 512)?,
             landmark_output_a: stream.alloc_zeros::<f32>(278_528)?,
             landmark_output_b: stream.alloc_zeros::<f32>(278_528)?,
@@ -175,7 +173,7 @@ impl GpuWorkspace {
 
             emap: stream.alloc_zeros::<f32>(512 * 512)?,
 
-            host_detect_candidates: vec![0.0f32; 8400 * 15],
+            host_detect_candidates: vec![0.0f32; 16_800 * 15],
             host_embedding: vec![0.0f32; 512],
             host_swap_tiles: vec![0.0f32; swap_batch_size],
             host_color_original: vec![0.0f32; face_512_size],

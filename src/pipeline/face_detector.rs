@@ -343,23 +343,7 @@ impl YoloFaceDetector {
     }
 
     fn decode_compact_yolo(&self, data: &[f32], count: usize) -> Vec<DetectedFace> {
-        let mut dets = Vec::with_capacity(count);
-        for candidate in data[..count * 15].chunks_exact(15) {
-            let kps_5 =
-                std::array::from_fn(|index| [candidate[4 + index * 2], candidate[5 + index * 2]]);
-            dets.push(DetectedFace {
-                bbox: [candidate[0], candidate[1], candidate[2], candidate[3]],
-                kps_5,
-                score: candidate[14],
-            });
-        }
-        dets.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        nms(&mut dets, self.nms_iou_threshold);
-        dets
+        decode_compact_candidates(data, count, self.nms_iou_threshold)
     }
 
     fn decode_yolo(
@@ -608,16 +592,29 @@ impl AnchorDetector {
             binding.clear();
         }
 
-        gpu.download_into(&ws.anchor_output, &mut ws.host_anchor_output)?;
-        let lengths = AnchorDetectorKind::output_lengths();
-        let mut offsets = [0usize; 9];
-        for index in 1..offsets.len() {
-            offsets[index] = offsets[index - 1] + lengths[index - 1];
+        gpu.compact_anchor_faces(
+            &ws.anchor_output,
+            &mut ws.detect_candidates,
+            &mut ws.detect_candidate_count,
+            self.score_threshold,
+            det_scale,
+        )?;
+        let mut count = [0u32; 1];
+        gpu.stream
+            .memcpy_dtoh(&ws.detect_candidate_count, &mut count)?;
+        let count = count[0] as usize;
+        anyhow::ensure!(
+            count <= 16_800,
+            "anchor candidate count exceeds output capacity"
+        );
+        let elements = count * 15;
+        if elements > 0 {
+            let candidates = ws.detect_candidates.slice(..elements);
+            gpu.stream
+                .memcpy_dtoh(&candidates, &mut ws.host_detect_candidates[..elements])?;
         }
-        let outputs: [&[f32]; 9] = std::array::from_fn(|index| {
-            &ws.host_anchor_output[offsets[index]..offsets[index] + lengths[index]]
-        });
-        let mut faces = self.decode_anchor(&outputs, target, det_scale)?;
+        let mut faces =
+            decode_compact_candidates(&ws.host_detect_candidates, count, self.nms_iou_threshold);
         select_center_faces(&mut faces, frame_h, frame_w, self.max_faces);
         Ok((faces, det_scale))
     }
@@ -805,6 +802,30 @@ fn nms(dets: &mut Vec<DetectedFace>, iou_thresh: f32) {
         i += 1;
         k
     });
+}
+
+fn decode_compact_candidates(
+    data: &[f32],
+    count: usize,
+    nms_iou_threshold: f32,
+) -> Vec<DetectedFace> {
+    let mut dets = Vec::with_capacity(count);
+    for candidate in data[..count * 15].chunks_exact(15) {
+        let kps_5 =
+            std::array::from_fn(|index| [candidate[4 + index * 2], candidate[5 + index * 2]]);
+        dets.push(DetectedFace {
+            bbox: [candidate[0], candidate[1], candidate[2], candidate[3]],
+            kps_5,
+            score: candidate[14],
+        });
+    }
+    dets.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    nms(&mut dets, nms_iou_threshold);
+    dets
 }
 
 fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
