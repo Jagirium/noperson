@@ -184,7 +184,9 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                         swap_size,
                         swap_size,
                     )?;
-                    if params.geometry.enabled && params.geometry.face_scale != 0.0 {
+                    let geometry_scaled =
+                        params.geometry.enabled && params.geometry.face_scale != 0.0;
+                    if geometry_scaled {
                         let scale = 1.0 + f64::from(params.geometry.face_scale) / 100.0;
                         let center = f64::from(swap_size) / 2.0;
                         let transform = [
@@ -200,11 +202,15 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                             swap_size,
                             &transform,
                         )?;
-                        gpu.stream
-                            .memcpy_dtod(&ws.face_512_scratch, &mut ws.face_256)?;
                     }
                     for iteration in 0..iterations {
-                        if needs_strength_snapshot(iteration, iterations, fractional_blend) {
+                        let input_from_scratch = geometry_scaled && iteration == 0;
+                        if needs_strength_copy(
+                            iteration,
+                            iterations,
+                            fractional_blend,
+                            input_from_scratch,
+                        ) {
                             gpu.stream
                                 .memcpy_dtod(&ws.face_256, &mut ws.face_512_scratch)?;
                         }
@@ -215,6 +221,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                             &source.expect("Inswapper source selected above").latent,
                             dim,
                             iteration == 0,
+                            input_from_scratch,
                         )?;
                     }
                     if fractional_blend < 1.0 {
@@ -561,6 +568,15 @@ fn needs_strength_snapshot(iteration: u32, iterations: u32, fractional_blend: f3
     fractional_blend < 1.0 && iteration + 1 == iterations
 }
 
+fn needs_strength_copy(
+    iteration: u32,
+    iterations: u32,
+    fractional_blend: f32,
+    input_from_scratch: bool,
+) -> bool {
+    needs_strength_snapshot(iteration, iterations, fractional_blend) && !input_from_scratch
+}
+
 /// Compute face alignment template at target size.
 /// Match Crosswap's actual `get_arcface_template(..., mode="arcface128")`
 /// output: scale both coordinates, then shift the X coordinate of all points.
@@ -579,8 +595,8 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 mod tests {
     use super::{
         SourceFace, adjusted_keypoints, assignment_matches, blend_restorer_affine,
-        crosswap_similarity, needs_strength_snapshot, restorer_contract, scaled_arcface_template,
-        strength_plan,
+        crosswap_similarity, needs_strength_copy, needs_strength_snapshot, restorer_contract,
+        scaled_arcface_template, strength_plan,
     };
     use crate::config::parameters::FaceSwapParams;
     use crate::config::parameters::RestorerSize;
@@ -639,6 +655,8 @@ mod tests {
         assert!(!needs_strength_snapshot(0, 1, 1.0));
         assert!(!needs_strength_snapshot(0, 2, 0.25));
         assert!(needs_strength_snapshot(1, 2, 0.25));
+        assert!(!needs_strength_copy(0, 1, 0.25, true));
+        assert!(needs_strength_copy(0, 1, 0.25, false));
     }
 
     #[test]

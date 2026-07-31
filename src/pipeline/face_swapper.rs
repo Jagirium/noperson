@@ -112,7 +112,7 @@ impl FaceSwapper {
         latent: &[f32],
         dim: u32,
     ) -> anyhow::Result<()> {
-        Self::swap_gpu_cached(manager, gpu, ws, latent, dim, true)
+        Self::swap_gpu_cached(manager, gpu, ws, latent, dim, true, false)
     }
 
     /// Repeat a strength pass while retaining the invariant latent on-device.
@@ -123,6 +123,7 @@ impl FaceSwapper {
         latent: &[f32],
         dim: u32,
         upload_latent: bool,
+        input_from_scratch: bool,
     ) -> anyhow::Result<()> {
         assert_eq!(latent.len(), 512);
         anyhow::ensure!((1..=4).contains(&dim), "unsupported swap dim: {dim}");
@@ -130,7 +131,11 @@ impl FaceSwapper {
         let n_tiles = (dim * dim) as usize;
 
         {
-            let face_ptr: *const CudaSlice<f32> = &ws.face_256;
+            let face_ptr: *const CudaSlice<f32> = if input_from_scratch {
+                &ws.face_512_scratch
+            } else {
+                &ws.face_256
+            };
             let batch_ptr: *mut CudaSlice<f32> = &mut ws.swap_batch_in;
             unsafe {
                 gpu.interlace_extract_normalized(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
