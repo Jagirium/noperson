@@ -4,7 +4,9 @@
 //!
 //! Mask convention: 1.0 = keep swapped face, 0.0 = keep original background.
 
-use crate::config::parameters::{FaceParserMaskParams, FaceSwapParams};
+use crate::config::parameters::{
+    FaceParserMaskParams, FaceSwapParams, RestoreEyesParams, RestoreMouthParams,
+};
 use crate::gpu::{ops::GpuOps, unified};
 use crate::models::manager::ModelManager;
 use crate::pipeline::workspace::{GpuWorkspace, MAX_BLUR_KS};
@@ -28,6 +30,96 @@ pub fn postprocess_xseg_mask(mask: &mut [f32]) {
 pub enum SemanticRegion {
     Eyes,
     Mouth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestoreEllipse {
+    pub center_x: i32,
+    pub center_y: i32,
+    pub radius_x: i32,
+    pub radius_y: i32,
+}
+
+pub fn mouth_restore_ellipse(
+    landmarks: &[[f64; 2]; 5],
+    params: &RestoreMouthParams,
+) -> RestoreEllipse {
+    let [left_x, left_y] = landmarks[3].map(|value| value as i32);
+    let [right_x, right_y] = landmarks[4].map(|value| value as i32);
+    let delta_x = left_x - right_x;
+    let delta_y = left_y - right_y;
+    let base_radius = (((delta_x * delta_x + delta_y * delta_y) as f64).sqrt()
+        * params.size_factor as f64) as i32;
+    RestoreEllipse {
+        center_x: (left_x + right_x) / 2 + params.offset_x,
+        center_y: (left_y + right_y) / 2 + params.offset_y,
+        radius_x: (base_radius as f64 * params.radius_x as f64) as i32,
+        radius_y: (base_radius as f64 * params.radius_y as f64) as i32,
+    }
+}
+
+pub fn eye_restore_ellipses(
+    landmarks: &[[f64; 2]; 5],
+    params: &RestoreEyesParams,
+) -> [RestoreEllipse; 2] {
+    let [mut left_x, left_y] = landmarks[0].map(|value| value as i32);
+    let [mut right_x, right_y] = landmarks[1].map(|value| value as i32);
+    left_x += params.offset_x;
+    right_x += params.offset_x;
+    let left_y = left_y + params.offset_y;
+    let right_y = right_y + params.offset_y;
+    let delta_x = left_x - right_x;
+    let delta_y = left_y - right_y;
+    let base_radius = (((delta_x * delta_x + delta_y * delta_y) as f64).sqrt()
+        / params.size_factor as f64) as i32;
+    let radius_x = (base_radius as f64 * params.radius_x as f64) as i32;
+    let radius_y = (base_radius as f64 * params.radius_y as f64) as i32;
+    left_x += params.spacing_offset;
+    right_x -= params.spacing_offset;
+    [
+        RestoreEllipse {
+            center_x: left_x,
+            center_y: left_y,
+            radius_x,
+            radius_y,
+        },
+        RestoreEllipse {
+            center_x: right_x,
+            center_y: right_y,
+            radius_x,
+            radius_y,
+        },
+    ]
+}
+
+pub fn apply_restore_ellipse_mask_reference(
+    mask: &mut [f32],
+    width: u32,
+    height: u32,
+    ellipse: RestoreEllipse,
+    blend: f32,
+    feather: u32,
+) {
+    if ellipse.radius_x <= 0 || ellipse.radius_y <= 0 || feather == 0 {
+        return;
+    }
+    let width = width as i32;
+    let height = height as i32;
+    let min_x = (ellipse.center_x - ellipse.radius_x).max(0);
+    let max_x = (ellipse.center_x + ellipse.radius_x).min(width);
+    let min_y = (ellipse.center_y - ellipse.radius_y).max(0);
+    let max_y = (ellipse.center_y + ellipse.radius_y).min(height);
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let dx = (x - ellipse.center_x) as f32 / ellipse.radius_x as f32;
+            let dy = (y - ellipse.center_y) as f32 / ellipse.radius_y as f32;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let soft =
+                ((1.0 - distance) * ellipse.radius_x as f32 / feather as f32).clamp(0.0, 1.0);
+            let index = y as usize * width as usize + x as usize;
+            mask[index] *= 1.0 - soft * (1.0 - blend);
+        }
+    }
 }
 
 pub fn semantic_region_mask(classes: &[u8], region: SemanticRegion) -> Vec<f32> {
@@ -388,7 +480,13 @@ pub fn gpu_generate_learned_mask_128(
     ws: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<bool> {
-    if !params.occluder_enabled && !params.xseg_enabled && !params.faceparser_enabled {
+    let landmark_restore =
+        !params.faceparser_enabled && (params.restore_mouth || params.restore_eyes);
+    if !params.occluder_enabled
+        && !params.xseg_enabled
+        && !params.faceparser_enabled
+        && !landmark_restore
+    {
         return Ok(false);
     }
 
@@ -433,6 +531,78 @@ pub fn gpu_generate_learned_mask_128(
     }
 
     Ok(true)
+}
+
+pub fn gpu_apply_landmark_restore_mask(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+    aligned_landmarks: &[[f64; 2]; 5],
+) -> anyhow::Result<()> {
+    if params.faceparser_enabled || (!params.restore_mouth && !params.restore_eyes) {
+        return Ok(());
+    }
+
+    gpu.border_oval_mask(&mut ws.parser_mask_512, 512, 0, 0, 0, 0, false)?;
+    if params.restore_mouth {
+        apply_restore_ellipse_gpu(
+            gpu,
+            &mut ws.parser_mask_512,
+            mouth_restore_ellipse(aligned_landmarks, &params.restore_mouth_params),
+            params.restore_mouth_params.blend,
+            params.restore_mouth_params.feather,
+        )?;
+    }
+    if params.restore_eyes {
+        for ellipse in eye_restore_ellipses(aligned_landmarks, &params.restore_eyes_params) {
+            apply_restore_ellipse_gpu(
+                gpu,
+                &mut ws.parser_mask_512,
+                ellipse,
+                params.restore_eyes_params.blend,
+                params.restore_eyes_params.feather,
+            )?;
+        }
+    }
+
+    let blur = params.restore_eyes_mouth_blur;
+    if blur > 0 {
+        let kernel_size = blur * 2 + 1;
+        let sigma = (blur as f32 + 1.0) * 0.2;
+        let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
+        gpu.gaussian_blur_mask(
+            &mut ws.parser_mask_512,
+            &mut ws.parser_tmp_512,
+            512,
+            512,
+            &ws.blur_kernel,
+            ks,
+        )?;
+    }
+    gpu.mask_resize(&ws.parser_mask_512, &mut ws.mask_128, 512, 512, 128, 128)?;
+    gpu.mask_mul(&mut ws.mask_learned_128, &ws.mask_128)?;
+    Ok(())
+}
+
+fn apply_restore_ellipse_gpu(
+    gpu: &GpuOps,
+    mask: &mut cudarc::driver::CudaSlice<f32>,
+    ellipse: RestoreEllipse,
+    blend: f32,
+    feather: u32,
+) -> anyhow::Result<()> {
+    gpu.restore_ellipse_mask(
+        mask,
+        512,
+        512,
+        ellipse.center_x,
+        ellipse.center_y,
+        ellipse.radius_x,
+        ellipse.radius_y,
+        blend,
+        feather,
+    )?;
+    Ok(())
 }
 
 pub fn gpu_restore_semantic_regions(

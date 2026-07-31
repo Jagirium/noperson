@@ -86,6 +86,35 @@ void mask_invert_kernel(
 }
 
 extern "C" __global__
+void restore_ellipse_mask_kernel(
+    float* __restrict__ mask,
+    const unsigned int width,
+    const unsigned int height,
+    const int center_x,
+    const int center_y,
+    const int radius_x,
+    const int radius_y,
+    const float blend,
+    const unsigned int feather
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int pixels = width * height;
+    if (idx >= pixels || radius_x <= 0 || radius_y <= 0 || feather == 0) return;
+    int x = (int)(idx % width);
+    int y = (int)(idx / width);
+    if (x < center_x - radius_x || x >= center_x + radius_x
+        || y < center_y - radius_y || y >= center_y + radius_y) return;
+    float dx = (float)(x - center_x) / (float)radius_x;
+    float dy = (float)(y - center_y) / (float)radius_y;
+    float distance = sqrtf(dx * dx + dy * dy);
+    float soft = fminf(fmaxf(
+        (1.0f - distance) * (float)radius_x / (float)feather,
+        0.0f
+    ), 1.0f);
+    mask[idx] *= 1.0f - soft * (1.0f - blend);
+}
+
+extern "C" __global__
 void semantic_region_mask_kernel(
     const unsigned char* __restrict__ classes,
     float* __restrict__ mask,

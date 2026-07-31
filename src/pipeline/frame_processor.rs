@@ -97,6 +97,14 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         // between the generated face and the paste-back transform.
         let face_template = scaled_arcface_template(pipeline_size);
         let face_affine = affine::estimate_face_affine(&face.kps_5, &face_template);
+        let aligned_landmarks = std::array::from_fn(|index| {
+            let x = face.kps_5[index][0] as f64;
+            let y = face.kps_5[index][1] as f64;
+            [
+                face_affine[0][0] * x + face_affine[0][1] * y + face_affine[0][2],
+                face_affine[1][0] * x + face_affine[1][1] * y + face_affine[1][2],
+            ]
+        });
 
         gpu.warp_affine_npp(
             frame_chw,
@@ -212,6 +220,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         let blur_ks = params.border_blur * 2 + 1;
         let blur_sigma = (params.border_blur as f32 + 1.0) * 0.2;
         let learned_mask = face_mask::gpu_generate_learned_mask_128(gpu, manager, ws, params)?;
+        face_mask::gpu_apply_landmark_restore_mask(gpu, ws, params, &aligned_landmarks)?;
         face_mask::gpu_restore_semantic_regions(gpu, ws, params)?;
         face_mask::gpu_generate_mask_512(
             gpu,

@@ -69,6 +69,7 @@ pub struct GpuOps {
     parser_argmax_fn: CudaFunction,
     parser_class_mask_fn: CudaFunction,
     mask_invert_fn: CudaFunction,
+    restore_ellipse_mask_fn: CudaFunction,
     semantic_region_mask_fn: CudaFunction,
     semantic_temporal_mask_fn: CudaFunction,
     semantic_mark_valid_fn: CudaFunction,
@@ -146,6 +147,7 @@ impl GpuOps {
             parser_argmax_fn: load("mask_postprocess", "parser_argmax_kernel"),
             parser_class_mask_fn: load("mask_postprocess", "parser_class_mask_kernel"),
             mask_invert_fn: load("mask_postprocess", "mask_invert_kernel"),
+            restore_ellipse_mask_fn: load("mask_postprocess", "restore_ellipse_mask_kernel"),
             semantic_region_mask_fn: load("mask_postprocess", "semantic_region_mask_kernel"),
             semantic_temporal_mask_fn: load("mask_postprocess", "semantic_temporal_mask_kernel"),
             semantic_mark_valid_fn: load("mask_postprocess", "semantic_mark_valid_kernel"),
@@ -902,6 +904,35 @@ impl GpuOps {
         b.arg(count);
         b.arg(&pixels);
         b.arg(&region);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_ellipse_mask(
+        &self,
+        mask: &mut CudaSlice<f32>,
+        width: u32,
+        height: u32,
+        center_x: i32,
+        center_y: i32,
+        radius_x: i32,
+        radius_y: i32,
+        blend: f32,
+        feather: u32,
+    ) -> Result<(), DriverError> {
+        let pixels = width * height;
+        let blend = blend.clamp(0.0, 1.0);
+        let mut b = self.stream.launch_builder(&self.restore_ellipse_mask_fn);
+        b.arg(mask);
+        b.arg(&width);
+        b.arg(&height);
+        b.arg(&center_x);
+        b.arg(&center_y);
+        b.arg(&radius_x);
+        b.arg(&radius_y);
+        b.arg(&blend);
+        b.arg(&feather);
         unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
         Ok(())
     }

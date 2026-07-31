@@ -1,6 +1,7 @@
 use noperson::config::parameters::{FaceParserMaskParams, FaceSwapParams};
 use noperson::pipeline::face_mask::{
-    SemanticRegion, compose_face_parser_mask, generate_border_mask, postprocess_occluder_mask,
+    RestoreEllipse, SemanticRegion, apply_restore_ellipse_mask_reference, compose_face_parser_mask,
+    eye_restore_ellipses, generate_border_mask, mouth_restore_ellipse, postprocess_occluder_mask,
     postprocess_xseg_mask, semantic_region_mask,
 };
 
@@ -125,4 +126,79 @@ fn restore_region_defaults_match_crossswap_controls() {
     assert_eq!(params.restore_mouth_params.feather, 10);
     assert_eq!(params.restore_mouth_params.size_factor, 0.25);
     assert_eq!(params.restore_eyes_mouth_blur, 0);
+}
+
+#[test]
+fn landmark_mouth_geometry_matches_crossswap_integer_contract() {
+    let points = [
+        [100.9, 120.9],
+        [300.9, 130.9],
+        [200.0, 240.0],
+        [150.8, 330.9],
+        [250.2, 340.1],
+    ];
+    let params = FaceSwapParams::default();
+
+    assert_eq!(
+        mouth_restore_ellipse(&points, &params.restore_mouth_params),
+        RestoreEllipse {
+            center_x: 200,
+            center_y: 335,
+            radius_x: 25,
+            radius_y: 25,
+        }
+    );
+}
+
+#[test]
+fn landmark_eye_geometry_matches_crosswap_integer_contract() {
+    let points = [
+        [100.9, 120.9],
+        [300.9, 130.9],
+        [200.0, 240.0],
+        [150.8, 330.9],
+        [250.2, 340.1],
+    ];
+    let params = FaceSwapParams::default();
+
+    assert_eq!(
+        eye_restore_ellipses(&points, &params.restore_eyes_params),
+        [
+            RestoreEllipse {
+                center_x: 100,
+                center_y: 120,
+                radius_x: 66,
+                radius_y: 66,
+            },
+            RestoreEllipse {
+                center_x: 300,
+                center_y: 130,
+                radius_x: 66,
+                radius_y: 66,
+            },
+        ]
+    );
+}
+
+#[test]
+fn fallback_restore_ellipse_uses_crossswap_soft_blend() {
+    let mut mask = vec![1.0; 7 * 7];
+    apply_restore_ellipse_mask_reference(
+        &mut mask,
+        7,
+        7,
+        RestoreEllipse {
+            center_x: 3,
+            center_y: 3,
+            radius_x: 2,
+            radius_y: 2,
+        },
+        0.5,
+        2,
+    );
+
+    assert_eq!(mask[3 * 7 + 3], 0.5);
+    assert_eq!(mask[3 * 7 + 2], 0.75);
+    assert_eq!(mask[3 * 7 + 1], 1.0);
+    assert_eq!(mask[0], 1.0);
 }

@@ -304,6 +304,8 @@
           "evidence": [
             "tests/mask_contract.rs::semantic_restore_regions_use_crossswap_parser_classes",
             "tests/mask_contract.rs::restore_region_defaults_match_crossswap_controls",
+            "tests/mask_contract.rs::landmark_mouth_geometry_matches_crossswap_integer_contract",
+            "tests/mask_contract.rs::fallback_restore_ellipse_uses_crossswap_soft_blend",
             "tests/engine_spec.rs::restore_region_controls_are_validated_before_gpu_allocation"
           ]
         },
@@ -314,6 +316,8 @@
           "evidence": [
             "tests/mask_contract.rs::semantic_restore_regions_use_crossswap_parser_classes",
             "tests/mask_contract.rs::restore_region_defaults_match_crossswap_controls",
+            "tests/mask_contract.rs::landmark_eye_geometry_matches_crossswap_integer_contract",
+            "tests/mask_contract.rs::fallback_restore_ellipse_uses_crossswap_soft_blend",
             "tests/engine_spec.rs::restore_region_controls_are_validated_before_gpu_allocation"
           ]
         },
