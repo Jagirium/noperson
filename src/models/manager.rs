@@ -24,6 +24,8 @@ pub struct ModelManager {
     pub(crate) models_dir: PathBuf,
     /// Primary execution provider selected for every loaded ONNX session.
     provider: ExecutionProvider,
+    /// CUDA device selected by the immutable engine generation.
+    device_id: i32,
     /// Inswapper128 emap matrix [512, 512] — extracted from ONNX initializer.
     pub emap: Option<Vec<f32>>,
     /// Shared CUDA compute stream pointer — ort sessions use this so that
@@ -38,14 +40,31 @@ impl ModelManager {
     }
 
     pub fn with_provider(models_dir: impl AsRef<Path>, provider: ExecutionProvider) -> Self {
+        Self::with_execution(models_dir, provider, 0)
+    }
+
+    pub fn with_execution(
+        models_dir: impl AsRef<Path>,
+        provider: ExecutionProvider,
+        device_id: i32,
+    ) -> Self {
         Self {
             sessions: HashMap::new(),
             bindings: HashMap::new(),
             models_dir: models_dir.as_ref().to_path_buf(),
             provider,
+            device_id,
             emap: None,
             compute_stream: None,
         }
+    }
+
+    pub fn provider(&self) -> ExecutionProvider {
+        self.provider
+    }
+
+    pub fn device_id(&self) -> i32 {
+        self.device_id
     }
 
     /// Set the shared CUDA compute stream pointer for subsequent session loads.
@@ -72,11 +91,13 @@ impl ModelManager {
         let cuda_ep = match self.compute_stream {
             Some(ptr) => unsafe {
                 ort::ep::CUDA::default()
-                    .with_device_id(0)
+                    .with_device_id(self.device_id)
                     .with_compute_stream(ptr as *mut ())
                     .build()
             },
-            None => ort::ep::CUDA::default().build(),
+            None => ort::ep::CUDA::default()
+                .with_device_id(self.device_id)
+                .build(),
         };
 
         let mut providers = Vec::new();
@@ -87,7 +108,7 @@ impl ModelManager {
             let cache_path = self.models_dir.join("trt-cache-fp32-parity");
             std::fs::create_dir_all(&cache_path)?;
             let mut trt = ort::ep::TensorRT::default()
-                .with_device_id(0)
+                .with_device_id(self.device_id)
                 .with_engine_cache(true)
                 .with_engine_cache_path(cache_path.to_string_lossy())
                 .with_timing_cache(true)
