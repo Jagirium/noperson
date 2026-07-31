@@ -10,7 +10,7 @@ use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::value::{Shape, TensorRefMut};
 
 /// Create an ort MemoryInfo descriptor for CUDA device memory.
-pub fn cuda_memory_info(device_id: i32) -> ort::Result<MemoryInfo<'static>> {
+pub fn cuda_memory_info(device_id: i32) -> ort::Result<MemoryInfo> {
     MemoryInfo::new(
         AllocationDevice::CUDA,
         device_id,

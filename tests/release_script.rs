@@ -35,6 +35,20 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
         "code release must not bundle models"
     );
     assert!(!script.contains("aarch64"), "ARM releases are out of scope");
+
+    assert_eq!(
+        script.matches("export ORT_CUDA_VERSION=12").count(),
+        2,
+        "native and container builds must select the CUDA 12 ORT distribution"
+    );
+    assert!(
+        script.contains("libonnxruntime*.so*"),
+        "the archive must include the ORT core and provider libraries"
+    );
+    assert!(
+        script.contains("libcublasLt.so.12") && script.contains("libcudart.so.12"),
+        "the builder must reject an ORT provider compiled for another CUDA ABI"
+    );
 }
 
 #[test]
@@ -62,6 +76,30 @@ fn windows_release_builder_is_native_and_locked() {
             .unwrap()
             .contains("win.ps1")
     );
+    assert!(
+        script.contains("$env:ORT_CUDA_VERSION = '12'"),
+        "Windows must select the CUDA 12 ORT distribution"
+    );
+}
+
+#[test]
+fn cargo_and_runtime_logging_pin_the_compatible_ort_contract() {
+    let cargo = fs::read_to_string("Cargo.toml").expect("Cargo manifest exists");
+    assert!(cargo.contains("version = \"=2.0.0-rc.12\""));
+
+    let main = fs::read_to_string("src/main.rs").expect("binary entrypoint exists");
+    assert!(
+        main.contains("info,ort=warn"),
+        "default tracing must suppress ORT info/debug noise"
+    );
+
+    for source in ["src/models/manager.rs", "src/models/live_catalog.rs"] {
+        let source = fs::read_to_string(source).unwrap();
+        assert!(
+            source.contains("with_log_level(ort::logging::LogLevel::Warning)"),
+            "every production ORT session must use warning severity"
+        );
+    }
 }
 
 #[test]

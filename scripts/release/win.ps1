@@ -34,6 +34,7 @@ if (-not $VersionLine) { throw 'Package version is missing' }
 $Version = $VersionLine.Matches[0].Groups[1].Value
 $Commit = (& git rev-parse HEAD).Trim()
 $env:SOURCE_DATE_EPOCH = (& git show -s --format=%ct HEAD).Trim()
+$env:ORT_CUDA_VERSION = '12'
 $env:CARGO_INCREMENTAL = '0'
 $env:NOPERSON_CUDA_ARCH = 'sm_86'
 $env:RUSTFLAGS = '--remap-path-prefix=' + $RepoRoot + '=. -C link-arg=/Brepro'

@@ -134,6 +134,8 @@ impl ModelManager {
 
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!("{e}"))?
+            .with_log_level(ort::logging::LogLevel::Warning)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .with_execution_providers(providers)

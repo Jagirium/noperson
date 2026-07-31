@@ -11,7 +11,19 @@ die() {
 
 command -v git >/dev/null || die 'git is required'
 command -v tar >/dev/null || die 'tar is required'
+command -v readelf >/dev/null || die 'readelf is required'
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 'run from a git worktree'
+
+verify_ort_cuda12() {
+    local provider needed
+    provider=$(find -L target/release -maxdepth 1 -type f \
+        -name 'libonnxruntime_providers_cuda.so' -print -quit)
+    test -n "$provider" || die 'CUDAExecutionProvider library is missing'
+    needed=$(readelf -d "$provider")
+    case "$needed" in *'libcublasLt.so.12'*) ;; *) die 'ORT provider does not target cuBLAS 12' ;; esac
+    case "$needed" in *'libcudart.so.12'*) ;; *) die 'ORT provider does not target CUDA runtime 12' ;; esac
+    case "$needed" in *'.so.13'*) die 'CUDA 13 dependency leaked into CUDA 12 release' ;; esac
+}
 
 mode=${1:---docker}
 case "$mode" in
@@ -62,16 +74,19 @@ if test "$mode" = --native; then
     esac
     rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
     export CUDA_HOME="$cuda_root"
+    export ORT_CUDA_VERSION=12
     export CARGO_INCREMENTAL=0
     export NOPERSON_CUDA_ARCH=sm_86
     export RUSTFLAGS="--remap-path-prefix=${repo_root}=. -C link-arg=-Wl,--build-id=none"
     cargo "+$RUST_TOOLCHAIN" build --locked --release
+    verify_ort_cuda12
 
     stage="$work_dir/$artifact"
     mkdir -p "$stage/lib"
     install -m 0755 target/release/noperson "$stage/noperson"
     install -m 0644 LICENSE README.md "$stage/"
-    find target/release -type f -name 'libonnxruntime.so*' -exec install -m 0755 {} "$stage/lib/" \;
+    find -L target/release -maxdepth 1 -type f -name 'libonnxruntime*.so*' \
+        -exec install -m 0755 {} "$stage/lib/" \;
     # These expressions belong in the generated launcher.
     # shellcheck disable=SC2016
     printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
@@ -154,6 +169,7 @@ curl --proto '=https' --tlsv1.2 -fsS https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN"
 export PATH="$CARGO_HOME/bin:$PATH"
 export CUDA_HOME=/usr/local/cuda
+export ORT_CUDA_VERSION=12
 export CARGO_INCREMENTAL=0
 export RUSTFLAGS="--remap-path-prefix=/build/source=. -C link-arg=-Wl,--build-id=none"
 
@@ -162,11 +178,20 @@ cp -a /input/. /build/source/
 cd /build/source
 cargo build --locked --release
 
+provider=$(find -L target/release -maxdepth 1 -type f \
+    -name 'libonnxruntime_providers_cuda.so' -print -quit)
+test -n "$provider" || { echo 'release: CUDAExecutionProvider library is missing' >&2; exit 1; }
+needed=$(readelf -d "$provider")
+case "$needed" in *'libcublasLt.so.12'*) ;; *) echo 'release: ORT provider does not target cuBLAS 12' >&2; exit 1 ;; esac
+case "$needed" in *'libcudart.so.12'*) ;; *) echo 'release: ORT provider does not target CUDA runtime 12' >&2; exit 1 ;; esac
+case "$needed" in *'.so.13'*) echo 'release: CUDA 13 dependency leaked into CUDA 12 release' >&2; exit 1 ;; esac
+
 stage="/build/stage/${RELEASE_ARTIFACT}"
 mkdir -p "$stage/lib"
 install -m 0755 target/release/noperson "$stage/noperson"
 install -m 0644 LICENSE README.md "$stage/"
-find target/release -type f -name 'libonnxruntime.so*' -exec install -m 0755 {} "$stage/lib/" \;
+find -L target/release -maxdepth 1 -type f -name 'libonnxruntime*.so*' \
+    -exec install -m 0755 {} "$stage/lib/" \;
 cat >"$stage/run.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -Eeuo pipefail

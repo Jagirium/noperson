@@ -17,8 +17,8 @@ path = "src/main.rs"
 # ── ML inference — ONNX Runtime with CUDA EP ────────────────────────
 # Cross-platform: Linux/macOS/Windows. CUDA EP for NVIDIA GPUs.
 # download-binaries: auto-downloads libonnxruntime, copy-dylibs: puts .so next to binary.
-ort = { version = "2.0.0-rc.13", features = ["cuda", "tensorrt", "download-binaries", "copy-dylibs"] }
-ort-sys = "2.0.0-rc.13"
+ort = { version = "=2.0.0-rc.12", features = ["cuda", "tensorrt", "download-binaries", "copy-dylibs"] }
+ort-sys = "=2.0.0-rc.12"
 
 # ── GPU compute — cudarc (CUDA driver API, PTX kernels) ─────────────
 # Used for image ops: warp, resize, normalize, mask, blur, paste-back.

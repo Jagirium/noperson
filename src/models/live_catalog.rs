@@ -114,8 +114,12 @@ pub fn validate_swapper_multibatch_contract(
         path: path.to_path_buf(),
         details,
     };
-    let session = Session::builder()
-        .and_then(|mut builder| builder.commit_from_file(path))
+    let builder = Session::builder().map_err(|error| invalid(error.to_string()))?;
+    let mut builder = builder
+        .with_log_level(ort::logging::LogLevel::Warning)
+        .map_err(|error| invalid(error.to_string()))?;
+    let session = builder
+        .commit_from_file(path)
         .map_err(|error| invalid(error.to_string()))?;
 
     for (name, expected) in [
