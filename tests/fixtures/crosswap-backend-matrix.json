@@ -1,0 +1,502 @@
+{
+  "schema": 1,
+  "oracle": {
+    "source": "CrossSwap Python reference checkout",
+    "role": "immutable Python behavior oracle"
+  },
+  "domains": [
+    {
+      "name": "model-lifecycle",
+      "items": [
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.load_model",
+          "rust": "noperson::models::manager::ModelManager::load",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.load_dfm_model",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.get_io_binding",
+          "rust": "noperson::models::manager::ModelManager::session_and_binding",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.unload_model",
+          "rust": "noperson::models::manager::ModelManager::unload",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.swap_model_group",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.switch_providers_priority",
+          "rust": "noperson::models::manager::ModelManager::with_provider",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.get_gpu_memory",
+          "rust": "noperson::gpu::ops::GpuOps::cuda_mem_info",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.clear_gpu_memory",
+          "rust": "noperson::models::manager::ModelManager::unload",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.models_processor.ModelsProcessor.load_inswapper_iss_emap",
+          "rust": "noperson::models::manager::ModelManager::load_emap",
+          "status": "verified",
+          "evidence": [
+            "tests/model_contract.rs::canonical_live_assets_pass_digest_validation",
+            "tests/model_contract.rs::canonical_swapper_contract_matches_the_supplied_asset"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "face-detection",
+      "items": [
+        {
+          "python": "crosswap.app.processors.face_detectors.FaceDetectors.run_detect",
+          "rust": "noperson::pipeline::face_detector::YoloFaceDetector::detect_gpu",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_detectors.FaceDetectors.detect_retinaface",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_detectors.FaceDetectors.detect_scrdf",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_detectors.FaceDetectors.detect_yoloface",
+          "rust": "noperson::pipeline::face_detector::YoloFaceDetector::detect_gpu",
+          "status": "verified",
+          "evidence": [
+            "tests/provider_identity.rs::provider_stage_cosines_locate_first_identity_divergence",
+            "tests/live_engine_contract.rs::elon_self_swap_meets_photo_and_camera_quality_gates"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.face_detectors.FaceDetectors._process_stride_outputs",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "face-landmarks",
+      "items": [
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.run_detect_landmark",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.detect_face_landmark_5",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel::Points5",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.detect_face_landmark_68",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel::Points68",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.detect_face_landmark_3d68",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel::Points3d68",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.detect_face_landmark_98",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel::Points98",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.detect_face_landmark_106",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel::Points106",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.detect_face_landmark_203",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel::Points203",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_landmark_detectors.FaceLandmarkDetectors.detect_face_landmark_478",
+          "rust": "noperson::pipeline::face_landmark::LandmarkModel::Points478",
+          "status": "partial",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "recognition-and-swapping",
+      "items": [
+        {
+          "python": "crosswap.app.processors.face_swappers.FaceSwappers.run_recognize_direct",
+          "rust": "noperson::pipeline::face_recognizer::FaceRecognizer::recognize_gpu",
+          "status": "verified",
+          "evidence": [
+            "tests/swap.rs::test_recognize_deterministic_cosine",
+            "tests/provider_identity.rs::provider_stage_cosines_locate_first_identity_divergence"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.face_swappers.FaceSwappers.recognize",
+          "rust": "noperson::pipeline::face_recognizer::FaceRecognizer::recognize_gpu",
+          "status": "verified",
+          "evidence": [
+            "tests/swap.rs::test_embedding_norm",
+            "tests/swap.rs::test_cosine_similarity_different_faces"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.face_swappers.FaceSwappers.calc_inswapper_latent",
+          "rust": "noperson::pipeline::face_recognizer::FaceRecognizer::calc_latent",
+          "status": "verified",
+          "evidence": [
+            "tests/swap.rs::test_latent_computation",
+            "tests/swap.rs::test_calc_latent_gpu_matches_cpu"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.face_swappers.FaceSwappers.run_inswapper",
+          "rust": "noperson::pipeline::face_swapper::FaceSwapper::swap_gpu",
+          "status": "verified",
+          "evidence": [
+            "tests/swap.rs::test_swap_gpu_matches_owned_tensor_run",
+            "tests/swap.rs::test_swap_dim2_uses_canonical_multibatch_model"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.workers.frame_worker.FrameWorker.get_face_similarity_tform",
+          "rust": "noperson::math::affine::estimate_face_affine",
+          "status": "parity",
+          "evidence": [
+            "src/math/affine.rs::similarity_transform_matches_crosswap_skimage_regression"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.workers.frame_worker.FrameWorker.get_cropped_face_using_kps",
+          "rust": "noperson::gpu::ops::GpuOps::warp_affine_npp",
+          "status": "verified",
+          "evidence": [
+            "tests/swap.rs::test_npp_affine_matches_cpu_reference"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.workers.frame_worker.FrameWorker.swap_core",
+          "rust": "noperson::pipeline::frame_processor::process_frame_gpu",
+          "status": "partial",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "masks",
+      "items": [
+        {
+          "python": "crosswap.app.processors.workers.frame_worker.FrameWorker.get_border_mask",
+          "rust": "noperson::pipeline::face_mask::gpu_generate_mask_512",
+          "status": "verified",
+          "evidence": [
+            "tests/mask_contract.rs::live_defaults_use_python_compatible_pixel_borders",
+            "tests/swap.rs::test_default_gpu_border_mask_has_soft_pixel_edges"
+          ]
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.apply_occlusion",
+          "rust": "noperson::pipeline::face_mask::apply_occluder",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.run_occluder",
+          "rust": "noperson::pipeline::face_mask::apply_occluder",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.apply_dfl_xseg",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.run_dfl_xseg",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.apply_face_parser",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.run_faceparser",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.soft_oval_mask",
+          "rust": "noperson::pipeline::face_mask::soft_oval_mask",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.restore_mouth",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.restore_eyes",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_masks.FaceMasks.apply_fake_diff",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "face-restoration",
+      "items": [
+        {
+          "python": "crosswap.app.processors.face_restorers.FaceRestorers.apply_facerestorer",
+          "rust": "noperson::pipeline::frame_processor::process_frame_gpu",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_restorers.FaceRestorers.run_GPEN_256",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.face_restorers.FaceRestorers.run_GPEN_512",
+          "rust": "noperson::gpu::unified::run_gpen",
+          "status": "verified",
+          "evidence": [
+            "tests/live_engine_contract.rs::elon_self_swap_meets_photo_and_camera_quality_gates",
+            "tests/provider_identity.rs::elon_self_swap_cuda_and_tensorrt_preserve_the_same_identity"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "frame-enhancement",
+      "items": [
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_enhance_frame_tile_process",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_realesrganx2",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_realesrganx4",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_realesrx4v3",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_bsrganx2",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_bsrganx4",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_ultrasharpx4",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.frame_enhancers.FrameEnhancers.run_ultramixx4",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "dfm",
+      "items": [
+        {
+          "python": "crosswap.app.processors.utils.dfm_model.DFMModel.__init__",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.utils.dfm_model.DFMModel.convert",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.utils.dfm_model.DFMModel.rct",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.utils.dfm_model.DFMModel.has_morph_value",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.utils.dfm_model.DFMModel.convert_shape",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.utils.dfm_model.DFMModel.to_dtype",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.utils.dfm_model.DFMModel.resize",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        }
+      ]
+    },
+    {
+      "name": "media-pipeline",
+      "items": [
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.process_video",
+          "rust": "noperson::io::video",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.process_current_frame",
+          "rust": "noperson::live::LiveEngine::process_chw",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.process_next_webcam_frame",
+          "rust": "noperson::app::run_webcam_loop",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.send_frame_to_virtualcam",
+          "rust": "noperson::app::send_virtual_camera_frame",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.enable_virtualcam",
+          "rust": "noperson::io::virtualcam::VirtualCamera::open",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.disable_virtualcam",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.create_ffmpeg_subprocess",
+          "rust": null,
+          "status": "missing",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.VideoProcessor.stop_processing",
+          "rust": "noperson::app::App::stop",
+          "status": "partial",
+          "evidence": []
+        },
+        {
+          "python": "crosswap.app.processors.video_processor.CaptureThread.get_latest_if_new",
+          "rust": "noperson::io::webcam::WebcamSource::next_frame",
+          "status": "partial",
+          "evidence": []
+        }
+      ]
+    }
+  ],
+  "excluded": [
+    {
+      "capability": "background-removal",
+      "reason": "Explicitly excluded from the Rust backend scope"
+    },
+    {
+      "capability": "GPEN-1024",
+      "reason": "Excluded from new production runtime; models-v0.1.0 remains immutable"
+    },
+    {
+      "capability": "GPEN-2048",
+      "reason": "Excluded from production and model releases"
+    },
+    {
+      "capability": "full-gui",
+      "reason": "Backend contracts and events come first; full GUI is deferred"
+    }
+  ]
+}
