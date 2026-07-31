@@ -20,8 +20,10 @@ fn frame_enhancer_changes_photo_video_dimensions_but_disabled_mode_does_not() {
 
 #[test]
 fn frame_enhancer_dimensions_reject_overflow() {
-    let mut params = FaceSwapParams::default();
-    params.enhancer_enabled = true;
-    params.enhancer_model = EnhancerModel::UltraMixX4;
+    let params = FaceSwapParams {
+        enhancer_enabled: true,
+        enhancer_model: EnhancerModel::UltraMixX4,
+        ..FaceSwapParams::default()
+    };
     assert!(output_dimensions(&params, u32::MAX, 1).is_err());
 }

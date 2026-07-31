@@ -6,6 +6,20 @@
 //
 // Kernel weights are uploaded as a small f32 array (max 65 taps).
 
+__device__ __forceinline__ int gaussian_border_index(
+    int index,
+    const int length,
+    const unsigned int border_mode
+) {
+    if (index >= 0 && index < length) return index;
+    if (border_mode == 1) return -1; // zero padding
+    if (length <= 1) return 0;
+    while (index < 0 || index >= length) {
+        index = index < 0 ? -index : 2 * length - 2 - index;
+    }
+    return index; // torchvision reflect padding (edge is not repeated)
+}
+
 extern "C" __global__
 void gaussian_blur_h_kernel(
     const float* __restrict__ src,   // [H, W]
@@ -13,7 +27,8 @@ void gaussian_blur_h_kernel(
     const float* __restrict__ kernel,// [ks]
     const unsigned int H,
     const unsigned int W,
-    const unsigned int ks
+    const unsigned int ks,
+    const unsigned int border_mode
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int total = H * W;
@@ -26,9 +41,8 @@ void gaussian_blur_h_kernel(
     float val = 0.0f;
     for (int k = 0; k < (int)ks; ++k) {
         int sx = (int)x + k - half;
-        if (sx < 0) sx = 0;
-        if (sx >= (int)W) sx = (int)W - 1;
-        val += src[y * W + sx] * kernel[k];
+        sx = gaussian_border_index(sx, (int)W, border_mode);
+        if (sx >= 0) val += src[y * W + sx] * kernel[k];
     }
     dst[y * W + x] = val;
 }
@@ -40,7 +54,8 @@ void gaussian_blur_v_kernel(
     const float* __restrict__ kernel,// [ks]
     const unsigned int H,
     const unsigned int W,
-    const unsigned int ks
+    const unsigned int ks,
+    const unsigned int border_mode
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int total = H * W;
@@ -53,9 +68,8 @@ void gaussian_blur_v_kernel(
     float val = 0.0f;
     for (int k = 0; k < (int)ks; ++k) {
         int sy = (int)y + k - half;
-        if (sy < 0) sy = 0;
-        if (sy >= (int)H) sy = (int)H - 1;
-        val += src[sy * W + x] * kernel[k];
+        sy = gaussian_border_index(sy, (int)H, border_mode);
+        if (sy >= 0) val += src[sy * W + x] * kernel[k];
     }
     dst[y * W + x] = val;
 }

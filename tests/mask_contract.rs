@@ -1,9 +1,32 @@
 use noperson::config::parameters::{FaceParserMaskParams, FaceSwapParams, SwapperModel};
 use noperson::pipeline::face_mask::{
-    RestoreEllipse, SemanticRegion, apply_restore_ellipse_mask_reference, compose_face_parser_mask,
-    eye_restore_ellipses, fake_diff_mask, generate_border_mask, mouth_restore_ellipse,
-    postprocess_occluder_mask, postprocess_xseg_mask, semantic_region_mask,
+    GaussianBorder, RestoreEllipse, SemanticRegion, apply_restore_ellipse_mask_reference,
+    compose_face_parser_mask, eye_restore_ellipses, fake_diff_mask, gaussian_blur_with_border,
+    generate_border_mask, mouth_restore_ellipse, postprocess_occluder_mask, postprocess_xseg_mask,
+    semantic_region_mask,
 };
+
+#[test]
+fn gaussian_boundaries_match_torchvision_and_semantic_conv2d() {
+    let input: Vec<f32> = (1..=9).map(|value| value as f32).collect();
+    let mut reflect = input.clone();
+    gaussian_blur_with_border(&mut reflect, 3, 3, 3, 1.0, GaussianBorder::Reflect);
+    let reflect_oracle = [
+        3.1925488, 3.6444116, 4.0962744, 4.548137, 5.0, 5.4518623, 5.903725, 6.3555884, 6.807451,
+    ];
+    for (actual, expected) in reflect.iter().zip(reflect_oracle) {
+        assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+    }
+
+    let mut zero = input;
+    gaussian_blur_with_border(&mut zero, 3, 3, 3, 1.0, GaussianBorder::Zero);
+    let zero_oracle = [
+        1.3227963, 2.2740686, 1.978839, 3.177794, 5.0, 4.0815196, 3.2909245, 4.985245, 3.9469671,
+    ];
+    for (actual, expected) in zero.iter().zip(zero_oracle) {
+        assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+    }
+}
 
 #[test]
 fn live_defaults_use_python_compatible_pixel_borders() {

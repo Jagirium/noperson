@@ -78,9 +78,11 @@ fn live_spec_addresses_the_enabled_frame_enhancer() {
     }
     let identity = root.join("identity.jpg");
     fs::write(&identity, b"identity").unwrap();
-    let mut params = FaceSwapParams::default();
-    params.enhancer_enabled = true;
-    params.enhancer_model = EnhancerModel::UltraMixX4;
+    let params = FaceSwapParams {
+        enhancer_enabled: true,
+        enhancer_model: EnhancerModel::UltraMixX4,
+        ..FaceSwapParams::default()
+    };
 
     let spec = build_live_spec(
         &models,

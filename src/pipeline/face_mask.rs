@@ -148,7 +148,7 @@ pub fn semantic_region_mask(classes: &[u8], region: SemanticRegion) -> Vec<f32> 
         .map(|class| {
             let selected = match region {
                 SemanticRegion::Eyes => matches!(*class, 4 | 5),
-                SemanticRegion::Mouth => matches!(*class, 11 | 12 | 13),
+                SemanticRegion::Mouth => matches!(*class, 11..=13),
             };
             f32::from(selected)
         })
@@ -352,6 +352,32 @@ pub fn soft_oval_mask(
 ///
 /// Separable 2-pass (horizontal + vertical) Gaussian filter.
 pub fn gaussian_blur(mask: &mut [f32], width: u32, height: u32, kernel_size: u32, sigma: f32) {
+    gaussian_blur_with_border(
+        mask,
+        width,
+        height,
+        kernel_size,
+        sigma,
+        GaussianBorder::Reflect,
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GaussianBorder {
+    /// torchvision.transforms.GaussianBlur reflection without repeating the edge.
+    Reflect,
+    /// torch.nn.functional.conv2d implicit zero padding.
+    Zero,
+}
+
+pub fn gaussian_blur_with_border(
+    mask: &mut [f32],
+    width: u32,
+    height: u32,
+    kernel_size: u32,
+    sigma: f32,
+    border: GaussianBorder,
+) {
     if kernel_size <= 1 {
         return;
     }
@@ -381,8 +407,10 @@ pub fn gaussian_blur(mask: &mut [f32], width: u32, height: u32, kernel_size: u32
         for x in 0..w {
             let mut val = 0.0f32;
             for (k, weight) in kernel.iter().enumerate() {
-                let sx = (x as i32 + k as i32 - half).clamp(0, width as i32 - 1) as usize;
-                val += mask[y * w + sx] * weight;
+                let sx = x as i32 + k as i32 - half;
+                if let Some(sx) = gaussian_border_index(sx, width as i32, border) {
+                    val += mask[y * w + sx] * weight;
+                }
             }
             tmp[y * w + x] = val;
         }
@@ -393,12 +421,31 @@ pub fn gaussian_blur(mask: &mut [f32], width: u32, height: u32, kernel_size: u32
         for x in 0..w {
             let mut val = 0.0f32;
             for (k, weight) in kernel.iter().enumerate() {
-                let sy = (y as i32 + k as i32 - half).clamp(0, height as i32 - 1) as usize;
-                val += tmp[sy * w + x] * weight;
+                let sy = y as i32 + k as i32 - half;
+                if let Some(sy) = gaussian_border_index(sy, height as i32, border) {
+                    val += tmp[sy * w + x] * weight;
+                }
             }
             mask[y * w + x] = val;
         }
     }
+}
+
+fn gaussian_border_index(mut index: i32, length: i32, border: GaussianBorder) -> Option<usize> {
+    if (0..length).contains(&index) {
+        return Some(index as usize);
+    }
+    if border == GaussianBorder::Zero || length <= 1 {
+        return (border == GaussianBorder::Reflect && length == 1).then_some(0);
+    }
+    while index < 0 || index >= length {
+        index = if index < 0 {
+            -index
+        } else {
+            2 * length - 2 - index
+        };
+    }
+    Some(index as usize)
 }
 
 /// Resize a single-channel mask [src_h, src_w] → [dst_h, dst_w] via bilinear.
@@ -731,13 +778,14 @@ fn restore_semantic_region(
         SemanticRegion::Mouth => 1.5,
     });
     let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
-    gpu.gaussian_blur_mask(
+    gpu.gaussian_blur_mask_with_border(
         &mut ws.parser_attribute_512,
         &mut ws.parser_tmp_512,
         512,
         512,
         &ws.blur_kernel,
         ks,
+        1,
     )?;
 
     match region {

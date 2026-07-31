@@ -51,6 +51,7 @@ fn dynamic_dfm_shapes_resolve_to_single_batch() {
 }
 
 #[test]
+#[allow(clippy::excessive_precision)] // Values captured verbatim from the Kornia oracle.
 fn dfm_lab_conversion_matches_kornia_oracle() {
     let rgb = [0.1, 0.2, 0.3];
     let lab = rgb_to_lab(rgb);

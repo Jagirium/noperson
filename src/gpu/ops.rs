@@ -826,6 +826,20 @@ impl GpuOps {
         kernel: &CudaSlice<f32>,
         ks: u32,
     ) -> Result<(), DriverError> {
+        self.gaussian_blur_mask_with_border(mask, tmp, h, w, kernel, ks, 0)
+    }
+
+    /// `border_mode`: 0 = torchvision reflect, 1 = conv2d zero padding.
+    pub fn gaussian_blur_mask_with_border(
+        &self,
+        mask: &mut CudaSlice<f32>,
+        tmp: &mut CudaSlice<f32>,
+        h: u32,
+        w: u32,
+        kernel: &CudaSlice<f32>,
+        ks: u32,
+        border_mode: u32,
+    ) -> Result<(), DriverError> {
         if ks <= 1 {
             return Ok(());
         }
@@ -840,6 +854,7 @@ impl GpuOps {
             b.arg(&h);
             b.arg(&w);
             b.arg(&ks);
+            b.arg(&border_mode);
             unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         }
         // Vertical pass: tmp (read) → mask (write)
@@ -851,6 +866,7 @@ impl GpuOps {
             b.arg(&h);
             b.arg(&w);
             b.arg(&ks);
+            b.arg(&border_mode);
             unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         }
         Ok(())

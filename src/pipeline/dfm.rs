@@ -35,6 +35,7 @@ pub fn rgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+#[allow(clippy::excessive_precision)] // Kornia matrix coefficients; f32 rounds at compile time.
 pub fn lab_to_rgb(lab: [f32; 3]) -> [f32; 3] {
     let fy = (lab[0] + 16.0) / 116.0;
     let f = [lab[1] / 500.0 + fy, fy, (fy - lab[2] / 200.0).max(0.0)];
