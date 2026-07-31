@@ -72,21 +72,27 @@
       "items": [
         {
           "python": "crosswap.app.processors.face_detectors.FaceDetectors.run_detect",
-          "rust": "noperson::pipeline::face_detector::YoloFaceDetector::detect_gpu",
+          "rust": "noperson::pipeline::face_detector::FaceDetector::from_model",
           "status": "partial",
-          "evidence": []
+          "evidence": [
+            "tests/detector_dispatch.rs::runtime_detector_dispatch_preserves_the_selected_model"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_detectors.FaceDetectors.detect_retinaface",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::face_detector::AnchorDetector::detect_gpu",
+          "status": "partial",
+          "evidence": [
+            "tests/detector_dispatch.rs::anchor_preprocessing_matches_crosswap_normalization"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_detectors.FaceDetectors.detect_scrdf",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::face_detector::AnchorDetector::detect_gpu",
+          "status": "partial",
+          "evidence": [
+            "tests/detector_dispatch.rs::anchor_preprocessing_matches_crosswap_normalization"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_detectors.FaceDetectors.detect_yoloface",
@@ -99,8 +105,8 @@
         },
         {
           "python": "crosswap.app.processors.face_detectors.FaceDetectors._process_stride_outputs",
-          "rust": null,
-          "status": "missing",
+          "rust": "noperson::pipeline::face_detector::AnchorDetector::decode_anchor",
+          "status": "partial",
           "evidence": []
         }
       ]

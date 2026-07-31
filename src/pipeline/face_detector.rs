@@ -6,6 +6,7 @@
 use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 
+use crate::config::settings::DetectorModel;
 use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
 use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
@@ -17,6 +18,68 @@ pub struct DetectedFace {
     pub bbox: [f32; 4],       // [x1, y1, x2, y2] in original frame coords
     pub kps_5: [[f32; 2]; 5], // left_eye, right_eye, nose, left_mouth, right_mouth
     pub score: f32,
+}
+
+pub trait FaceDetectorBackend {
+    fn detect_gpu(
+        &self,
+        mgr: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw: &CudaSlice<f32>,
+        ws: &mut GpuWorkspace,
+        frame_h: u32,
+        frame_w: u32,
+    ) -> anyhow::Result<(Vec<DetectedFace>, f32)>;
+}
+
+pub enum FaceDetector {
+    Yolo(YoloFaceDetector),
+    Anchor(AnchorDetector),
+}
+
+impl FaceDetector {
+    pub fn from_model(model: DetectorModel, score_threshold: f32) -> Self {
+        match model {
+            DetectorModel::YoloFace8n => Self::Yolo(YoloFaceDetector::new(score_threshold)),
+            DetectorModel::RetinaFace => Self::Anchor(AnchorDetector::new(
+                AnchorDetectorKind::RetinaFace,
+                score_threshold,
+            )),
+            DetectorModel::Scrfd2_5g => Self::Anchor(AnchorDetector::new(
+                AnchorDetectorKind::Scrfd,
+                score_threshold,
+            )),
+        }
+    }
+
+    pub fn model(&self) -> DetectorModel {
+        match self {
+            Self::Yolo(_) => DetectorModel::YoloFace8n,
+            Self::Anchor(detector) => match detector.kind {
+                AnchorDetectorKind::RetinaFace => DetectorModel::RetinaFace,
+                AnchorDetectorKind::Scrfd => DetectorModel::Scrfd2_5g,
+            },
+        }
+    }
+}
+
+impl FaceDetectorBackend for FaceDetector {
+    fn detect_gpu(
+        &self,
+        mgr: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw: &CudaSlice<f32>,
+        ws: &mut GpuWorkspace,
+        frame_h: u32,
+        frame_w: u32,
+    ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
+        match self {
+            Self::Yolo(detector) => detector.detect_gpu(mgr, gpu, frame_chw, ws, frame_h, frame_w),
+            Self::Anchor(detector) => {
+                detector.detect_gpu(mgr, gpu, frame_chw, ws, frame_h, frame_w)
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -99,7 +162,7 @@ impl YoloFaceDetector {
 
         let cuda_mem_info = MemoryInfo::new(
             AllocationDevice::CUDA,
-            0,
+            mgr.device_id(),
             AllocatorType::Device,
             MemoryType::Default,
         )
@@ -178,6 +241,20 @@ impl YoloFaceDetector {
         });
         nms(&mut dets, self.nms_iou_threshold);
         Ok(dets)
+    }
+}
+
+impl FaceDetectorBackend for YoloFaceDetector {
+    fn detect_gpu(
+        &self,
+        mgr: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw: &CudaSlice<f32>,
+        ws: &mut GpuWorkspace,
+        frame_h: u32,
+        frame_w: u32,
+    ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
+        YoloFaceDetector::detect_gpu(self, mgr, gpu, frame_chw, ws, frame_h, frame_w)
     }
 }
 
@@ -263,6 +340,26 @@ impl AnchorDetector {
         self.decode_anchor(&all_outputs, is as u32, scale)
     }
 
+    pub fn detect_gpu(
+        &self,
+        mgr: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw: &CudaSlice<f32>,
+        _ws: &mut GpuWorkspace,
+        frame_h: u32,
+        frame_w: u32,
+    ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
+        let frame = gpu.download(frame_chw)?;
+        let active = 3 * frame_h as usize * frame_w as usize;
+        anyhow::ensure!(
+            frame.len() >= active,
+            "detector frame buffer is shorter than {frame_w}x{frame_h}"
+        );
+        let (input, scale) = self.preprocess(&frame[..active], frame_h, frame_w);
+        let faces = self.detect(mgr, &input, scale)?;
+        Ok((faces, scale))
+    }
+
     /// Decode 3-stride anchor-based outputs.
     /// Output layout: [scores_s8, scores_s16, scores_s32, bbox_s8, bbox_s16, bbox_s32, kps_s8, kps_s16, kps_s32]
     fn decode_anchor(
@@ -338,6 +435,20 @@ impl AnchorDetector {
         });
         nms(&mut dets, self.nms_iou_threshold);
         Ok(dets)
+    }
+}
+
+impl FaceDetectorBackend for AnchorDetector {
+    fn detect_gpu(
+        &self,
+        mgr: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw: &CudaSlice<f32>,
+        ws: &mut GpuWorkspace,
+        frame_h: u32,
+        frame_w: u32,
+    ) -> anyhow::Result<(Vec<DetectedFace>, f32)> {
+        AnchorDetector::detect_gpu(self, mgr, gpu, frame_chw, ws, frame_h, frame_w)
     }
 }
 

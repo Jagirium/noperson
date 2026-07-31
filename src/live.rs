@@ -8,11 +8,11 @@ use image::GenericImageView;
 use thiserror::Error;
 
 use crate::config::parameters::{FaceSwapParams, RestorerSize};
-use crate::config::settings::ExecutionProvider;
+use crate::config::settings::{DetectorModel, ExecutionProvider};
 use crate::gpu::ops::GpuOps;
 use crate::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
 use crate::models::manager::ModelManager;
-use crate::pipeline::face_detector::YoloFaceDetector;
+use crate::pipeline::face_detector::{FaceDetector, FaceDetectorBackend};
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::frame_processor::{FrameResult, SourceFace, process_frame_gpu};
 use crate::pipeline::workspace::GpuWorkspace;
@@ -52,7 +52,7 @@ pub struct ProcessedRgb {
 pub struct LiveEngine {
     gpu: Arc<GpuOps>,
     manager: ModelManager,
-    detector: YoloFaceDetector,
+    detector: FaceDetector,
     workspace: GpuWorkspace,
     source_faces: Vec<SourceFace>,
     params: FaceSwapParams,
@@ -84,9 +84,35 @@ impl LiveEngine {
         provider: ExecutionProvider,
         stream: &Arc<CudaStream>,
     ) -> anyhow::Result<Self> {
-        let mut manager = ModelManager::with_provider(models_dir, provider);
+        Self::new_configured(
+            gpu,
+            models_dir,
+            identity_path,
+            params,
+            provider,
+            DetectorModel::YoloFace8n,
+            0,
+            stream,
+        )
+    }
+
+    pub fn new_configured(
+        gpu: Arc<GpuOps>,
+        models_dir: &Path,
+        identity_path: &Path,
+        params: FaceSwapParams,
+        provider: ExecutionProvider,
+        detector_model: DetectorModel,
+        device_id: i32,
+        stream: &Arc<CudaStream>,
+    ) -> anyhow::Result<Self> {
+        let mut manager = ModelManager::with_execution(models_dir, provider, device_id);
         manager.set_compute_stream(stream.cu_stream() as *mut ());
-        manager.load("YoloFace8n", "yoloface_8n.onnx")?;
+        match detector_model {
+            DetectorModel::YoloFace8n => manager.load("YoloFace8n", "yoloface_8n.onnx")?,
+            DetectorModel::RetinaFace => manager.load("RetinaFace", "det_10g.onnx")?,
+            DetectorModel::Scrfd2_5g => manager.load("SCRFD2.5g", "scrfd_2.5g_bnkps.onnx")?,
+        }
         manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
         manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
         manager.load_emap(CANONICAL_SWAPPER_FILENAME)?;
@@ -104,7 +130,7 @@ impl LiveEngine {
             }
         }
 
-        let detector = YoloFaceDetector::new(0.5);
+        let detector = FaceDetector::from_model(detector_model, 0.5);
         let mut workspace = GpuWorkspace::new(stream)?;
         let identity = image::open(identity_path)?;
         let (width, height) = identity.dimensions();

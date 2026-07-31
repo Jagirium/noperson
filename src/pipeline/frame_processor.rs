@@ -10,7 +10,7 @@ use crate::gpu::ops::GpuOps;
 use crate::gpu::unified;
 use crate::math::affine;
 use crate::models::manager::ModelManager;
-use crate::pipeline::face_detector::YoloFaceDetector;
+use crate::pipeline::face_detector::FaceDetectorBackend;
 use crate::pipeline::face_mask;
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::face_swapper::FaceSwapper;
@@ -36,10 +36,10 @@ pub struct FrameResult {
 ///
 /// `frame_chw` holds the current frame [3, H, W] in [0, 255] and is mutated
 /// in place to contain the swapped frame.
-pub fn process_frame_gpu(
+pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     gpu: &GpuOps,
     manager: &mut ModelManager,
-    detector: &YoloFaceDetector,
+    detector: &D,
     frame_chw: &mut CudaSlice<f32>,
     frame_h: u32,
     frame_w: u32,
