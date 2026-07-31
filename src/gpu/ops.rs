@@ -60,6 +60,8 @@ pub struct GpuOps {
     affine_scale_fn: CudaFunction,
     chw_rgb_to_nhwc_bgr_unit_fn: CudaFunction,
     nhwc_bgr_unit_to_chw_rgb_fn: CudaFunction,
+    dfm_rct_stats_fn: CudaFunction,
+    dfm_rct_apply_fn: CudaFunction,
     // Mask kernels
     blur_h_fn: CudaFunction,
     blur_v_fn: CudaFunction,
@@ -141,6 +143,8 @@ impl GpuOps {
             affine_scale_fn: load("frame_convert", "affine_scale_kernel"),
             chw_rgb_to_nhwc_bgr_unit_fn: load("layout_convert", "chw_rgb_to_nhwc_bgr_unit_kernel"),
             nhwc_bgr_unit_to_chw_rgb_fn: load("layout_convert", "nhwc_bgr_unit_to_chw_rgb_kernel"),
+            dfm_rct_stats_fn: load("dfm_color", "dfm_rct_stats_kernel"),
+            dfm_rct_apply_fn: load("dfm_color", "dfm_rct_apply_kernel"),
             matmul_512_fn: load("matmul_512", "matmul_512_kernel"),
             l2_normalize_fn: load("matmul_512", "l2_normalize_kernel"),
             blur_h_fn: load("gaussian_blur", "gaussian_blur_h_kernel"),
@@ -562,6 +566,33 @@ impl GpuOps {
         b.arg(dst);
         b.arg(&pixels);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn dfm_rct(
+        &self,
+        source_nhwc: &mut CudaSlice<f32>,
+        like_nhwc: &CudaSlice<f32>,
+        mask: &CudaSlice<f32>,
+        stats: &mut CudaSlice<f32>,
+        pixels: u32,
+        cutoff: f32,
+    ) -> Result<(), DriverError> {
+        self.stream.memcpy_htod(&[0.0f32; 12], stats)?;
+        let mut reduce = self.stream.launch_builder(&self.dfm_rct_stats_fn);
+        reduce.arg(&*source_nhwc);
+        reduce.arg(like_nhwc);
+        reduce.arg(mask);
+        reduce.arg(&mut *stats);
+        reduce.arg(&pixels);
+        reduce.arg(&cutoff);
+        unsafe { reduce.launch(LaunchConfig::for_num_elems(pixels)) }?;
+
+        let mut apply = self.stream.launch_builder(&self.dfm_rct_apply_fn);
+        apply.arg(source_nhwc);
+        apply.arg(&*stats);
+        apply.arg(&pixels);
+        unsafe { apply.launch(LaunchConfig::for_num_elems(pixels)) }?;
         Ok(())
     }
 

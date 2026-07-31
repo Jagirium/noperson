@@ -154,7 +154,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             }
             SwapperModel::Dfm => {
                 dfm.ok_or_else(|| anyhow::anyhow!("DFM contract is not loaded"))?
-                    .convert_gpu(manager, gpu, ws, params.dfm_morph)?;
+                    .convert_gpu(manager, gpu, ws, params.dfm_morph, params.dfm_rct)?;
             }
         }
         let _ = gpu.profile_mark(4); // after_swap_ort

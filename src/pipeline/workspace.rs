@@ -70,6 +70,7 @@ pub struct GpuWorkspace {
     pub semantic_eyes_valid: CudaSlice<u32>,
     pub semantic_mouth_valid: CudaSlice<u32>,
     pub dfm_morph: CudaSlice<f32>,
+    pub dfm_rct_stats: CudaSlice<f32>,
     pub mask_512: CudaSlice<f32>, // [512, 512] — final face mask
 
     // Blur kernel weights (uploaded once per param change)
@@ -151,6 +152,7 @@ impl GpuWorkspace {
             semantic_eyes_valid: stream.alloc_zeros::<u32>(1)?,
             semantic_mouth_valid: stream.alloc_zeros::<u32>(1)?,
             dfm_morph: stream.alloc_zeros::<f32>(1)?,
+            dfm_rct_stats: stream.alloc_zeros::<f32>(12)?,
             mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
 
             blur_kernel: stream.alloc_zeros::<f32>(MAX_BLUR_KS)?,

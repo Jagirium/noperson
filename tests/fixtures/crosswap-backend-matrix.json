@@ -455,9 +455,12 @@
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.rct",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::gpu::ops::GpuOps::dfm_rct",
+          "status": "partial",
+          "evidence": [
+            "tests/dfm_contract.rs::dfm_lab_conversion_matches_kornia_oracle",
+            "tests/dfm_contract.rs::dfm_rct_statistics_match_crossswap_oracle"
+          ]
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.has_morph_value",

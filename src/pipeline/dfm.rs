@@ -8,6 +8,128 @@ use crate::models::manager::ModelManager;
 use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
 use crate::pipeline::workspace::GpuWorkspace;
 
+pub fn rgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
+    let linear = rgb.map(|value| {
+        if value > 0.04045 {
+            ((value + 0.055) / 1.055).powf(2.4)
+        } else {
+            value / 12.92
+        }
+    });
+    let normalized = [
+        (0.412453 * linear[0] + 0.357580 * linear[1] + 0.180423 * linear[2]) / 0.95047,
+        0.212671 * linear[0] + 0.715160 * linear[1] + 0.072169 * linear[2],
+        (0.019334 * linear[0] + 0.119193 * linear[1] + 0.950227 * linear[2]) / 1.08883,
+    ];
+    let f = normalized.map(|value| {
+        if value > 0.008856 {
+            value.max(0.008856).powf(1.0 / 3.0)
+        } else {
+            7.787 * value + 4.0 / 29.0
+        }
+    });
+    [
+        116.0 * f[1] - 16.0,
+        500.0 * (f[0] - f[1]),
+        200.0 * (f[1] - f[2]),
+    ]
+}
+
+pub fn lab_to_rgb(lab: [f32; 3]) -> [f32; 3] {
+    let fy = (lab[0] + 16.0) / 116.0;
+    let f = [lab[1] / 500.0 + fy, fy, (fy - lab[2] / 200.0).max(0.0)];
+    let xyz_normalized = f.map(|value| {
+        if value > 0.2068966 {
+            value.powi(3)
+        } else {
+            (value - 4.0 / 29.0) / 7.787
+        }
+    });
+    let xyz = [
+        xyz_normalized[0] * 0.95047,
+        xyz_normalized[1],
+        xyz_normalized[2] * 1.08883,
+    ];
+    let linear = [
+        3.2404813432005266 * xyz[0] - 1.5371515162713185 * xyz[1] - 0.4985363261688878 * xyz[2],
+        -0.9692549499965682 * xyz[0] + 1.8759900014898907 * xyz[1] + 0.0415559265582928 * xyz[2],
+        0.0556466391351772 * xyz[0] - 0.2040413383665112 * xyz[1] + 1.0573110696453443 * xyz[2],
+    ];
+    linear.map(|value| {
+        let srgb = if value > 0.0031308 {
+            1.055 * value.max(0.0031308).powf(1.0 / 2.4) - 0.055
+        } else {
+            12.92 * value
+        };
+        srgb.clamp(0.0, 1.0)
+    })
+}
+
+pub fn rct_reference(
+    source: &[[f32; 3]],
+    like: &[[f32; 3]],
+    mask: &[f32],
+    cutoff: f32,
+) -> Vec<[f32; 3]> {
+    assert_eq!(source.len(), like.len());
+    assert_eq!(source.len(), mask.len());
+    let source_lab: Vec<_> = source.iter().copied().map(rgb_to_lab).collect();
+    let like_lab: Vec<_> = like.iter().copied().map(rgb_to_lab).collect();
+    let count = source.len() as f32;
+    let mut source_mean = [0.0; 3];
+    let mut like_mean = [0.0; 3];
+    for pixel in 0..source.len() {
+        if mask[pixel] >= cutoff {
+            for channel in 0..3 {
+                source_mean[channel] += source_lab[pixel][channel];
+                like_mean[channel] += like_lab[pixel][channel];
+            }
+        }
+    }
+    for channel in 0..3 {
+        source_mean[channel] /= count;
+        like_mean[channel] /= count;
+    }
+    let mut source_std = [0.0; 3];
+    let mut like_std = [0.0; 3];
+    for pixel in 0..source.len() {
+        for channel in 0..3 {
+            let source_value = if mask[pixel] >= cutoff {
+                source_lab[pixel][channel]
+            } else {
+                0.0
+            };
+            let like_value = if mask[pixel] >= cutoff {
+                like_lab[pixel][channel]
+            } else {
+                0.0
+            };
+            source_std[channel] += (source_value - source_mean[channel]).powi(2);
+            like_std[channel] += (like_value - like_mean[channel]).powi(2);
+        }
+    }
+    let correction = (count - 1.0).max(1.0);
+    for channel in 0..3 {
+        source_std[channel] = (source_std[channel] / correction).sqrt();
+        like_std[channel] = (like_std[channel] / correction).sqrt();
+    }
+
+    source_lab
+        .into_iter()
+        .map(|mut lab| {
+            for channel in 0..3 {
+                lab[channel] = (lab[channel] - source_mean[channel])
+                    * (like_std[channel] / (source_std[channel] + 1e-6))
+                    + like_mean[channel];
+            }
+            lab[0] = lab[0].clamp(0.0, 100.0);
+            lab[1] = lab[1].clamp(-127.0, 127.0);
+            lab[2] = lab[2].clamp(-127.0, 127.0);
+            lab_to_rgb(lab)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfmTensor {
     pub name: String,
@@ -105,6 +227,7 @@ impl DfmContract {
         gpu: &GpuOps,
         workspace: &mut GpuWorkspace,
         morph: f32,
+        rct: bool,
     ) -> anyhow::Result<()> {
         let width = self.width as u32;
         let height = self.height as u32;
@@ -160,6 +283,17 @@ impl DfmContract {
             let _ = session.run_binding(binding)?;
             binding.synchronize_outputs()?;
             binding.clear();
+        }
+
+        if rct {
+            gpu.dfm_rct(
+                &mut workspace.face_256,
+                &workspace.face_512_scratch,
+                &workspace.parser_attribute_512,
+                &mut workspace.dfm_rct_stats,
+                pixels,
+                0.3,
+            )?;
         }
 
         gpu.nhwc_bgr_unit_to_chw_rgb(&workspace.face_256, &mut workspace.face_512_scratch, pixels)?;
