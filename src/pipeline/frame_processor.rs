@@ -27,6 +27,8 @@ pub struct SourceFace {
     /// source is loaded instead of doing a 512x512 CPU matmul for every face.
     pub latent: Vec<f32>,
     pub threshold: f32,
+    /// Per-target controls. `None` inherits generation defaults.
+    pub params: Option<FaceSwapParams>,
 }
 
 /// Result of processing a single frame.
@@ -72,8 +74,6 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
 
     let mut faces_swapped = 0;
 
-    let dim = (params.dim as u32).max(1);
-    let swap_size = dim * 128; // 128 or 256
     let pipeline_size = 512u32;
 
     for face in &faces {
@@ -93,12 +93,9 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         } else {
             None
         };
-        let refined_is_better = refined
-            .as_ref()
-            .is_some_and(|landmarks| landmarks.is_preferred_to(face.score));
         let effective_kps = refined
             .as_ref()
-            .filter(|_| refined_is_better)
+            .filter(|landmarks| landmarks.is_preferred_to(face.score))
             .map_or(face.kps_5, |landmarks| landmarks.five);
 
         // 2a. Match against sources
@@ -118,7 +115,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                     )?;
                     match sources
                         .iter()
-                        .find(|src| assignment_matches(src, &embedding))
+                        .find(|candidate| assignment_matches(candidate, &embedding))
                     {
                         Some(source) => source,
                         None => continue,
@@ -129,6 +126,17 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             None
         };
         let _ = gpu.profile_mark(2); // after_recognize
+
+        // CrossSwap stores controls per target face. Model topology is fixed
+        // for this immutable generation, while all hot-path values may vary.
+        let params = source
+            .and_then(|selected| selected.params.as_ref())
+            .unwrap_or(params);
+        if !params.enabled {
+            continue;
+        }
+        let dim = (params.dim as u32).max(1);
+        let swap_size = dim * 128;
 
         let effective_kps = adjusted_keypoints(effective_kps, params);
 
@@ -638,6 +646,7 @@ mod tests {
             target_embedding: Some(target),
             latent: vec![9.0, 8.0],
             threshold: 0.75,
+            params: None,
         };
         assert!(assignment_matches(&scoped, &same));
         assert!(!assignment_matches(&scoped, &different));
@@ -646,6 +655,7 @@ mod tests {
             target_embedding: None,
             latent: vec![9.0, 8.0],
             threshold: 1.0,
+            params: None,
         };
         assert!(assignment_matches(&swap_all, &different));
     }

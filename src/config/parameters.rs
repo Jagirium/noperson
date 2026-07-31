@@ -72,7 +72,7 @@ impl EnhancerModel {
 pub struct EnhancerModelParseError(String);
 
 /// FaceParser class-mask controls, matching CrossSwap's parser sliders.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaceParserMaskParams {
     pub background: i32,
     pub face: u32,
@@ -113,7 +113,7 @@ impl Default for FaceParserMaskParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestoreMouthParams {
     pub blend: f32,
     pub feather: u32,
@@ -138,7 +138,7 @@ impl Default for RestoreMouthParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RestoreEyesParams {
     pub blend: f32,
     pub feather: u32,
@@ -232,7 +232,7 @@ impl LandmarkMode {
 }
 
 /// Face restorer model size.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RestorerSize {
     Gpen256,
     Gpen512,
@@ -275,7 +275,7 @@ pub enum AutoColorMode {
     DflMasked,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AutoColorParams {
     pub enabled: bool,
     pub mode: AutoColorMode,
@@ -293,7 +293,7 @@ impl Default for AutoColorParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorAdjustParams {
     pub enabled: bool,
     pub red: f32,
@@ -326,7 +326,7 @@ impl Default for ColorAdjustParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaceGeometryParams {
     pub enabled: bool,
     pub keypoints_x: f32,
@@ -353,7 +353,7 @@ impl Default for FaceGeometryParams {
 }
 
 /// Per-face swap parameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaceSwapParams {
     pub enabled: bool,
     pub dim: SwapDim,

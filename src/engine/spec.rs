@@ -64,6 +64,9 @@ pub struct FaceAssignmentSpec {
     pub target_identity_sha256: Option<String>,
     /// CrossSwap similarity score in the normalized `[0, 1]` domain.
     pub similarity_threshold: f32,
+    /// Optional target-local controls. `None` inherits generation defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<FaceSwapParams>,
 }
 
 /// Complete immutable configuration for a buildable engine generation.
@@ -187,6 +190,26 @@ impl EngineSpec {
                 return Err(EngineSpecError::InvalidAssignments(
                     "an unscoped swap-all assignment must be last".to_owned(),
                 ));
+            }
+            if let Some(params) = &assignment.params {
+                if !same_model_topology(&self.params, params) {
+                    return Err(EngineSpecError::InvalidAssignments(format!(
+                        "assignments[{index}] changes model topology; model-local overrides require a separate generation"
+                    )));
+                }
+                if params.face_likeness_enabled && assignment.target_identity_sha256.is_none() {
+                    return Err(EngineSpecError::InvalidAssignments(format!(
+                        "assignments[{index}] enables face likeness without a target identity"
+                    )));
+                }
+
+                // Reuse the complete parameter validator without recursing into
+                // assignments. Target presence is checked directly above.
+                let mut scoped = self.clone();
+                scoped.assignments.clear();
+                scoped.params = params.clone();
+                scoped.params.face_likeness_enabled = false;
+                scoped.validate()?;
             }
         }
 
@@ -587,6 +610,27 @@ impl EngineSpec {
             .get(&role)
             .ok_or(EngineSpecError::MissingModel(role))
     }
+}
+
+fn same_model_topology(a: &FaceSwapParams, b: &FaceSwapParams) -> bool {
+    a.swapper_model == b.swapper_model
+        && a.landmark_enabled == b.landmark_enabled
+        && a.landmark_mode == b.landmark_mode
+        && a.restorer_enabled == b.restorer_enabled
+        && (!a.restorer_enabled || a.restorer_size == b.restorer_size)
+        && (!b.restorer_enabled
+            || (a.restorer_alignment == crate::config::parameters::RestorerAlignment::Reference)
+                == (b.restorer_alignment
+                    == crate::config::parameters::RestorerAlignment::Reference))
+        && a.restorer2_enabled == b.restorer2_enabled
+        && (!a.restorer2_enabled || a.restorer2_size == b.restorer2_size)
+        && (!b.restorer2_enabled
+            || (a.restorer2_alignment == crate::config::parameters::RestorerAlignment::Reference)
+                == (b.restorer2_alignment
+                    == crate::config::parameters::RestorerAlignment::Reference))
+        && a.occluder_enabled == b.occluder_enabled
+        && a.xseg_enabled == b.xseg_enabled
+        && a.faceparser_enabled == b.faceparser_enabled
 }
 
 fn validate_range(control: &str, value: i64, min: i64, max: i64) -> Result<(), EngineSpecError> {

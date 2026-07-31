@@ -78,6 +78,7 @@ pub(crate) struct ResolvedFaceAssignment {
     pub source_path: PathBuf,
     pub target_path: Option<PathBuf>,
     pub similarity_threshold: f32,
+    pub params: Option<FaceSwapParams>,
 }
 
 pub fn output_dimensions(
@@ -609,6 +610,7 @@ impl LiveEngine {
                     source_path: identity_path.to_path_buf(),
                     target_path: None,
                     similarity_threshold: spec.params.similarity_threshold,
+                    params: None,
                 }];
                 &legacy[..]
             } else {
@@ -616,6 +618,7 @@ impl LiveEngine {
             };
             let mut sources = Vec::with_capacity(resolved.len());
             for assignment in resolved {
+                let face_params = assignment.params.as_ref().unwrap_or(&spec.params);
                 let source_embedding = identity_embedding_gpu(
                     &assignment.source_path,
                     &detector,
@@ -640,7 +643,7 @@ impl LiveEngine {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
                 let mut latent = FaceRecognizer::calc_latent(&source_embedding, emap);
-                if spec.params.face_likeness_enabled {
+                if face_params.face_likeness_enabled {
                     let target = target_embedding.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("face likeness requires a target identity")
                     })?;
@@ -648,13 +651,14 @@ impl LiveEngine {
                     apply_face_likeness(
                         &mut latent,
                         &target_latent,
-                        spec.params.face_likeness_factor,
+                        face_params.face_likeness_factor,
                     );
                 }
                 sources.push(SourceFace {
                     target_embedding,
                     latent,
                     threshold: assignment.similarity_threshold,
+                    params: assignment.params.clone(),
                 });
                 ensure_build_active(cancellation)?;
             }

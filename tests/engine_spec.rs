@@ -74,11 +74,13 @@ fn face_assignments_are_generation_identity_and_swap_all_is_last() {
             source_identity_sha256: SHA_A.to_owned(),
             target_identity_sha256: Some(SHA_B.to_owned()),
             similarity_threshold: 0.6,
+            params: None,
         },
         FaceAssignmentSpec {
             source_identity_sha256: SHA_B.to_owned(),
             target_identity_sha256: None,
             similarity_threshold: 0.5,
+            params: None,
         },
     ];
     first.validate().unwrap();
@@ -91,6 +93,45 @@ fn face_assignments_are_generation_identity_and_swap_all_is_last() {
     assert!(matches!(
         first.validate(),
         Err(EngineSpecError::InvalidAssignments(_))
+    ));
+}
+
+#[test]
+fn per_face_parameters_are_part_of_generation_identity() {
+    let mut first = valid_spec(false);
+    first.assignments = vec![FaceAssignmentSpec {
+        source_identity_sha256: SHA_A.to_owned(),
+        target_identity_sha256: Some(SHA_B.to_owned()),
+        similarity_threshold: 0.6,
+        params: Some(FaceSwapParams::default()),
+    }];
+    let mut changed = first.clone();
+    changed.assignments[0].params.as_mut().unwrap().strength = 2.0;
+
+    assert_ne!(first.generation_digest(), changed.generation_digest());
+}
+
+#[test]
+fn per_face_parameters_are_validated_and_cannot_change_loaded_models() {
+    let mut spec = valid_spec(false);
+    let params = FaceSwapParams {
+        restorer_alpha: 2.0,
+        ..FaceSwapParams::default()
+    };
+    spec.assignments = vec![FaceAssignmentSpec {
+        source_identity_sha256: SHA_A.to_owned(),
+        target_identity_sha256: Some(SHA_B.to_owned()),
+        similarity_threshold: 0.6,
+        params: Some(params),
+    }];
+    assert!(spec.validate().is_err());
+
+    spec.assignments[0].params.as_mut().unwrap().restorer_alpha = 1.0;
+    spec.assignments[0].params.as_mut().unwrap().swapper_model = SwapperModel::Dfm;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidAssignments(message))
+            if message.contains("model topology")
     ));
 }
 

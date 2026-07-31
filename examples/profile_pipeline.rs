@@ -92,6 +92,7 @@ fn main() -> anyhow::Result<()> {
         target_embedding: None,
         latent,
         threshold: 0.0,
+        params: None,
     }];
 
     // Load source image

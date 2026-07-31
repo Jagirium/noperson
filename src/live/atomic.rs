@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use cudarc::driver::{CudaSlice, CudaStream};
 
 use super::{LiveEngine, ProcessedRgb, ResolvedFaceAssignment, sha256_file};
+use crate::config::parameters::FaceSwapParams;
 use crate::engine::{
     ActivationError, ActivationOutcome, BuildCancellation, BuildRequestOutcome, BuildSnapshot,
     EngineGeneration, EngineSpec, FaceAssignmentSpec, FrameOutcome, OwnedEngineSupervisor,
@@ -18,6 +19,8 @@ pub struct FaceAssignmentPaths {
     pub source_path: PathBuf,
     pub target_path: Option<PathBuf>,
     pub similarity_threshold: f32,
+    /// Target-local controls; `None` inherits the generation defaults.
+    pub params: Option<FaceSwapParams>,
 }
 
 #[derive(Default)]
@@ -101,6 +104,7 @@ impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
                         })
                         .transpose()?,
                     similarity_threshold: assignment.similarity_threshold,
+                    params: assignment.params.clone(),
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -142,6 +146,7 @@ impl AtomicLiveEngine {
                         .map(|path| identities.register(path))
                         .transpose()?,
                     similarity_threshold: assignment.similarity_threshold,
+                    params: assignment.params.clone(),
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
