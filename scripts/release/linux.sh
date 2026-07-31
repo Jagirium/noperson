@@ -134,7 +134,7 @@ rm -f /etc/apt/sources.list.d/ubuntu.sources.curtin.orig /etc/apt/sources.list
 apt-get -o Acquire::Check-Valid-Until=false update
 apt-get -o Acquire::Check-Valid-Until=false install -y --no-install-recommends \
     build-essential ca-certificates curl git libclang-dev libgtk-3-dev libjpeg-dev \
-    libudev-dev libv4l-dev libwayland-dev libx11-dev libxkbcommon-dev \
+    libssl-dev libudev-dev libv4l-dev libwayland-dev libx11-dev libxkbcommon-dev \
     libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config xz-utils
 rm -rf /var/lib/apt/lists/*
 

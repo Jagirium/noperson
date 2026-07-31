@@ -15,6 +15,7 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
         "sha256sum",
         "git diff-index --quiet HEAD --",
         "run --rm --interactive",
+        "libssl-dev",
         "container did not export archive",
         "container did not export checksum",
     ] {
