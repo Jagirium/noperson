@@ -63,6 +63,8 @@ pub struct GpuOps {
     blur_v_fn: CudaFunction,
     mask_resize_fn: CudaFunction,
     mask_mul_fn: CudaFunction,
+    occluder_threshold_fn: CudaFunction,
+    xseg_postprocess_fn: CudaFunction,
     // Profiling (cell for interior mutability — methods only take &self)
     profiling: RefCell<ProfilingState>,
 }
@@ -129,6 +131,8 @@ impl GpuOps {
             blur_v_fn: load("gaussian_blur", "gaussian_blur_v_kernel"),
             mask_resize_fn: load("gaussian_blur", "mask_resize_kernel"),
             mask_mul_fn: load("gaussian_blur", "mask_mul_kernel"),
+            occluder_threshold_fn: load("mask_postprocess", "occluder_threshold_kernel"),
+            xseg_postprocess_fn: load("mask_postprocess", "xseg_postprocess_kernel"),
             profiling: RefCell::new(ProfilingState {
                 events,
                 frame_count: 0,
@@ -791,6 +795,91 @@ impl GpuOps {
         b.arg(b_slice);
         b.arg(&n);
         unsafe { b.launch(LaunchConfig::for_num_elems(n)) }?;
+        Ok(())
+    }
+
+    pub fn occluder_threshold(&self, mask: &mut CudaSlice<f32>) -> Result<(), DriverError> {
+        let total = mask.len() as u32;
+        let mut b = self.stream.launch_builder(&self.occluder_threshold_fn);
+        b.arg(mask);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn xseg_postprocess(&self, mask: &mut CudaSlice<f32>) -> Result<(), DriverError> {
+        let total = mask.len() as u32;
+        let mut b = self.stream.launch_builder(&self.xseg_postprocess_fn);
+        b.arg(mask);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    /// Repeat CrossSwap's radius-N max-pool morphology using NPP 3x3 passes.
+    pub fn morphology_mask(
+        &self,
+        mask: &mut CudaSlice<f32>,
+        tmp: &mut CudaSlice<f32>,
+        width: u32,
+        height: u32,
+        amount: i32,
+    ) -> Result<(), DriverError> {
+        let iterations = amount.unsigned_abs().min(100);
+        for iteration in 0..iterations {
+            let result = if iteration.is_multiple_of(2) {
+                let (src_ptr, _src_guard) = mask.device_ptr(&self.stream);
+                let (dst_ptr, _dst_guard) = tmp.device_ptr_mut(&self.stream);
+                if amount > 0 {
+                    unsafe {
+                        npp::dilate_3x3_f32_c1(
+                            src_ptr as *const f32,
+                            dst_ptr as *mut f32,
+                            width as i32,
+                            height as i32,
+                        )
+                    }
+                } else {
+                    unsafe {
+                        npp::erode_3x3_f32_c1(
+                            src_ptr as *const f32,
+                            dst_ptr as *mut f32,
+                            width as i32,
+                            height as i32,
+                        )
+                    }
+                }
+            } else {
+                let (src_ptr, _src_guard) = tmp.device_ptr(&self.stream);
+                let (dst_ptr, _dst_guard) = mask.device_ptr_mut(&self.stream);
+                if amount > 0 {
+                    unsafe {
+                        npp::dilate_3x3_f32_c1(
+                            src_ptr as *const f32,
+                            dst_ptr as *mut f32,
+                            width as i32,
+                            height as i32,
+                        )
+                    }
+                } else {
+                    unsafe {
+                        npp::erode_3x3_f32_c1(
+                            src_ptr as *const f32,
+                            dst_ptr as *mut f32,
+                            width as i32,
+                            height as i32,
+                        )
+                    }
+                }
+            };
+            result.map_err(|error| {
+                tracing::error!("NPP mask morphology failed: {error}");
+                DriverError(cudarc::driver::sys::CUresult::CUDA_ERROR_UNKNOWN)
+            })?;
+        }
+        if !iterations.is_multiple_of(2) {
+            self.stream.memcpy_dtod(tmp, mask)?;
+        }
         Ok(())
     }
 

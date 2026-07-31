@@ -24,10 +24,11 @@ pub struct GpuWorkspace {
     pub detect_output: CudaSlice<f32>, // [1, 20, 8400]
 
     // Per-face buffers (reused)
-    pub face_112: CudaSlice<f32>,         // ArcFace input [3, 112, 112]
-    pub face_256: CudaSlice<f32>,         // swap face [3, dim*128, dim*128] (max 512)
-    pub face_512: CudaSlice<f32>,         // Pipeline face [3, 512, 512]
-    pub face_512_scratch: CudaSlice<f32>, // Scratch for upscaled swap [3, 512, 512]
+    pub face_112: CudaSlice<f32>,          // ArcFace input [3, 112, 112]
+    pub face_256: CudaSlice<f32>,          // swap face [3, dim*128, dim*128] (max 512)
+    pub face_512: CudaSlice<f32>,          // Pipeline face [3, 512, 512]
+    pub face_512_original: CudaSlice<f32>, // Original aligned crop for learned masks
+    pub face_512_scratch: CudaSlice<f32>,  // Scratch for upscaled swap [3, 512, 512]
     pub restorer_256_input: CudaSlice<f32>,
     pub restorer_256_output: CudaSlice<f32>,
     /// Last GPEN output in aligned 512-space. Reused between inference keyframes.
@@ -51,10 +52,12 @@ pub struct GpuWorkspace {
     pub swap_latent_gpu: CudaSlice<f32>,   // [16, 512] — replicated latent for IoBinding input
 
     // Masks
-    pub mask_128: CudaSlice<f32>,     // [128, 128]
-    pub mask_128_tmp: CudaSlice<f32>, // [128, 128] blur scratch
-    pub mask_256: CudaSlice<f32>,     // [256, 256] — Occluder output
-    pub mask_512: CudaSlice<f32>,     // [512, 512] — final face mask
+    pub mask_128: CudaSlice<f32>,         // [128, 128]
+    pub mask_128_tmp: CudaSlice<f32>,     // [128, 128] blur scratch
+    pub mask_256: CudaSlice<f32>,         // [256, 256] — Occluder output
+    pub mask_256_tmp: CudaSlice<f32>,     // [256, 256] morphology scratch
+    pub mask_learned_128: CudaSlice<f32>, // [128, 128] learned-mask composition
+    pub mask_512: CudaSlice<f32>,         // [512, 512] — final face mask
 
     // Blur kernel weights (uploaded once per param change)
     pub blur_kernel: CudaSlice<f32>, // [MAX_KS]
@@ -102,6 +105,7 @@ impl GpuWorkspace {
             face_112: stream.alloc_zeros::<f32>(face_112_size)?,
             face_256: stream.alloc_zeros::<f32>(face_256_size)?,
             face_512: stream.alloc_zeros::<f32>(face_512_size)?,
+            face_512_original: stream.alloc_zeros::<f32>(face_512_size)?,
             face_512_scratch: stream.alloc_zeros::<f32>(face_512_size)?,
             restorer_256_input: stream.alloc_zeros::<f32>(3 * 256 * 256)?,
             restorer_256_output: stream.alloc_zeros::<f32>(3 * 256 * 256)?,
@@ -119,6 +123,8 @@ impl GpuWorkspace {
             mask_128: stream.alloc_zeros::<f32>(128 * 128)?,
             mask_128_tmp: stream.alloc_zeros::<f32>(128 * 128)?,
             mask_256: stream.alloc_zeros::<f32>(256 * 256)?,
+            mask_256_tmp: stream.alloc_zeros::<f32>(256 * 256)?,
+            mask_learned_128: stream.alloc_zeros::<f32>(128 * 128)?,
             mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
 
             blur_kernel: stream.alloc_zeros::<f32>(MAX_BLUR_KS)?,

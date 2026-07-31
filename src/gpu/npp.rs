@@ -521,3 +521,22 @@ pub unsafe fn dilate_3x3_f32_c1(
         "nppiDilate3x3_32f_C1R",
     )
 }
+
+/// 3x3 morphological erode on 1-channel f32.
+///
+/// # Safety
+/// All pointers must be valid CUDA device pointers.
+pub unsafe fn erode_3x3_f32_c1(
+    src: *const f32,
+    dst: *mut f32,
+    width: i32,
+    height: i32,
+) -> Result<(), NppError> {
+    let roi = NppiSize { width, height };
+    let step = width * 4;
+
+    check_npp(
+        unsafe { nppiErode3x3_32f_C1R(src, step, dst, step, roi) },
+        "nppiErode3x3_32f_C1R",
+    )
+}

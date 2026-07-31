@@ -168,6 +168,7 @@ fn test_default_gpu_border_mask_has_soft_pixel_edges() -> anyhow::Result<()> {
         blur_ks,
         blur_sigma,
         false,
+        false,
     )?;
     let values = gpu.download(&ws.mask_128)?;
 

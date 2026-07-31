@@ -80,6 +80,13 @@ pub enum EngineSpecError {
     InvalidEnhancerBlend(String),
     #[error("enhancer selection {selected} does not match artifact {artifact}")]
     EnhancerModelMismatch { selected: String, artifact: String },
+    #[error("mask control {control} is outside {min}..={max}: {value}")]
+    InvalidMaskControl {
+        control: String,
+        value: i64,
+        min: i64,
+        max: i64,
+    },
     #[error("failed to serialize engine spec: {0}")]
     Serialization(String),
 }
@@ -114,6 +121,14 @@ impl EngineSpec {
                 self.params.enhancer_blend.to_string(),
             ));
         }
+        validate_range("occluder_size", self.params.occluder_size as i64, -100, 100)?;
+        validate_range("xseg_size", self.params.xseg_size as i64, -100, 100)?;
+        validate_range(
+            "occluder_xseg_blur",
+            self.params.occluder_xseg_blur as i64,
+            0,
+            100,
+        )?;
 
         for (role, artifact) in &self.models {
             if artifact.logical_name.trim().is_empty() {
@@ -186,6 +201,19 @@ impl EngineSpec {
         self.models
             .get(&role)
             .ok_or(EngineSpecError::MissingModel(role))
+    }
+}
+
+fn validate_range(control: &str, value: i64, min: i64, max: i64) -> Result<(), EngineSpecError> {
+    if (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        Err(EngineSpecError::InvalidMaskControl {
+            control: control.to_owned(),
+            value,
+            min,
+            max,
+        })
     }
 }
 

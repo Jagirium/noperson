@@ -49,6 +49,7 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=nppc"); // NPP core
     println!("cargo:rustc-link-lib=dylib=nppig"); // NPP image geometry (warp, resize)
     println!("cargo:rustc-link-lib=dylib=nppif"); // NPP image filtering (gaussian blur)
+    println!("cargo:rustc-link-lib=dylib=nppim"); // NPP image morphology (dilate/erode)
     println!("cargo:rustc-link-lib=dylib=nppicc"); // NPP image color conversion
     println!("cargo:rustc-link-lib=dylib=nppial"); // NPP arithmetic and logical (dilate)
     println!("cargo:rustc-link-lib=dylib=nppidei"); // NPP data exchange and initialization

@@ -155,6 +155,33 @@ fn enhancer_selection_and_blend_are_generation_identity() {
 }
 
 #[test]
+fn learned_mask_controls_are_validated_before_gpu_allocation() {
+    let mut spec = valid_spec(false);
+    spec.params.occluder_size = 101;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "occluder_size"
+    ));
+
+    spec.params.occluder_size = 0;
+    spec.params.xseg_size = -101;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "xseg_size"
+    ));
+
+    spec.params.xseg_size = 0;
+    spec.params.occluder_xseg_blur = 101;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "occluder_xseg_blur"
+    ));
+}
+
+#[test]
 fn model_filenames_cannot_escape_the_generation_root() {
     let mut absolute = valid_spec(false);
     absolute

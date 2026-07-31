@@ -4,9 +4,25 @@
 //!
 //! Mask convention: 1.0 = keep swapped face, 0.0 = keep original background.
 
-use crate::gpu::ops::GpuOps;
+use crate::config::parameters::FaceSwapParams;
+use crate::gpu::{ops::GpuOps, unified};
 use crate::models::manager::ModelManager;
 use crate::pipeline::workspace::{GpuWorkspace, MAX_BLUR_KS};
+
+pub fn postprocess_occluder_mask(mask: &mut [f32]) {
+    for value in mask {
+        *value = if *value > 0.0 { 1.0 } else { 0.0 };
+    }
+}
+
+pub fn postprocess_xseg_mask(mask: &mut [f32]) {
+    for value in mask {
+        *value = value.clamp(0.0, 1.0);
+        if *value < 0.1 {
+            *value = 0.0;
+        }
+    }
+}
 
 /// Occluder mask inference.
 ///
@@ -194,6 +210,7 @@ pub fn gpu_generate_mask_512(
     blur_ks: u32,
     blur_sigma: f32,
     use_restorer_oval: bool,
+    use_learned_mask: bool,
 ) -> anyhow::Result<()> {
     // Crosswap only applies the oval fallback when restoration is active and
     // no explicit parser/XSeg mask is available.
@@ -209,25 +226,7 @@ pub fn gpu_generate_mask_512(
 
     // 2. Optional gaussian blur → mask_128 (uses mask_128_tmp scratch)
     if blur_ks > 1 {
-        let ks = blur_ks.min(MAX_BLUR_KS as u32);
-        // Regenerate blur kernel if params changed
-        if ks != ws.blur_ks_current || (blur_sigma - ws.blur_sigma_current).abs() > 1e-6 {
-            let half = (ks as i32) / 2;
-            let mut weights = vec![0.0f32; ks as usize];
-            let mut sum = 0.0f32;
-            for i in 0..ks as i32 {
-                let x = (i - half) as f32;
-                let v = (-x * x / (2.0 * blur_sigma * blur_sigma)).exp();
-                weights[i as usize] = v;
-                sum += v;
-            }
-            for w in weights.iter_mut() {
-                *w /= sum;
-            }
-            gpu.upload_into(&weights, &mut ws.blur_kernel)?;
-            ws.blur_ks_current = ks;
-            ws.blur_sigma_current = blur_sigma;
-        }
+        let ks = prepare_blur_kernel(gpu, ws, blur_ks, blur_sigma)?;
         gpu.gaussian_blur_mask(
             &mut ws.mask_128,
             &mut ws.mask_128_tmp,
@@ -238,9 +237,119 @@ pub fn gpu_generate_mask_512(
         )?;
     }
 
+    if use_learned_mask {
+        gpu.mask_mul(&mut ws.mask_128, &ws.mask_learned_128)?;
+    }
+
     // 3. Resize 128 → 512 into mask_512
     gpu.mask_resize(&ws.mask_128, &mut ws.mask_512, 128, 128, 512, 512)?;
     Ok(())
+}
+
+/// Run enabled learned masks and compose them in CrossSwap's 128-space.
+pub fn gpu_generate_learned_mask_128(
+    gpu: &GpuOps,
+    manager: &mut ModelManager,
+    ws: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<bool> {
+    if !params.occluder_enabled && !params.xseg_enabled {
+        return Ok(false);
+    }
+
+    gpu.border_oval_mask(&mut ws.mask_learned_128, 128, 0, 0, 0, 0, false)?;
+
+    if params.occluder_enabled {
+        prepare_learned_mask_input(gpu, ws)?;
+        let session = manager
+            .get_mut("Occluder")
+            .ok_or_else(|| anyhow::anyhow!("Occluder is not loaded"))?;
+        unified::run_occluder(session, &gpu.stream, &mut ws.face_256, &mut ws.mask_256)?;
+        gpu.occluder_threshold(&mut ws.mask_256)?;
+        gpu.morphology_mask(
+            &mut ws.mask_256,
+            &mut ws.mask_256_tmp,
+            256,
+            256,
+            params.occluder_size,
+        )?;
+        compose_learned_mask(gpu, ws, params.occluder_xseg_blur)?;
+    }
+
+    if params.xseg_enabled {
+        prepare_learned_mask_input(gpu, ws)?;
+        let session = manager
+            .get_mut("XSeg")
+            .ok_or_else(|| anyhow::anyhow!("XSeg is not loaded"))?;
+        unified::run_xseg(session, &gpu.stream, &mut ws.face_256, &mut ws.mask_256)?;
+        gpu.xseg_postprocess(&mut ws.mask_256)?;
+        gpu.morphology_mask(
+            &mut ws.mask_256,
+            &mut ws.mask_256_tmp,
+            256,
+            256,
+            params.xseg_size,
+        )?;
+        compose_learned_mask(gpu, ws, params.occluder_xseg_blur)?;
+    }
+
+    Ok(true)
+}
+
+fn prepare_learned_mask_input(gpu: &GpuOps, ws: &mut GpuWorkspace) -> anyhow::Result<()> {
+    gpu.resize_npp(&ws.face_512_original, &mut ws.face_256, 512, 512, 256, 256)?;
+    gpu.normalize_prefix(&mut ws.face_256, 3 * 256 * 256)?;
+    Ok(())
+}
+
+fn compose_learned_mask(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    blur_amount: u32,
+) -> anyhow::Result<()> {
+    gpu.mask_resize(&ws.mask_256, &mut ws.mask_128_tmp, 256, 256, 128, 128)?;
+    gpu.mask_mul(&mut ws.mask_learned_128, &ws.mask_128_tmp)?;
+    if blur_amount > 0 {
+        let blur_ks = blur_amount.saturating_mul(2).saturating_add(1);
+        let sigma = (blur_amount as f32 + 1.0) * 0.2;
+        let ks = prepare_blur_kernel(gpu, ws, blur_ks, sigma)?;
+        gpu.gaussian_blur_mask(
+            &mut ws.mask_learned_128,
+            &mut ws.mask_128_tmp,
+            128,
+            128,
+            &ws.blur_kernel,
+            ks,
+        )?;
+    }
+    Ok(())
+}
+
+fn prepare_blur_kernel(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    kernel_size: u32,
+    sigma: f32,
+) -> anyhow::Result<u32> {
+    let ks = kernel_size.min(MAX_BLUR_KS as u32);
+    if ks != ws.blur_ks_current || (sigma - ws.blur_sigma_current).abs() > 1e-6 {
+        let half = (ks as i32) / 2;
+        let mut weights = vec![0.0f32; ks as usize];
+        let mut sum = 0.0f32;
+        for i in 0..ks as i32 {
+            let x = (i - half) as f32;
+            let value = (-x * x / (2.0 * sigma * sigma)).exp();
+            weights[i as usize] = value;
+            sum += value;
+        }
+        for weight in &mut weights {
+            *weight /= sum;
+        }
+        gpu.upload_into(&weights, &mut ws.blur_kernel)?;
+        ws.blur_ks_current = ks;
+        ws.blur_sigma_current = sigma;
+    }
+    Ok(ks)
 }
 
 /// Paste swapped face back into frame using mask.

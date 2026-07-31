@@ -241,27 +241,37 @@
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.apply_occlusion",
-          "rust": "noperson::pipeline::face_mask::apply_occluder",
+          "rust": "noperson::pipeline::face_mask::gpu_generate_learned_mask_128",
           "status": "partial",
-          "evidence": []
+          "evidence": [
+            "tests/mask_contract.rs::occluder_and_xseg_postprocessing_match_crosswap",
+            "tests/engine_spec.rs::learned_mask_controls_are_validated_before_gpu_allocation"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.run_occluder",
-          "rust": "noperson::pipeline::face_mask::apply_occluder",
+          "rust": "noperson::gpu::unified::run_occluder",
           "status": "partial",
-          "evidence": []
+          "evidence": [
+            "tests/mask_contract.rs::occluder_and_xseg_postprocessing_match_crosswap"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.apply_dfl_xseg",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::face_mask::gpu_generate_learned_mask_128",
+          "status": "partial",
+          "evidence": [
+            "tests/mask_contract.rs::occluder_and_xseg_postprocessing_match_crosswap",
+            "tests/engine_spec.rs::learned_mask_controls_are_validated_before_gpu_allocation"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.run_dfl_xseg",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::gpu::unified::run_xseg",
+          "status": "partial",
+          "evidence": [
+            "tests/mask_contract.rs::occluder_and_xseg_postprocessing_match_crosswap"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.apply_face_parser",

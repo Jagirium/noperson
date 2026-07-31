@@ -107,6 +107,8 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             pipeline_size,
             &face_affine,
         )?;
+        gpu.stream
+            .memcpy_dtod(&ws.face_512, &mut ws.face_512_original)?;
         gpu.resize_npp(
             &ws.face_512,
             &mut ws.face_256,
@@ -207,6 +209,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         // 2g. Generate blurred 512² mask on GPU
         let blur_ks = params.border_blur * 2 + 1;
         let blur_sigma = (params.border_blur as f32 + 1.0) * 0.2;
+        let learned_mask = face_mask::gpu_generate_learned_mask_128(gpu, manager, ws, params)?;
         face_mask::gpu_generate_mask_512(
             gpu,
             ws,
@@ -217,6 +220,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             blur_ks,
             blur_sigma,
             params.restorer_enabled,
+            learned_mask,
         )?;
         let _ = gpu.profile_mark(6); // after_mask_gen
 

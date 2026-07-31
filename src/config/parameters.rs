@@ -125,7 +125,13 @@ pub struct FaceSwapParams {
 
     // Masks
     pub occluder_enabled: bool,
+    #[serde(default)]
+    pub occluder_size: i32,
     pub xseg_enabled: bool,
+    #[serde(default)]
+    pub xseg_size: i32,
+    #[serde(default)]
+    pub occluder_xseg_blur: u32,
     pub faceparser_enabled: bool,
     pub restore_mouth: bool,
     pub restore_eyes: bool,
@@ -161,7 +167,10 @@ impl Default for FaceSwapParams {
             enhancer_model: EnhancerModel::default(),
             enhancer_blend: default_enhancer_blend(),
             occluder_enabled: false,
+            occluder_size: 0,
             xseg_enabled: false,
+            xseg_size: 0,
+            occluder_xseg_blur: 0,
             faceparser_enabled: false,
             restore_mouth: false,
             restore_eyes: false,
