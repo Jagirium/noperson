@@ -71,6 +71,48 @@ impl EnhancerModel {
 #[error("unknown CrossSwap frame enhancer {0}")]
 pub struct EnhancerModelParseError(String);
 
+/// FaceParser class-mask controls, matching CrossSwap's parser sliders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FaceParserMaskParams {
+    pub background: i32,
+    pub face: u32,
+    pub left_eyebrow: u32,
+    pub right_eyebrow: u32,
+    pub left_eye: u32,
+    pub right_eye: u32,
+    pub eyeglasses: u32,
+    pub nose: u32,
+    pub mouth: u32,
+    pub upper_lip: u32,
+    pub lower_lip: u32,
+    pub neck: u32,
+    pub hair: u32,
+    pub background_blur: u32,
+    pub face_blur: u32,
+}
+
+impl Default for FaceParserMaskParams {
+    fn default() -> Self {
+        Self {
+            background: 0,
+            face: 0,
+            left_eyebrow: 0,
+            right_eyebrow: 0,
+            left_eye: 0,
+            right_eye: 0,
+            eyeglasses: 0,
+            nose: 0,
+            mouth: 0,
+            upper_lip: 0,
+            lower_lip: 0,
+            neck: 0,
+            hair: 0,
+            background_blur: 5,
+            face_blur: 5,
+        }
+    }
+}
+
 /// Swap resolution: how many tiles for Inswapper128.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SwapDim {
@@ -133,6 +175,8 @@ pub struct FaceSwapParams {
     #[serde(default)]
     pub occluder_xseg_blur: u32,
     pub faceparser_enabled: bool,
+    #[serde(default)]
+    pub faceparser: FaceParserMaskParams,
     pub restore_mouth: bool,
     pub restore_eyes: bool,
 
@@ -172,6 +216,7 @@ impl Default for FaceSwapParams {
             xseg_size: 0,
             occluder_xseg_blur: 0,
             faceparser_enabled: false,
+            faceparser: FaceParserMaskParams::default(),
             restore_mouth: false,
             restore_eyes: false,
             border_top: 10,

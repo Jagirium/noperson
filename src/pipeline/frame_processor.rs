@@ -132,6 +132,8 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             pipeline_size,
             pipeline_size,
         )?;
+        gpu.stream
+            .memcpy_dtod(&ws.face_512, &mut ws.face_512_pre_restorer)?;
 
         // 2f. Optional GPEN restoration. The original swapped face remains in
         // face_512; inference input/output and alpha blending stay on GPU.

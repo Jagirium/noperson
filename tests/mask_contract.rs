@@ -1,6 +1,7 @@
-use noperson::config::parameters::FaceSwapParams;
+use noperson::config::parameters::{FaceParserMaskParams, FaceSwapParams};
 use noperson::pipeline::face_mask::{
-    generate_border_mask, postprocess_occluder_mask, postprocess_xseg_mask,
+    compose_face_parser_mask, generate_border_mask, postprocess_occluder_mask,
+    postprocess_xseg_mask,
 };
 
 #[test]
@@ -43,4 +44,60 @@ fn learned_mask_controls_use_crossswap_defaults() {
     assert_eq!(params.occluder_size, 0);
     assert_eq!(params.xseg_size, 0);
     assert_eq!(params.occluder_xseg_blur, 0);
+}
+
+#[test]
+fn face_parser_attribute_growth_masks_the_selected_class_neighborhood() {
+    let mut params = FaceParserMaskParams {
+        face: 1,
+        face_blur: 0,
+        background_blur: 0,
+        ..FaceParserMaskParams::default()
+    };
+    params.background = 0;
+    let classes = [
+        0, 0, 0, 0, 0, //
+        0, 0, 0, 0, 0, //
+        0, 0, 1, 0, 0, //
+        0, 0, 0, 0, 0, //
+        0, 0, 0, 0, 0,
+    ];
+
+    let mask = compose_face_parser_mask(&classes, 5, 5, &params).unwrap();
+    assert_eq!(
+        mask,
+        [
+            1.0, 1.0, 1.0, 1.0, 1.0, //
+            1.0, 0.0, 0.0, 0.0, 1.0, //
+            1.0, 0.0, 0.0, 0.0, 1.0, //
+            1.0, 0.0, 0.0, 0.0, 1.0, //
+            1.0, 1.0, 1.0, 1.0, 1.0,
+        ]
+    );
+}
+
+#[test]
+fn face_parser_background_growth_and_shrink_follow_crossswap_direction() {
+    let classes = [0, 0, 0, 0, 1, 0, 0, 0, 0];
+    let grow = FaceParserMaskParams {
+        background: 1,
+        background_blur: 0,
+        face_blur: 0,
+        ..FaceParserMaskParams::default()
+    };
+    assert_eq!(
+        compose_face_parser_mask(&classes, 3, 3, &grow).unwrap(),
+        [1.0; 9]
+    );
+
+    let shrink = FaceParserMaskParams {
+        background: -1,
+        background_blur: 0,
+        face_blur: 0,
+        ..FaceParserMaskParams::default()
+    };
+    assert_eq!(
+        compose_face_parser_mask(&classes, 3, 3, &shrink).unwrap(),
+        [0.0; 9]
+    );
 }

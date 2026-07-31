@@ -129,6 +129,34 @@ impl EngineSpec {
             0,
             100,
         )?;
+        validate_range(
+            "faceparser.background",
+            self.params.faceparser.background as i64,
+            -50,
+            50,
+        )?;
+        for (control, value) in [
+            ("face", self.params.faceparser.face),
+            ("left_eyebrow", self.params.faceparser.left_eyebrow),
+            ("right_eyebrow", self.params.faceparser.right_eyebrow),
+            ("left_eye", self.params.faceparser.left_eye),
+            ("right_eye", self.params.faceparser.right_eye),
+            ("eyeglasses", self.params.faceparser.eyeglasses),
+            ("nose", self.params.faceparser.nose),
+            ("mouth", self.params.faceparser.mouth),
+            ("upper_lip", self.params.faceparser.upper_lip),
+            ("lower_lip", self.params.faceparser.lower_lip),
+            ("neck", self.params.faceparser.neck),
+            ("hair", self.params.faceparser.hair),
+        ] {
+            validate_range(&format!("faceparser.{control}"), value as i64, 0, 30)?;
+        }
+        for (control, value) in [
+            ("background_blur", self.params.faceparser.background_blur),
+            ("face_blur", self.params.faceparser.face_blur),
+        ] {
+            validate_range(&format!("faceparser.{control}"), value as i64, 0, 100)?;
+        }
 
         for (role, artifact) in &self.models {
             if artifact.logical_name.trim().is_empty() {

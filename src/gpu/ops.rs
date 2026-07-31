@@ -65,6 +65,10 @@ pub struct GpuOps {
     mask_mul_fn: CudaFunction,
     occluder_threshold_fn: CudaFunction,
     xseg_postprocess_fn: CudaFunction,
+    imagenet_normalize_fn: CudaFunction,
+    parser_argmax_fn: CudaFunction,
+    parser_class_mask_fn: CudaFunction,
+    mask_invert_fn: CudaFunction,
     // Profiling (cell for interior mutability — methods only take &self)
     profiling: RefCell<ProfilingState>,
 }
@@ -133,6 +137,10 @@ impl GpuOps {
             mask_mul_fn: load("gaussian_blur", "mask_mul_kernel"),
             occluder_threshold_fn: load("mask_postprocess", "occluder_threshold_kernel"),
             xseg_postprocess_fn: load("mask_postprocess", "xseg_postprocess_kernel"),
+            imagenet_normalize_fn: load("mask_postprocess", "imagenet_normalize_kernel"),
+            parser_argmax_fn: load("mask_postprocess", "parser_argmax_kernel"),
+            parser_class_mask_fn: load("mask_postprocess", "parser_class_mask_kernel"),
+            mask_invert_fn: load("mask_postprocess", "mask_invert_kernel"),
             profiling: RefCell::new(ProfilingState {
                 events,
                 frame_count: 0,
@@ -810,6 +818,59 @@ impl GpuOps {
     pub fn xseg_postprocess(&self, mask: &mut CudaSlice<f32>) -> Result<(), DriverError> {
         let total = mask.len() as u32;
         let mut b = self.stream.launch_builder(&self.xseg_postprocess_fn);
+        b.arg(mask);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn imagenet_normalize_512(&self, image: &mut CudaSlice<f32>) -> Result<(), DriverError> {
+        let plane = 512 * 512u32;
+        let total = 3 * plane;
+        let mut b = self.stream.launch_builder(&self.imagenet_normalize_fn);
+        b.arg(image);
+        b.arg(&plane);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn parser_argmax(
+        &self,
+        logits: &CudaSlice<f32>,
+        classes: &mut CudaSlice<u8>,
+    ) -> Result<(), DriverError> {
+        let pixels = 512 * 512u32;
+        let mut b = self.stream.launch_builder(&self.parser_argmax_fn);
+        b.arg(logits);
+        b.arg(classes);
+        b.arg(&pixels);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    pub fn parser_class_mask(
+        &self,
+        classes: &CudaSlice<u8>,
+        mask: &mut CudaSlice<f32>,
+        class_id: u32,
+        foreground_mode: bool,
+    ) -> Result<(), DriverError> {
+        let pixels = 512 * 512u32;
+        let foreground_mode = u32::from(foreground_mode);
+        let mut b = self.stream.launch_builder(&self.parser_class_mask_fn);
+        b.arg(classes);
+        b.arg(mask);
+        b.arg(&pixels);
+        b.arg(&class_id);
+        b.arg(&foreground_mode);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    pub fn mask_invert(&self, mask: &mut CudaSlice<f32>) -> Result<(), DriverError> {
+        let total = mask.len() as u32;
+        let mut b = self.stream.launch_builder(&self.mask_invert_fn);
         b.arg(mask);
         b.arg(&total);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;

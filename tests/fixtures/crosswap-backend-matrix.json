@@ -275,15 +275,21 @@
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.apply_face_parser",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::face_mask::gpu_generate_learned_mask_128",
+          "status": "partial",
+          "evidence": [
+            "tests/mask_contract.rs::face_parser_attribute_growth_masks_the_selected_class_neighborhood",
+            "tests/mask_contract.rs::face_parser_background_growth_and_shrink_follow_crossswap_direction",
+            "tests/engine_spec.rs::face_parser_controls_are_validated_before_gpu_allocation"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.run_faceparser",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::gpu::unified::run_faceparser",
+          "status": "partial",
+          "evidence": [
+            "tests/mask_contract.rs::face_parser_attribute_growth_masks_the_selected_class_neighborhood"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.soft_oval_mask",

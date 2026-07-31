@@ -4,7 +4,7 @@
 //!
 //! Mask convention: 1.0 = keep swapped face, 0.0 = keep original background.
 
-use crate::config::parameters::FaceSwapParams;
+use crate::config::parameters::{FaceParserMaskParams, FaceSwapParams};
 use crate::gpu::{ops::GpuOps, unified};
 use crate::models::manager::ModelManager;
 use crate::pipeline::workspace::{GpuWorkspace, MAX_BLUR_KS};
@@ -21,6 +21,122 @@ pub fn postprocess_xseg_mask(mask: &mut [f32]) {
         if *value < 0.1 {
             *value = 0.0;
         }
+    }
+}
+
+/// CPU oracle for CrossSwap's FaceParser class-mask composition.
+pub fn compose_face_parser_mask(
+    classes: &[u8],
+    width: u32,
+    height: u32,
+    params: &FaceParserMaskParams,
+) -> anyhow::Result<Vec<f32>> {
+    let pixels = width as usize * height as usize;
+    anyhow::ensure!(width > 0 && height > 0, "parser mask dimensions are empty");
+    anyhow::ensure!(
+        classes.len() == pixels,
+        "parser class map has {} values, expected {pixels}",
+        classes.len()
+    );
+
+    let mut output = if params.background == 0 {
+        vec![1.0; pixels]
+    } else {
+        let mut background: Vec<f32> = classes
+            .iter()
+            .map(|class| {
+                if matches!(*class, 0 | 14 | 15 | 16 | 17 | 18) {
+                    0.0
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        morphology_reference(&mut background, width, height, params.background);
+        blur_reference(&mut background, width, height, params.background_blur);
+        background
+    };
+
+    for (class, amount) in [
+        (1, params.face),
+        (2, params.left_eyebrow),
+        (3, params.right_eyebrow),
+        (4, params.left_eye),
+        (5, params.right_eye),
+        (6, params.eyeglasses),
+        (10, params.nose),
+        (11, params.mouth),
+        (12, params.upper_lip),
+        (13, params.lower_lip),
+        (14, params.neck),
+        (17, params.hair),
+    ] {
+        if amount == 0 {
+            continue;
+        }
+        let mut attribute: Vec<f32> = classes
+            .iter()
+            .map(|actual| f32::from(*actual == class))
+            .collect();
+        morphology_reference(&mut attribute, width, height, amount as i32);
+        for value in &mut attribute {
+            *value = 1.0 - *value;
+        }
+        blur_reference(&mut attribute, width, height, params.face_blur);
+        for (mask, attribute) in output.iter_mut().zip(attribute) {
+            *mask = (*mask * attribute).clamp(0.0, 1.0);
+        }
+    }
+    Ok(output)
+}
+
+fn morphology_reference(mask: &mut [f32], width: u32, height: u32, amount: i32) {
+    let erode = amount < 0;
+    if erode {
+        for value in mask.iter_mut() {
+            *value = 1.0 - *value;
+        }
+    }
+    let mut scratch = vec![0.0; mask.len()];
+    for _ in 0..amount.unsigned_abs() {
+        for y in 0..height {
+            for x in 0..width {
+                let mut maximum = 0.0f32;
+                for offset_y in -1..=1 {
+                    for offset_x in -1..=1 {
+                        let sample_y = y as i32 + offset_y;
+                        let sample_x = x as i32 + offset_x;
+                        if sample_y >= 0
+                            && sample_y < height as i32
+                            && sample_x >= 0
+                            && sample_x < width as i32
+                        {
+                            maximum = maximum
+                                .max(mask[sample_y as usize * width as usize + sample_x as usize]);
+                        }
+                    }
+                }
+                scratch[y as usize * width as usize + x as usize] = maximum;
+            }
+        }
+        mask.copy_from_slice(&scratch);
+    }
+    if erode {
+        for value in mask {
+            *value = 1.0 - *value;
+        }
+    }
+}
+
+fn blur_reference(mask: &mut [f32], width: u32, height: u32, amount: u32) {
+    if amount > 0 {
+        gaussian_blur(
+            mask,
+            width,
+            height,
+            amount.saturating_mul(2).saturating_add(1),
+            (amount as f32 + 1.0) * 0.2,
+        );
     }
 }
 
@@ -253,7 +369,7 @@ pub fn gpu_generate_learned_mask_128(
     ws: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<bool> {
-    if !params.occluder_enabled && !params.xseg_enabled {
+    if !params.occluder_enabled && !params.xseg_enabled && !params.faceparser_enabled {
         return Ok(false);
     }
 
@@ -293,7 +409,135 @@ pub fn gpu_generate_learned_mask_128(
         compose_learned_mask(gpu, ws, params.occluder_xseg_blur)?;
     }
 
+    if params.faceparser_enabled {
+        compose_faceparser_gpu(gpu, manager, ws, &params.faceparser)?;
+    }
+
     Ok(true)
+}
+
+fn compose_faceparser_gpu(
+    gpu: &GpuOps,
+    manager: &mut ModelManager,
+    ws: &mut GpuWorkspace,
+    params: &FaceParserMaskParams,
+) -> anyhow::Result<()> {
+    gpu.stream
+        .memcpy_dtod(&ws.face_512_pre_restorer, &mut ws.face_512_scratch)?;
+    gpu.imagenet_normalize_512(&mut ws.face_512_scratch)?;
+    let session = manager
+        .get_mut("FaceParser")
+        .ok_or_else(|| anyhow::anyhow!("FaceParser is not loaded"))?;
+    unified::run_faceparser(
+        session,
+        &gpu.stream,
+        &mut ws.face_512_scratch,
+        &mut ws.parser_logits,
+    )?;
+    gpu.parser_argmax(&ws.parser_logits, &mut ws.parser_classes)?;
+
+    if params.background == 0 {
+        gpu.border_oval_mask(&mut ws.parser_mask_512, 512, 0, 0, 0, 0, false)?;
+    } else {
+        gpu.parser_class_mask(&ws.parser_classes, &mut ws.parser_mask_512, 0, true)?;
+        gpu.morphology_mask(
+            &mut ws.parser_mask_512,
+            &mut ws.parser_tmp_512,
+            512,
+            512,
+            params.background,
+        )?;
+        blur_parser_mask(gpu, ws, ParserMaskBuffer::Output, params.background_blur)?;
+    }
+
+    for (class_id, amount) in parser_attributes(params) {
+        if amount == 0 {
+            continue;
+        }
+        gpu.parser_class_mask(
+            &ws.parser_classes,
+            &mut ws.parser_attribute_512,
+            class_id,
+            false,
+        )?;
+        gpu.morphology_mask(
+            &mut ws.parser_attribute_512,
+            &mut ws.parser_tmp_512,
+            512,
+            512,
+            amount as i32,
+        )?;
+        gpu.mask_invert(&mut ws.parser_attribute_512)?;
+        blur_parser_mask(gpu, ws, ParserMaskBuffer::Attribute, params.face_blur)?;
+        gpu.mask_mul(&mut ws.parser_mask_512, &ws.parser_attribute_512)?;
+    }
+
+    gpu.mask_resize(
+        &ws.parser_mask_512,
+        &mut ws.mask_128_tmp,
+        512,
+        512,
+        128,
+        128,
+    )?;
+    gpu.mask_mul(&mut ws.mask_learned_128, &ws.mask_128_tmp)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ParserMaskBuffer {
+    Output,
+    Attribute,
+}
+
+fn blur_parser_mask(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    target: ParserMaskBuffer,
+    amount: u32,
+) -> anyhow::Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    let kernel_size = amount.saturating_mul(2).saturating_add(1);
+    let sigma = (amount as f32 + 1.0) * 0.2;
+    let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
+    match target {
+        ParserMaskBuffer::Output => gpu.gaussian_blur_mask(
+            &mut ws.parser_mask_512,
+            &mut ws.parser_tmp_512,
+            512,
+            512,
+            &ws.blur_kernel,
+            ks,
+        )?,
+        ParserMaskBuffer::Attribute => gpu.gaussian_blur_mask(
+            &mut ws.parser_attribute_512,
+            &mut ws.parser_tmp_512,
+            512,
+            512,
+            &ws.blur_kernel,
+            ks,
+        )?,
+    }
+    Ok(())
+}
+
+fn parser_attributes(params: &FaceParserMaskParams) -> [(u32, u32); 12] {
+    [
+        (1, params.face),
+        (2, params.left_eyebrow),
+        (3, params.right_eyebrow),
+        (4, params.left_eye),
+        (5, params.right_eye),
+        (6, params.eyeglasses),
+        (10, params.nose),
+        (11, params.mouth),
+        (12, params.upper_lip),
+        (13, params.lower_lip),
+        (14, params.neck),
+        (17, params.hair),
+    ]
 }
 
 fn prepare_learned_mask_input(gpu: &GpuOps, ws: &mut GpuWorkspace) -> anyhow::Result<()> {
