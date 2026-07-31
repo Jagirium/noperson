@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config::settings::ExecutionProvider;
 
-const BG: egui::Color32 = egui::Color32::from_rgb(0x10, 0x11, 0x14);
+const BG: egui::Color32 = egui::Color32::from_rgb(0x0d, 0x0d, 0x11);
 const PANEL: egui::Color32 = egui::Color32::from_rgb(0x1c, 0x1e, 0x22);
 const BORDER: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3a, 0x42);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x34, 0x78, 0xf6);
@@ -133,10 +133,28 @@ pub(super) fn render_content(ui: &mut egui::Ui, snapshot: &RealtimePreviewSnapsh
                     stage_rect.center(),
                     fit_image_size(texture.size_vec2(), stage_rect.size()),
                 );
+                let corner_radius = egui::CornerRadius::same(12);
+                ui.painter().add(
+                    egui::epaint::Shadow {
+                        offset: [0, 5],
+                        blur: 18,
+                        spread: 1,
+                        color: egui::Color32::from_black_alpha(150),
+                    }
+                    .as_shape(image_rect, corner_radius),
+                );
                 egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                     .fit_to_exact_size(image_rect.size())
+                    .corner_radius(corner_radius)
                     .alt_text("Live swapped output")
                     .paint_at(ui, image_rect);
+                ui.painter().rect_stroke(
+                    image_rect,
+                    corner_radius,
+                    egui::Stroke::new(1.0, egui::Color32::from_white_alpha(30)),
+                    egui::StrokeKind::Inside,
+                );
+                render_video_overlay(ui, image_rect, snapshot);
             } else {
                 let spinner_size = egui::vec2(24.0, 24.0);
                 let spinner_rect = egui::Rect::from_center_size(
@@ -155,6 +173,49 @@ pub(super) fn render_content(ui: &mut egui::Ui, snapshot: &RealtimePreviewSnapsh
                 );
             }
         });
+}
+
+fn render_video_overlay(
+    ui: &mut egui::Ui,
+    image_rect: egui::Rect,
+    snapshot: &RealtimePreviewSnapshot,
+) {
+    let face_suffix = if snapshot.face_count == 1 {
+        "face"
+    } else {
+        "faces"
+    };
+    let text = format!(
+        "● {:.1} FPS · {} · {} {face_suffix}",
+        snapshot.fps,
+        provider_label(snapshot.provider),
+        snapshot.face_count
+    );
+    let overlay_size = egui::vec2(260.0_f32.min(image_rect.width() - 20.0), 32.0);
+    let overlay_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            image_rect.right() - overlay_size.x - 10.0,
+            image_rect.top() + 10.0,
+        ),
+        overlay_size,
+    );
+    ui.painter().rect(
+        overlay_rect,
+        8.0,
+        egui::Color32::from_black_alpha(190),
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(28)),
+        egui::StrokeKind::Inside,
+    );
+    ui.put(
+        overlay_rect.shrink2(egui::vec2(10.0, 5.0)),
+        egui::Label::new(
+            egui::RichText::new(text)
+                .color(egui::Color32::from_rgb(0x9e, 0xeb, 0xc5))
+                .strong()
+                .size(11.0),
+        )
+        .halign(egui::Align::Center),
+    );
 }
 
 pub(super) fn show(
@@ -203,6 +264,11 @@ mod tests {
             expected.y,
             actual.y
         );
+    }
+
+    #[test]
+    fn live_video_surface_uses_the_product_canvas() {
+        assert_eq!(BG, egui::Color32::from_rgb(0x0d, 0x0d, 0x11));
     }
 
     #[test]
@@ -293,5 +359,36 @@ mod tests {
             });
 
         harness.snapshot("realtime_preview_frame");
+    }
+
+    #[test]
+    fn live_frame_renders_a_single_glass_status_overlay() {
+        let color_image = egui::ColorImage::from_rgb([2, 2], &[32; 12]);
+        let harness = Harness::builder()
+            .with_size(egui::vec2(960.0, 600.0))
+            .build_ui(move |ui| {
+                let texture = ui.ctx().load_texture(
+                    "glass-overlay-test-frame",
+                    color_image.clone(),
+                    egui::TextureOptions::LINEAR,
+                );
+                render_content(
+                    ui,
+                    &RealtimePreviewSnapshot {
+                        texture: Some(texture),
+                        fps: 27.4,
+                        face_count: 1,
+                        provider: ExecutionProvider::TensorRT,
+                        status: "Running".to_owned(),
+                    },
+                );
+            });
+
+        assert!(
+            harness
+                .query_by_label("● 27.4 FPS · TensorRT · 1 face")
+                .is_some(),
+            "live metrics must be rendered over the video as one glass pill"
+        );
     }
 }

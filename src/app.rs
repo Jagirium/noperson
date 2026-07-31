@@ -19,6 +19,13 @@ use std::time::Duration;
 
 use cudarc::driver::CudaContext;
 use eframe::egui::Color32;
+use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+use eframe::egui::{FontData, FontFamily};
+use elegance::Theme;
+use elegance::{
+    Accent as EleganceAccent, Button as EleganceButton, ButtonSize, Card as EleganceCard,
+    IndicatorState, SegmentedControl, SegmentedSize, StatusPill, Switch,
+};
 
 use crate::config::parameters::{FaceSwapParams, RestorerMode, SwapDim};
 use crate::config::settings::ExecutionProvider;
@@ -30,7 +37,7 @@ use crate::pipeline::workspace::FrameRing;
 use realtime_preview::{RealtimePreviewSnapshot, RealtimePreviewState};
 
 // ─── Deep-Live-Cam-inspired palette ──────────────────────────────────────
-const BG: Color32 = Color32::from_rgb(0x10, 0x11, 0x14);
+const BG: Color32 = Color32::from_rgb(0x0d, 0x0d, 0x11);
 const CARD: Color32 = Color32::from_rgb(0x1c, 0x1e, 0x22);
 const CARD_HOVER: Color32 = Color32::from_rgb(0x26, 0x29, 0x2e);
 const CARD_BORDER: Color32 = Color32::from_rgb(0x36, 0x3a, 0x42);
@@ -441,13 +448,13 @@ impl App {
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (color, label) = if self.running {
-                        (SUCCESS, format!("● LIVE   {:.1} FPS", self.fps))
+                    let (state, label) = if self.running {
+                        (IndicatorState::On, format!("LIVE · {:.1} FPS", self.fps))
                     } else if self.models_loaded {
-                        (SUCCESS, "● READY".to_owned())
+                        (IndicatorState::On, "READY".to_owned())
                     } else {
                         (
-                            TEXT_DIM,
+                            IndicatorState::Connecting,
                             match self.provider {
                                 ExecutionProvider::Cuda => "NATIVE CUDA · LOCAL",
                                 ExecutionProvider::TensorRT => "TENSORRT · LOCAL",
@@ -455,7 +462,12 @@ impl App {
                             .to_owned(),
                         )
                     };
-                    ui.label(egui::RichText::new(label).color(color).strong().size(11.0));
+                    ui.add(StatusPill::new().item(label, state));
+                    ui.label(
+                        egui::RichText::new(elegance::glyphs::POWER)
+                            .color(TEXT_FAINT)
+                            .size(13.0),
+                    );
                 });
             });
 
@@ -500,12 +512,7 @@ impl App {
                         } else {
                             "Select a face"
                         };
-                        if ui
-                            .add_sized(
-                                [ui.available_width(), 32.0],
-                                egui::Button::new(egui::RichText::new(label).strong()).fill(ACCENT),
-                            )
-                            .clicked()
+                        if ui.add(EleganceButton::new(label).full_width()).clicked()
                             && let Some(path) = rfd::FileDialog::new()
                                 .add_filter("Image", &["jpg", "jpeg", "png", "bmp", "webp"])
                                 .pick_file()
@@ -570,11 +577,7 @@ impl App {
                     );
                     ui.columns(2, |buttons| {
                         if buttons[0]
-                            .add_sized(
-                                [buttons[0].available_width(), 32.0],
-                                egui::Button::new(egui::RichText::new("Photo").strong())
-                                    .fill(ACCENT),
-                            )
+                            .add(EleganceButton::new("Photo").full_width())
                             .clicked()
                             && let Some(path) = rfd::FileDialog::new()
                                 .add_filter("Image", &["jpg", "jpeg", "png", "bmp", "webp"])
@@ -591,11 +594,7 @@ impl App {
                             }
                         }
                         if buttons[1]
-                            .add_sized(
-                                [buttons[1].available_width(), 32.0],
-                                egui::Button::new(egui::RichText::new("Camera").strong())
-                                    .fill(CARD_HOVER),
-                            )
+                            .add(EleganceButton::new("Camera").outline().full_width())
                             .clicked()
                         {
                             self.input_source = InputSource::Webcam(0);
@@ -612,26 +611,49 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Provider").color(TEXT_DIM));
                     ui.add_enabled_ui(!self.running, |ui| {
-                        ui.selectable_value(
-                            &mut self.provider,
-                            ExecutionProvider::Cuda,
-                            "Native CUDA",
-                        );
-                        ui.selectable_value(
-                            &mut self.provider,
-                            ExecutionProvider::TensorRT,
-                            "TensorRT",
-                        );
+                        let mut provider = match self.provider {
+                            ExecutionProvider::Cuda => 0,
+                            ExecutionProvider::TensorRT => 1,
+                        };
+                        if ui
+                            .add(
+                                SegmentedControl::new(&mut provider, ["Native CUDA", "TensorRT"])
+                                    .size(SegmentedSize::Small),
+                            )
+                            .changed()
+                        {
+                            self.provider = if provider == 0 {
+                                ExecutionProvider::Cuda
+                            } else {
+                                ExecutionProvider::TensorRT
+                            };
+                        }
                     });
                     ui.separator();
                     toggle(ui, "Face restorer", &mut self.params.restorer_enabled);
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new("Swap resolution").color(TEXT_DIM));
-                    ui.selectable_value(&mut self.params.dim, SwapDim::Dim1, "128");
-                    ui.selectable_value(&mut self.params.dim, SwapDim::Dim2, "256");
-                    ui.selectable_value(&mut self.params.dim, SwapDim::Dim3, "384");
-                    ui.selectable_value(&mut self.params.dim, SwapDim::Dim4, "512");
+                    let mut resolution = match self.params.dim {
+                        SwapDim::Dim1 => 0,
+                        SwapDim::Dim2 => 1,
+                        SwapDim::Dim3 => 2,
+                        SwapDim::Dim4 => 3,
+                    };
+                    if ui
+                        .add(
+                            SegmentedControl::new(&mut resolution, ["128", "256", "384", "512"])
+                                .size(SegmentedSize::Small),
+                        )
+                        .changed()
+                    {
+                        self.params.dim = match resolution {
+                            0 => SwapDim::Dim1,
+                            1 => SwapDim::Dim2,
+                            2 => SwapDim::Dim3,
+                            _ => SwapDim::Dim4,
+                        };
+                    }
                     if self.params.restorer_enabled {
                         ui.separator();
                         ui.label(egui::RichText::new("Hot path").color(TEXT_DIM));
@@ -726,10 +748,11 @@ impl App {
                 }
                 let can_save = self.output_frame.is_some();
                 if ui
-                    .add_enabled(
-                        can_save,
-                        egui::Button::new("Save output")
-                            .min_size(egui::vec2(ui.available_width(), 32.0)),
+                    .add(
+                        EleganceButton::new("Save output")
+                            .outline()
+                            .full_width()
+                            .enabled(can_save),
                     )
                     .clicked()
                 {
@@ -749,15 +772,16 @@ impl App {
         } else {
             "Start live"
         };
-        let action = ui.add_enabled(
-            self.running || ready,
-            egui::Button::new(
-                egui::RichText::new(action_label)
-                    .color(Color32::WHITE)
-                    .strong(),
-            )
-            .fill(if self.running { DANGER } else { ACCENT })
-            .min_size(egui::vec2(ui.available_width(), 44.0)),
+        let action = ui.add(
+            EleganceButton::new(action_label)
+                .accent(if self.running {
+                    EleganceAccent::Red
+                } else {
+                    EleganceAccent::Blue
+                })
+                .size(ButtonSize::Large)
+                .full_width()
+                .enabled(self.running || ready),
         );
         if action.clicked() {
             if self.running {
@@ -794,6 +818,7 @@ impl App {
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui) {
+        install_product_theme(ui.ctx());
         let footer_height = 76.0;
         let body_size = egui::vec2(
             ui.available_width(),
@@ -807,6 +832,33 @@ impl App {
         ui.add_space(6.0);
         self.action_bar(ui);
     }
+}
+
+fn install_product_theme(ctx: &egui::Context) {
+    ctx.add_font(FontInsert::new(
+        "Inter",
+        FontData::from_static(include_bytes!("../assets/fonts/InterVariable.ttf")),
+        vec![InsertFontFamily {
+            family: FontFamily::Proportional,
+            priority: FontPriority::Highest,
+        }],
+    ));
+
+    let mut theme = Theme::charcoal();
+    theme.palette.bg = BG;
+    theme.palette.card = CARD;
+    theme.palette.input_bg = BG;
+    theme.palette.border = CARD_BORDER;
+    theme.palette.text = TEXT;
+    theme.palette.text_muted = TEXT_DIM;
+    theme.palette.text_faint = TEXT_FAINT;
+    theme.palette.blue = ACCENT;
+    theme.palette.focus = TITLE_BLUE;
+    theme.palette.success = SUCCESS;
+    theme.palette.danger = DANGER;
+    theme.card_radius = 10.0;
+    theme.card_padding = 9.0;
+    theme.install(ctx);
 }
 
 fn empty_preview(ui: &mut egui::Ui, label: &str) {
@@ -851,20 +903,11 @@ fn selector_card(ui: &mut egui::Ui, title: &str, ready: bool, add: impl FnOnce(&
 }
 
 fn settings_card(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::NONE
-        .fill(CARD)
-        .stroke(egui::Stroke::new(1.0, CARD_BORDER))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::same(9))
+    EleganceCard::new()
+        .heading(title)
+        .padding(9.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(
-                egui::RichText::new(title)
-                    .color(TITLE_BLUE)
-                    .strong()
-                    .size(13.0),
-            );
-            ui.separator();
             add(ui);
         });
 }
@@ -887,7 +930,7 @@ fn card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)
 
 /// Styled toggle switch (checkbox replacement).
 fn toggle(ui: &mut egui::Ui, label: &str, value: &mut bool) -> egui::Response {
-    ui.checkbox(value, label)
+    ui.add(Switch::new(value, label).accent(EleganceAccent::Sky))
 }
 
 /// Styled slider with label.
@@ -1580,6 +1623,26 @@ mod tests {
                 "inert control must not be exposed: {unsupported}"
             );
         }
+    }
+
+    #[test]
+    fn live_layout_installs_the_product_theme_before_rendering() {
+        let observed = Arc::new(std::sync::Mutex::new(Color32::TRANSPARENT));
+        let captured = Arc::clone(&observed);
+        let _harness = Harness::builder()
+            .with_size(egui::vec2(666.0, 839.0))
+            .build_ui_state(
+                move |ui, app| {
+                    app.render_ui(ui);
+                    *captured.lock().expect("theme observation lock") = ui.visuals().panel_fill;
+                },
+                App::new(PathBuf::from("models")),
+            );
+
+        assert_eq!(
+            *observed.lock().expect("theme observation lock"),
+            Color32::from_rgb(0x0d, 0x0d, 0x11)
+        );
     }
 
     #[test]
