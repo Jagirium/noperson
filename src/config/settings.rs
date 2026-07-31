@@ -38,7 +38,7 @@ impl Default for PipelineSettings {
             provider: ExecutionProvider::Cuda,
             device_id: 0,
             detect_threshold: 0.5,
-            max_faces: 0,
+            max_faces: 20,
             detect_interval: 1,
         }
     }

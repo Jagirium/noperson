@@ -252,6 +252,23 @@ fn learned_mask_controls_are_validated_before_gpu_allocation() {
 }
 
 #[test]
+fn detector_controls_are_generation_validated() {
+    let mut spec = valid_spec(false);
+    spec.params.detector_score = 0.0;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. }) if control == "detector_score"
+    ));
+
+    spec.params.detector_score = 0.5;
+    spec.params.max_faces = 51;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. }) if control == "max_faces"
+    ));
+}
+
+#[test]
 fn face_parser_controls_are_validated_before_gpu_allocation() {
     let mut spec = valid_spec(false);
     spec.params.faceparser.background = 51;

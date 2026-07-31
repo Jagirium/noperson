@@ -52,6 +52,22 @@ impl FaceDetector {
         }
     }
 
+    pub fn configured(model: DetectorModel, score_threshold: f32, max_faces: usize) -> Self {
+        match model {
+            DetectorModel::YoloFace8n => {
+                Self::Yolo(YoloFaceDetector::new(score_threshold).with_max_faces(max_faces))
+            }
+            DetectorModel::RetinaFace => Self::Anchor(
+                AnchorDetector::new(AnchorDetectorKind::RetinaFace, score_threshold)
+                    .with_max_faces(max_faces),
+            ),
+            DetectorModel::Scrfd2_5g => Self::Anchor(
+                AnchorDetector::new(AnchorDetectorKind::Scrfd, score_threshold)
+                    .with_max_faces(max_faces),
+            ),
+        }
+    }
+
     pub fn model(&self) -> DetectorModel {
         match self {
             Self::Yolo(_) => DetectorModel::YoloFace8n,
@@ -90,6 +106,7 @@ pub struct YoloFaceDetector {
     input_size: u32,
     score_threshold: f32,
     nms_iou_threshold: f32,
+    max_faces: usize,
 }
 
 impl YoloFaceDetector {
@@ -98,7 +115,13 @@ impl YoloFaceDetector {
             input_size: 640,
             score_threshold,
             nms_iou_threshold: 0.4,
+            max_faces: 0,
         }
+    }
+
+    pub fn with_max_faces(mut self, max_faces: usize) -> Self {
+        self.max_faces = max_faces;
+        self
     }
 
     /// Preprocess frame [3, H, W] in [0, 255] → [3, 640, 640] in [0, 1].
@@ -197,7 +220,8 @@ impl YoloFaceDetector {
         gpu.download_into(&ws.detect_output, &mut ws.host_det_output)?;
         let data = ws.host_det_output.as_slice();
         let shape = [1i64, 20, 8400];
-        let faces = self.decode_yolo(data, &shape, det_scale)?;
+        let mut faces = self.decode_yolo(data, &shape, det_scale)?;
+        select_center_faces(&mut faces, frame_h, frame_w, self.max_faces);
         Ok((faces, det_scale))
     }
 
@@ -267,6 +291,7 @@ pub struct AnchorDetector {
     score_threshold: f32,
     nms_iou_threshold: f32,
     kind: AnchorDetectorKind,
+    max_faces: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -309,7 +334,13 @@ impl AnchorDetector {
             score_threshold,
             nms_iou_threshold: 0.4,
             kind,
+            max_faces: 0,
         }
+    }
+
+    pub fn with_max_faces(mut self, max_faces: usize) -> Self {
+        self.max_faces = max_faces;
+        self
     }
 
     /// Preprocess frame [3, H, W] in [0, 255] → [3, 512, 512].
@@ -447,7 +478,8 @@ impl AnchorDetector {
         let outputs: [&[f32]; 9] = std::array::from_fn(|index| {
             &ws.host_anchor_output[offsets[index]..offsets[index] + lengths[index]]
         });
-        let faces = self.decode_anchor(&outputs, target, det_scale)?;
+        let mut faces = self.decode_anchor(&outputs, target, det_scale)?;
+        select_center_faces(&mut faces, frame_h, frame_w, self.max_faces);
         Ok((faces, det_scale))
     }
 
@@ -647,9 +679,30 @@ fn iou(a: &[f32; 4], b: &[f32; 4]) -> f32 {
     inter / (area_a + area_b - inter)
 }
 
+fn select_center_faces(
+    faces: &mut Vec<DetectedFace>,
+    image_height: u32,
+    image_width: u32,
+    max_faces: usize,
+) {
+    if max_faces == 0 || faces.len() <= 1 {
+        return;
+    }
+    let center_x = (image_width / 2) as f32;
+    let center_y = (image_height / 2) as f32;
+    let priority = |face: &DetectedFace| {
+        let area = (face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]);
+        let offset_x = (face.bbox[0] + face.bbox[2]) * 0.5 - center_x;
+        let offset_y = (face.bbox[1] + face.bbox[3]) * 0.5 - center_y;
+        area - (offset_x * offset_x + offset_y * offset_y) * 2.0
+    };
+    faces.sort_by(|left, right| priority(right).total_cmp(&priority(left)));
+    faces.truncate(max_faces);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AnchorDetector, AnchorDetectorKind};
+    use super::{AnchorDetector, AnchorDetectorKind, DetectedFace, select_center_faces};
 
     #[test]
     fn anchor_decoder_matches_crossswap_stride_geometry_and_inclusive_threshold() {
@@ -675,5 +728,24 @@ mod tests {
             ]
         );
         assert_eq!(faces[0].score, 0.5);
+    }
+
+    #[test]
+    fn max_faces_uses_crossswap_area_minus_center_distance_priority() {
+        let mut faces = vec![
+            DetectedFace {
+                bbox: [0.0, 0.0, 40.0, 40.0],
+                kps_5: [[0.0; 2]; 5],
+                score: 0.99,
+            },
+            DetectedFace {
+                bbox: [40.0, 40.0, 60.0, 60.0],
+                kps_5: [[0.0; 2]; 5],
+                score: 0.5,
+            },
+        ];
+        select_center_faces(&mut faces, 100, 100, 1);
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].bbox, [40.0, 40.0, 60.0, 60.0]);
     }
 }

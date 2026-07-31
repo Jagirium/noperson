@@ -455,7 +455,11 @@ impl LiveEngine {
             }
         }
 
-        let detector = FaceDetector::from_model(spec.detector, 0.5);
+        let detector = FaceDetector::configured(
+            spec.detector,
+            spec.params.detector_score,
+            spec.params.max_faces,
+        );
         let mut workspace = GpuWorkspace::new(stream)?;
         ensure_build_active(cancellation)?;
         let source_faces = if spec.params.swapper_model == SwapperModel::Inswapper128 {

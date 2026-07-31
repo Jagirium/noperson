@@ -149,6 +149,8 @@ impl EngineSpec {
             ));
         }
         validate_float_range("dfm_morph", self.params.dfm_morph, 0.01, 1.0)?;
+        validate_float_range("detector_score", self.params.detector_score, 0.01, 1.0)?;
+        validate_range("max_faces", self.params.max_faces as i64, 1, 50)?;
         validate_float_range("landmark_score", self.params.landmark_score, 0.01, 1.0)?;
         validate_range("occluder_size", self.params.occluder_size as i64, -100, 100)?;
         validate_range("xseg_size", self.params.xseg_size as i64, -100, 100)?;

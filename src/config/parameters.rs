@@ -263,6 +263,12 @@ pub struct FaceSwapParams {
     #[serde(default)]
     pub dfm_rct: bool,
 
+    // Detection
+    #[serde(default = "default_detector_score")]
+    pub detector_score: f32,
+    #[serde(default = "default_max_faces")]
+    pub max_faces: usize,
+
     // Detailed face alignment
     #[serde(default)]
     pub landmark_enabled: bool,
@@ -342,6 +348,8 @@ impl Default for FaceSwapParams {
             dfm_model: default_dfm_model(),
             dfm_morph: default_dfm_morph(),
             dfm_rct: false,
+            detector_score: default_detector_score(),
+            max_faces: default_max_faces(),
             landmark_enabled: false,
             landmark_mode: LandmarkMode::default(),
             landmark_score: default_landmark_score(),
@@ -387,6 +395,14 @@ const fn default_enhancer_blend() -> f32 {
 
 const fn default_landmark_score() -> f32 {
     0.5
+}
+
+const fn default_detector_score() -> f32 {
+    0.5
+}
+
+const fn default_max_faces() -> usize {
+    20
 }
 
 const fn default_differencing_amount() -> u32 {
