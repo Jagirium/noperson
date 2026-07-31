@@ -154,6 +154,65 @@ impl EngineSpec {
         validate_float_range("landmark_score", self.params.landmark_score, 0.01, 1.0)?;
         validate_float_range("strength", self.params.strength, 0.0, 5.0)?;
         validate_float_range("auto_color.blend", self.params.auto_color.blend, 0.0, 1.0)?;
+        for (control, value, min, max) in [
+            (
+                "color_adjust.red",
+                self.params.color_adjust.red,
+                -100.0,
+                100.0,
+            ),
+            (
+                "color_adjust.green",
+                self.params.color_adjust.green,
+                -100.0,
+                100.0,
+            ),
+            (
+                "color_adjust.blue",
+                self.params.color_adjust.blue,
+                -100.0,
+                100.0,
+            ),
+            (
+                "color_adjust.brightness",
+                self.params.color_adjust.brightness,
+                0.0,
+                2.0,
+            ),
+            (
+                "color_adjust.contrast",
+                self.params.color_adjust.contrast,
+                0.0,
+                2.0,
+            ),
+            (
+                "color_adjust.saturation",
+                self.params.color_adjust.saturation,
+                0.0,
+                2.0,
+            ),
+            (
+                "color_adjust.sharpness",
+                self.params.color_adjust.sharpness,
+                0.0,
+                2.0,
+            ),
+            ("color_adjust.hue", self.params.color_adjust.hue, -0.5, 0.5),
+            (
+                "color_adjust.gamma",
+                self.params.color_adjust.gamma,
+                0.0,
+                2.0,
+            ),
+            (
+                "color_adjust.noise",
+                self.params.color_adjust.noise,
+                0.0,
+                20.0,
+            ),
+        ] {
+            validate_float_range(control, value, min, max)?;
+        }
         validate_float_range(
             "similarity_threshold",
             self.params.similarity_threshold,

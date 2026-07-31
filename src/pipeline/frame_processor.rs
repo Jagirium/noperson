@@ -299,6 +299,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         face_mask::gpu_restore_semantic_regions(gpu, ws, params)?;
         face_mask::gpu_apply_fake_diff(gpu, ws, params)?;
         crate::pipeline::color::apply_auto_color_gpu(gpu, ws, params, learned_mask)?;
+        crate::pipeline::color::apply_color_adjust_gpu(gpu, ws, params)?;
         face_mask::gpu_generate_mask_512(
             gpu,
             ws,

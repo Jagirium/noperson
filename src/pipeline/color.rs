@@ -2,10 +2,132 @@
 
 use crate::pipeline::dfm::{lab_to_rgb, rgb_to_lab};
 use crate::{
-    config::parameters::{AutoColorMode, FaceSwapParams},
+    config::parameters::{AutoColorMode, ColorAdjustParams, FaceSwapParams},
     gpu::ops::GpuOps,
     pipeline::workspace::GpuWorkspace,
 };
+
+/// CPU oracle for CrossSwap's ordered torchvision-v2 color adjustment stack.
+pub fn adjust_color_reference(
+    image: &[[f32; 3]],
+    width: usize,
+    height: usize,
+    params: &ColorAdjustParams,
+) -> Vec<[f32; 3]> {
+    assert_eq!(image.len(), width * height);
+    let offsets = [params.red, params.green, params.blue];
+    let mut output: Vec<[f32; 3]> = image
+        .iter()
+        .map(|rgb| {
+            std::array::from_fn(|channel| {
+                (rgb[channel].powf(params.gamma) + offsets[channel])
+                    .clamp(0.0, 255.0)
+                    .trunc()
+            })
+        })
+        .collect();
+
+    map_u8_stage(&mut output, |value| value * params.brightness);
+    let contrast_mean = output
+        .iter()
+        .map(|rgb| grayscale(*rgb).floor())
+        .sum::<f32>()
+        / output.len() as f32;
+    map_u8_stage(&mut output, |value| {
+        value * params.contrast + contrast_mean * (1.0 - params.contrast)
+    });
+    for rgb in &mut output {
+        let gray = grayscale(*rgb).floor();
+        for value in rgb {
+            *value = (*value * params.saturation + gray * (1.0 - params.saturation))
+                .clamp(0.0, 255.0)
+                .trunc();
+        }
+    }
+
+    if width > 2 && height > 2 {
+        let input = output.clone();
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                let pixel = y * width + x;
+                for channel in 0..3 {
+                    let mut weighted = 0.0;
+                    for dy in 0..3 {
+                        for dx in 0..3 {
+                            let weight = if dx == 1 && dy == 1 { 5.0 } else { 1.0 };
+                            weighted += input[(y + dy - 1) * width + x + dx - 1][channel] * weight;
+                        }
+                    }
+                    let blurred = (weighted / 13.0).round_ties_even();
+                    output[pixel][channel] = (input[pixel][channel] * params.sharpness
+                        + blurred * (1.0 - params.sharpness))
+                        .clamp(0.0, 255.0)
+                        .trunc();
+                }
+            }
+        }
+    }
+
+    for rgb in &mut output {
+        let mut hsv = rgb_to_hsv(rgb.map(|value| value / 255.0));
+        hsv[0] = (hsv[0] + params.hue).rem_euclid(1.0);
+        let adjusted = hsv_to_rgb(hsv);
+        for channel in 0..3 {
+            rgb[channel] = (adjusted[channel].clamp(0.0, 1.0) * (256.0 - 1e-3)).trunc();
+        }
+    }
+    output
+}
+
+fn map_u8_stage(image: &mut [[f32; 3]], transform: impl Fn(f32) -> f32) {
+    for rgb in image {
+        for value in rgb {
+            *value = transform(*value).clamp(0.0, 255.0).trunc();
+        }
+    }
+}
+
+fn grayscale(rgb: [f32; 3]) -> f32 {
+    rgb[0] * 0.2989 + rgb[1] * 0.587 + rgb[2] * 0.114
+}
+
+fn rgb_to_hsv(rgb: [f32; 3]) -> [f32; 3] {
+    let max = rgb.into_iter().fold(f32::NEG_INFINITY, f32::max);
+    let min = rgb.into_iter().fold(f32::INFINITY, f32::min);
+    if max == min {
+        return [0.0, 0.0, max];
+    }
+    let range = max - min;
+    let saturation = range / max;
+    let rc = (max - rgb[0]) / range;
+    let gc = (max - rgb[1]) / range;
+    let bc = (max - rgb[2]) / range;
+    let hue = if max == rgb[0] {
+        bc - gc
+    } else if max == rgb[1] {
+        2.0 + rc - bc
+    } else {
+        4.0 + gc - rc
+    };
+    [(hue / 6.0 + 1.0) % 1.0, saturation, max]
+}
+
+fn hsv_to_rgb(hsv: [f32; 3]) -> [f32; 3] {
+    let h6 = hsv[0] * 6.0;
+    let sector = h6.floor() as usize % 6;
+    let fraction = h6 - h6.floor();
+    let p = (1.0 - hsv[1]) * hsv[2];
+    let q = (1.0 - hsv[1] * fraction) * hsv[2];
+    let t = (1.0 - hsv[1] * (1.0 - fraction)) * hsv[2];
+    match sector {
+        0 => [hsv[2], t, p],
+        1 => [q, hsv[2], p],
+        2 => [p, hsv[2], t],
+        3 => [p, q, hsv[2]],
+        4 => [t, p, hsv[2]],
+        _ => [hsv[2], p, q],
+    }
+}
 
 pub fn apply_auto_color_gpu(
     gpu: &GpuOps,
@@ -45,6 +167,36 @@ pub fn apply_auto_color_gpu(
             apply_histogram_gpu_fallback(gpu, workspace, use_mask, params.auto_color.blend)?;
         }
     }
+    Ok(())
+}
+
+pub fn apply_color_adjust_gpu(
+    gpu: &GpuOps,
+    workspace: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<()> {
+    if !params.color_adjust.enabled && !params.color_correction {
+        return Ok(());
+    }
+    let controls = &params.color_adjust;
+    let seed = workspace.color_noise_nonce;
+    workspace.color_noise_nonce = workspace.color_noise_nonce.wrapping_add(1);
+    gpu.adjust_color(
+        &mut workspace.face_512,
+        &mut workspace.face_512_scratch,
+        &mut workspace.color_gray_sum,
+        512,
+        512,
+        controls.gamma,
+        [controls.red, controls.green, controls.blue],
+        controls.brightness,
+        controls.contrast,
+        controls.saturation,
+        controls.sharpness,
+        controls.hue,
+        controls.noise,
+        seed,
+    )?;
     Ok(())
 }
 

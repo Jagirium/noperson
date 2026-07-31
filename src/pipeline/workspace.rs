@@ -82,6 +82,8 @@ pub struct GpuWorkspace {
     pub dfm_morph: CudaSlice<f32>,
     pub dfm_rct_stats: CudaSlice<f32>,
     pub auto_color_stats: CudaSlice<f32>,
+    pub color_gray_sum: CudaSlice<u32>,
+    pub color_noise_nonce: u32,
     pub mask_512: CudaSlice<f32>, // [512, 512] — final face mask
 
     // Blur kernel weights (uploaded once per param change)
@@ -177,6 +179,8 @@ impl GpuWorkspace {
             dfm_morph: stream.alloc_zeros::<f32>(1)?,
             dfm_rct_stats: stream.alloc_zeros::<f32>(12)?,
             auto_color_stats: stream.alloc_zeros::<f32>(13)?,
+            color_gray_sum: stream.alloc_zeros::<u32>(1)?,
+            color_noise_nonce: 0,
             mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
 
             blur_kernel: stream.alloc_zeros::<f32>(MAX_BLUR_KS)?,

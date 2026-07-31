@@ -64,6 +64,10 @@ pub struct GpuOps {
     dfm_rct_apply_fn: CudaFunction,
     auto_color_dfl_stats_fn: CudaFunction,
     auto_color_dfl_apply_fn: CudaFunction,
+    color_adjust_prep_fn: CudaFunction,
+    color_contrast_sum_fn: CudaFunction,
+    color_contrast_saturation_fn: CudaFunction,
+    color_sharpness_hue_noise_fn: CudaFunction,
     // Mask kernels
     blur_h_fn: CudaFunction,
     blur_v_fn: CudaFunction,
@@ -150,6 +154,10 @@ impl GpuOps {
             dfm_rct_apply_fn: load("dfm_color", "dfm_rct_apply_kernel"),
             auto_color_dfl_stats_fn: load("dfm_color", "auto_color_dfl_stats_kernel"),
             auto_color_dfl_apply_fn: load("dfm_color", "auto_color_dfl_apply_kernel"),
+            color_adjust_prep_fn: load("color_adjust", "color_adjust_prep_kernel"),
+            color_contrast_sum_fn: load("color_adjust", "color_contrast_sum_kernel"),
+            color_contrast_saturation_fn: load("color_adjust", "color_contrast_saturation_kernel"),
+            color_sharpness_hue_noise_fn: load("color_adjust", "color_sharpness_hue_noise_kernel"),
             matmul_512_fn: load("matmul_512", "matmul_512_kernel"),
             l2_normalize_fn: load("matmul_512", "l2_normalize_kernel"),
             blur_h_fn: load("gaussian_blur", "gaussian_blur_h_kernel"),
@@ -629,6 +637,68 @@ impl GpuOps {
         apply.arg(&pixels);
         apply.arg(&blend);
         unsafe { apply.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn adjust_color(
+        &self,
+        image: &mut CudaSlice<f32>,
+        scratch: &mut CudaSlice<f32>,
+        gray_sum: &mut CudaSlice<u32>,
+        width: u32,
+        height: u32,
+        gamma: f32,
+        offsets: [f32; 3],
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        sharpness: f32,
+        hue: f32,
+        noise: f32,
+        seed: u32,
+    ) -> Result<(), DriverError> {
+        let pixels = width * height;
+        let mut prep = self.stream.launch_builder(&self.color_adjust_prep_fn);
+        prep.arg(&mut *image);
+        prep.arg(&pixels);
+        prep.arg(&gamma);
+        prep.arg(&offsets[0]);
+        prep.arg(&offsets[1]);
+        prep.arg(&offsets[2]);
+        prep.arg(&brightness);
+        unsafe { prep.launch(LaunchConfig::for_num_elems(pixels)) }?;
+
+        self.stream.memcpy_htod(&[0u32], gray_sum)?;
+        let mut reduce = self.stream.launch_builder(&self.color_contrast_sum_fn);
+        reduce.arg(&*image);
+        reduce.arg(&mut *gray_sum);
+        reduce.arg(&pixels);
+        unsafe { reduce.launch(LaunchConfig::for_num_elems(pixels)) }?;
+
+        let mut color = self
+            .stream
+            .launch_builder(&self.color_contrast_saturation_fn);
+        color.arg(&mut *image);
+        color.arg(&*gray_sum);
+        color.arg(&pixels);
+        color.arg(&contrast);
+        color.arg(&saturation);
+        unsafe { color.launch(LaunchConfig::for_num_elems(pixels)) }?;
+
+        let mut finish = self
+            .stream
+            .launch_builder(&self.color_sharpness_hue_noise_fn);
+        finish.arg(&*image);
+        finish.arg(&mut *scratch);
+        finish.arg(&width);
+        finish.arg(&height);
+        finish.arg(&sharpness);
+        finish.arg(&hue);
+        finish.arg(&noise);
+        finish.arg(&seed);
+        unsafe { finish.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        self.stream.memcpy_dtod(scratch, image)?;
         Ok(())
     }
 

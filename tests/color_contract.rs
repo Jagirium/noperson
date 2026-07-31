@@ -1,4 +1,9 @@
-use noperson::pipeline::color::{dfl_transfer_reference, histogram_transfer_reference};
+use noperson::{
+    config::parameters::ColorAdjustParams,
+    pipeline::color::{
+        adjust_color_reference, dfl_transfer_reference, histogram_transfer_reference,
+    },
+};
 
 #[test]
 #[allow(clippy::excessive_precision)] // Values captured verbatim from CrossSwap's Kornia path.
@@ -79,6 +84,47 @@ fn masked_histogram_transfer_matches_crossswap_intent() {
     let actual =
         histogram_transfer_reference(&original, &swapped, Some(&[1.0, 0.0, 1.0, 0.0]), 0.8);
     assert_pixels_close(&actual, &expected, 3e-4);
+}
+
+#[test]
+fn manual_color_stack_matches_torchvision_uint8_oracle() {
+    let image = vec![
+        [10.0, 20.0, 30.0],
+        [40.0, 60.0, 80.0],
+        [90.0, 110.0, 130.0],
+        [160.0, 180.0, 220.0],
+        [200.0, 210.0, 230.0],
+        [240.0, 250.0, 255.0],
+        [30.0, 40.0, 50.0],
+        [70.0, 80.0, 90.0],
+        [120.0, 130.0, 140.0],
+    ];
+    let params = ColorAdjustParams {
+        enabled: true,
+        red: 5.0,
+        green: -7.0,
+        blue: 12.0,
+        brightness: 1.1,
+        contrast: 0.8,
+        saturation: 1.2,
+        sharpness: 1.5,
+        hue: 0.1,
+        gamma: 0.8,
+        noise: 0.0,
+    };
+    let expected = [
+        [33.0, 10.0, 35.0],
+        [45.0, 24.0, 52.0],
+        [61.0, 38.0, 65.0],
+        [82.0, 56.0, 88.0],
+        [97.0, 72.0, 97.0],
+        [96.0, 73.0, 94.0],
+        [39.0, 18.0, 41.0],
+        [52.0, 30.0, 53.0],
+        [67.0, 44.0, 68.0],
+    ];
+    let actual = adjust_color_reference(&image, 3, 3, &params);
+    assert_pixels_close(&actual, &expected, 0.0);
 }
 
 fn color_fixture() -> ([[f32; 3]; 4], [[f32; 3]; 4]) {

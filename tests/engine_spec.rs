@@ -298,6 +298,13 @@ fn auto_color_blend_is_generation_validated() {
 
     spec.params.auto_color.blend = 0.8;
     spec.validate().expect("valid auto-color generation");
+
+    spec.params.color_adjust.hue = 0.51;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. })
+            if control == "color_adjust.hue"
+    ));
 }
 
 #[test]

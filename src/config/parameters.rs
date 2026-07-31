@@ -281,6 +281,39 @@ impl Default for AutoColorParams {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColorAdjustParams {
+    pub enabled: bool,
+    pub red: f32,
+    pub green: f32,
+    pub blue: f32,
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub sharpness: f32,
+    pub hue: f32,
+    pub gamma: f32,
+    pub noise: f32,
+}
+
+impl Default for ColorAdjustParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+            brightness: 1.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            sharpness: 1.0,
+            hue: 0.0,
+            gamma: 1.0,
+            noise: 0.0,
+        }
+    }
+}
+
 /// Per-face swap parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaceSwapParams {
@@ -363,6 +396,8 @@ pub struct FaceSwapParams {
     // Color correction
     #[serde(default)]
     pub auto_color: AutoColorParams,
+    #[serde(default)]
+    pub color_adjust: ColorAdjustParams,
     /// Legacy compact-GUI toggle. Kept for config compatibility.
     pub color_correction: bool,
     /// Legacy compact-GUI toggle. Kept for config compatibility.
@@ -418,6 +453,7 @@ impl Default for FaceSwapParams {
             border_right: 10,
             border_blur: 10,
             auto_color: AutoColorParams::default(),
+            color_adjust: ColorAdjustParams::default(),
             color_correction: false,
             histogram_matching: false,
             strength: 1.0,
