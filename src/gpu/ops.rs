@@ -136,8 +136,8 @@ impl GpuOps {
             stream,
             normalize_fn: load("normalize", "normalize_kernel"),
             denormalize_fn: load("normalize", "denormalize_kernel"),
-            interlace_extract_fn: load("interlace", "interlace_extract_kernel"),
-            interlace_scatter_fn: load("interlace", "interlace_scatter_kernel"),
+            interlace_extract_fn: load("interlace", "interlace_extract_normalized_kernel"),
+            interlace_scatter_fn: load("interlace", "interlace_scatter_denormalized_kernel"),
             enhancer_pack_tiles_fn: load("enhancer_tiles", "enhancer_pack_tiles_kernel"),
             enhancer_scatter_tiles_fn: load("enhancer_tiles", "enhancer_scatter_tiles_kernel"),
             warp_affine_fn: load("warp_affine", "warp_affine_chw_kernel"),
@@ -730,7 +730,7 @@ impl GpuOps {
     }
 
     /// Interlace extract: face [3, dim*T, dim*T] → tiles [dim², 3, T, T]
-    pub fn interlace_extract(
+    pub fn interlace_extract_normalized(
         &self,
         face: &CudaSlice<f32>,
         tiles: &mut CudaSlice<f32>,
@@ -752,7 +752,7 @@ impl GpuOps {
     }
 
     /// Interlace scatter: tiles [dim², 3, T, T] → face [3, dim*T, dim*T]
-    pub fn interlace_scatter(
+    pub fn interlace_scatter_denormalized(
         &self,
         tiles: &CudaSlice<f32>,
         face: &mut CudaSlice<f32>,

@@ -9,7 +9,7 @@
 // Layout: face is [C, H, W] where H=W=dim*tile_size, tiles is [dim*dim, C, tile_size, tile_size]
 
 extern "C" __global__
-void interlace_extract_kernel(
+void interlace_extract_normalized_kernel(
     const float* __restrict__ face,   // [C, dim*T, dim*T]
     float* __restrict__ tiles,        // [dim*dim, C, T, T]
     const unsigned int dim,
@@ -42,11 +42,11 @@ void interlace_extract_kernel(
 
     // Read from face [C, face_size, face_size]
     unsigned int face_idx = c * face_size * face_size + fy * face_size + fx;
-    tiles[idx] = face[face_idx];
+    tiles[idx] = face[face_idx] * (1.0f / 255.0f);
 }
 
 extern "C" __global__
-void interlace_scatter_kernel(
+void interlace_scatter_denormalized_kernel(
     const float* __restrict__ tiles,  // [dim*dim, C, T, T]
     float* __restrict__ face,         // [C, dim*T, dim*T]
     const unsigned int dim,
@@ -75,5 +75,6 @@ void interlace_scatter_kernel(
     unsigned int fx = tx * dim + ti;
 
     unsigned int face_idx = c * face_size * face_size + fy * face_size + fx;
-    face[face_idx] = tiles[idx];
+    float value = tiles[idx] * 255.0f;
+    face[face_idx] = fminf(fmaxf(value, 0.0f), 255.0f);
 }

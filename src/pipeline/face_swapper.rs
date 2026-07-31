@@ -128,17 +128,14 @@ impl FaceSwapper {
         anyhow::ensure!((1..=4).contains(&dim), "unsupported swap dim: {dim}");
         let tile_size = 128u32;
         let n_tiles = (dim * dim) as usize;
-        let tile_values = 3 * tile_size as usize * tile_size as usize;
-        let active_tile_values = n_tiles * tile_values;
 
         {
             let face_ptr: *const CudaSlice<f32> = &ws.face_256;
             let batch_ptr: *mut CudaSlice<f32> = &mut ws.swap_batch_in;
             unsafe {
-                gpu.interlace_extract(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
+                gpu.interlace_extract_normalized(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
             }
         }
-        gpu.normalize_prefix(&mut ws.swap_batch_in, active_tile_values)?;
         if upload_latent {
             let latent_values = n_tiles * 512;
             for tile in 0..n_tiles {
@@ -181,12 +178,11 @@ impl FaceSwapper {
             binding.clear();
         }
 
-        gpu.denormalize_prefix(&mut ws.swap_batch_out, active_tile_values)?;
         {
             let batch_ptr: *const CudaSlice<f32> = &ws.swap_batch_out;
             let face_ptr: *mut CudaSlice<f32> = &mut ws.face_256;
             unsafe {
-                gpu.interlace_scatter(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
+                gpu.interlace_scatter_denormalized(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
             }
         }
         Ok(())
@@ -205,19 +201,17 @@ impl FaceSwapper {
         anyhow::ensure!((1..=4).contains(&dim), "unsupported swap dim: {dim}");
         let tile_size = 128u32;
         let n_tiles = (dim * dim) as usize;
-        let active_tile_values = n_tiles * 3 * tile_size as usize * tile_size as usize;
 
         // 1. Interlace extract: face_256 → swap_batch_in
         {
             let face_ptr: *const CudaSlice<f32> = &ws.face_256;
             let batch_ptr: *mut CudaSlice<f32> = &mut ws.swap_batch_in;
             unsafe {
-                gpu.interlace_extract(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
+                gpu.interlace_extract_normalized(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
             }
         }
 
         // 2. Normalize tiles / 255.0 in place
-        gpu.normalize_prefix(&mut ws.swap_batch_in, active_tile_values)?;
 
         // 3. Replicate latent for each tile + upload to swap_latent_gpu
         let latent_replica_len = n_tiles * 512;
@@ -275,12 +269,11 @@ impl FaceSwapper {
         }
 
         // 8. Denormalize + scatter back into face_256
-        gpu.denormalize_prefix(&mut ws.swap_batch_out, active_tile_values)?;
         {
             let batch_ptr: *const CudaSlice<f32> = &ws.swap_batch_out;
             let face_ptr: *mut CudaSlice<f32> = &mut ws.face_256;
             unsafe {
-                gpu.interlace_scatter(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
+                gpu.interlace_scatter_denormalized(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
             }
         }
         Ok(())
