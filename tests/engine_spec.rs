@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use noperson::config::parameters::{EnhancerModel, FaceSwapParams, RestorerSize};
+use noperson::config::parameters::{EnhancerModel, FaceSwapParams, RestorerSize, SwapperModel};
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
 use noperson::engine::{EngineSpec, EngineSpecError, ModelArtifact, ModelRole};
 
@@ -114,6 +114,50 @@ fn enabled_optional_stage_requires_its_artifact() {
         spec.validate(),
         Err(EngineSpecError::MissingModel(ModelRole::Restorer))
     );
+}
+
+#[test]
+fn dfm_generation_replaces_the_inswapper_model_group() {
+    let mut spec = valid_spec(false);
+    spec.params.swapper_model = SwapperModel::Dfm;
+    spec.params.dfm_model = "JasonStatham320.dfm".to_owned();
+    spec.models.remove(&ModelRole::Recognizer);
+    spec.models.remove(&ModelRole::Swapper);
+    spec.models.remove(&ModelRole::Emap);
+
+    assert_eq!(
+        spec.validate(),
+        Err(EngineSpecError::MissingModel(ModelRole::Dfm))
+    );
+
+    spec.models.insert(
+        ModelRole::Dfm,
+        artifact("JasonStatham320", "JasonStatham320.dfm", SHA_A),
+    );
+    spec.validate().expect("valid DFM generation");
+}
+
+#[test]
+fn dfm_controls_and_artifact_selection_are_generation_identity() {
+    let mut spec = valid_spec(false);
+    spec.params.swapper_model = SwapperModel::Dfm;
+    spec.params.dfm_model = "JasonStatham320.dfm".to_owned();
+    spec.params.dfm_morph = f32::NAN;
+    spec.models.insert(
+        ModelRole::Dfm,
+        artifact("JasonStatham320", "JasonStatham320.dfm", SHA_A),
+    );
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. }) if control == "dfm_morph"
+    ));
+
+    spec.params.dfm_morph = 0.5;
+    spec.params.dfm_model = "Other.dfm".to_owned();
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::DfmModelMismatch { .. })
+    ));
 }
 
 #[test]

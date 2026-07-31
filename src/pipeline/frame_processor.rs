@@ -5,11 +5,12 @@
 
 use cudarc::driver::CudaSlice;
 
-use crate::config::parameters::{FaceSwapParams, RestorerMode, RestorerSize};
+use crate::config::parameters::{FaceSwapParams, RestorerMode, RestorerSize, SwapperModel};
 use crate::gpu::ops::GpuOps;
 use crate::gpu::unified;
 use crate::math::affine;
 use crate::models::manager::ModelManager;
+use crate::pipeline::dfm::DfmContract;
 use crate::pipeline::face_detector::FaceDetectorBackend;
 use crate::pipeline::face_mask;
 use crate::pipeline::face_recognizer::FaceRecognizer;
@@ -46,8 +47,10 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     ws: &mut GpuWorkspace,
     sources: &[SourceFace],
     params: &FaceSwapParams,
+    dfm: Option<DfmContract>,
 ) -> anyhow::Result<FrameResult> {
-    if !params.enabled || sources.is_empty() {
+    if !params.enabled || (params.swapper_model == SwapperModel::Inswapper128 && sources.is_empty())
+    {
         return Ok(FrameResult {
             faces_detected: 0,
             faces_swapped: 0,
@@ -69,24 +72,28 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
 
     for face in &faces {
         // 2a. Match against sources
-        let source = if sources.len() == 1 && sources[0].threshold <= 0.0 {
-            &sources[0]
+        let source = if params.swapper_model == SwapperModel::Inswapper128 {
+            Some(if sources.len() == 1 && sources[0].threshold <= 0.0 {
+                &sources[0]
+            } else {
+                let embedding = FaceRecognizer::recognize_gpu(
+                    manager,
+                    gpu,
+                    frame_chw,
+                    frame_h,
+                    frame_w,
+                    &face.kps_5,
+                    ws,
+                )?;
+                match sources.iter().find(|src| {
+                    FaceRecognizer::cosine_similarity(&embedding, &src.embedding) >= src.threshold
+                }) {
+                    Some(source) => source,
+                    None => continue,
+                }
+            })
         } else {
-            let embedding = FaceRecognizer::recognize_gpu(
-                manager,
-                gpu,
-                frame_chw,
-                frame_h,
-                frame_w,
-                &face.kps_5,
-                ws,
-            )?;
-            match sources.iter().find(|src| {
-                FaceRecognizer::cosine_similarity(&embedding, &src.embedding) >= src.threshold
-            }) {
-                Some(s) => s,
-                None => continue,
-            }
+            None
         };
         let _ = gpu.profile_mark(2); // after_recognize
 
@@ -117,29 +124,40 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         )?;
         gpu.stream
             .memcpy_dtod(&ws.face_512, &mut ws.face_512_original)?;
-        gpu.resize_npp(
-            &ws.face_512,
-            &mut ws.face_256,
-            pipeline_size,
-            pipeline_size,
-            swap_size,
-            swap_size,
-        )?;
         let _ = gpu.profile_mark(3); // after_warp_swap
 
-        // 2d. Swap on GPU: face_256 → swap_batch_in → ort → scatter back
-        FaceSwapper::swap_gpu(manager, gpu, ws, &source.latent, dim)?;
+        match params.swapper_model {
+            SwapperModel::Inswapper128 => {
+                gpu.resize_npp(
+                    &ws.face_512,
+                    &mut ws.face_256,
+                    pipeline_size,
+                    pipeline_size,
+                    swap_size,
+                    swap_size,
+                )?;
+                FaceSwapper::swap_gpu(
+                    manager,
+                    gpu,
+                    ws,
+                    &source.expect("Inswapper source selected above").latent,
+                    dim,
+                )?;
+                gpu.resize_npp(
+                    &ws.face_256,
+                    &mut ws.face_512,
+                    swap_size,
+                    swap_size,
+                    pipeline_size,
+                    pipeline_size,
+                )?;
+            }
+            SwapperModel::Dfm => {
+                dfm.ok_or_else(|| anyhow::anyhow!("DFM contract is not loaded"))?
+                    .convert_gpu(manager, gpu, ws, params.dfm_morph)?;
+            }
+        }
         let _ = gpu.profile_mark(4); // after_swap_ort
-
-        // 2e. Resize swapped face to pipeline_size (512) via NPP
-        gpu.resize_npp(
-            &ws.face_256,
-            &mut ws.face_512,
-            swap_size,
-            swap_size,
-            pipeline_size,
-            pipeline_size,
-        )?;
         gpu.stream
             .memcpy_dtod(&ws.face_512, &mut ws.face_512_pre_restorer)?;
 

@@ -178,6 +178,13 @@ pub enum SwapDim {
     Dim4 = 4,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwapperModel {
+    #[default]
+    Inswapper128,
+    Dfm,
+}
+
 /// Face restorer model size.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RestorerSize {
@@ -201,6 +208,14 @@ pub enum RestorerMode {
 pub struct FaceSwapParams {
     pub enabled: bool,
     pub dim: SwapDim,
+    #[serde(default)]
+    pub swapper_model: SwapperModel,
+    #[serde(default = "default_dfm_model")]
+    pub dfm_model: String,
+    #[serde(default = "default_dfm_morph")]
+    pub dfm_morph: f32,
+    #[serde(default)]
+    pub dfm_rct: bool,
 
     // Restorer
     pub restorer_enabled: bool,
@@ -267,6 +282,10 @@ impl Default for FaceSwapParams {
         Self {
             enabled: true,
             dim: SwapDim::Dim1,
+            swapper_model: SwapperModel::default(),
+            dfm_model: default_dfm_model(),
+            dfm_morph: default_dfm_morph(),
+            dfm_rct: false,
             restorer_enabled: false,
             restorer_size: RestorerSize::Gpen512,
             restorer_alpha: 1.0,
@@ -312,4 +331,12 @@ const fn default_differencing_amount() -> u32 {
 
 const fn default_differencing_blur() -> u32 {
     5
+}
+
+fn default_dfm_model() -> String {
+    "JasonStatham320.dfm".to_owned()
+}
+
+const fn default_dfm_morph() -> f32 {
+    0.5
 }

@@ -15,13 +15,14 @@ use image::GenericImageView;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::config::parameters::{FaceSwapParams, RestorerSize};
+use crate::config::parameters::{FaceSwapParams, RestorerSize, SwapperModel};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 use crate::engine::{BuildCancellation, EngineSpec, ModelArtifact, ModelRole};
 use crate::gpu::ops::GpuOps;
 use crate::models::live_catalog::{CANONICAL_SWAPPER_FILENAME, validate_model_file};
 use crate::models::manager::ModelManager;
 use crate::models::registry::find_model;
+use crate::pipeline::dfm::DfmContract;
 use crate::pipeline::face_detector::{FaceDetector, FaceDetectorBackend};
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::frame_enhancer::FrameEnhancer;
@@ -68,6 +69,7 @@ pub struct LiveEngine {
     source_faces: Vec<SourceFace>,
     params: FaceSwapParams,
     enhancer: Option<FrameEnhancer>,
+    dfm: Option<DfmContract>,
 }
 
 pub fn output_dimensions(
@@ -110,20 +112,38 @@ pub fn build_live_spec(
         detector_name,
         detector_filename,
     )?;
-    for (role, logical_name, filename) in [
-        (
-            ModelRole::Recognizer,
-            "Inswapper128ArcFace",
-            "w600k_r50.onnx",
-        ),
-        (
-            ModelRole::Swapper,
-            "Inswapper128",
-            CANONICAL_SWAPPER_FILENAME,
-        ),
-        (ModelRole::Emap, "InswapperEMap", "emap.bin"),
-    ] {
-        insert_artifact(&mut models, models_dir, role, logical_name, filename)?;
+    match params.swapper_model {
+        SwapperModel::Inswapper128 => {
+            for (role, logical_name, filename) in [
+                (
+                    ModelRole::Recognizer,
+                    "Inswapper128ArcFace",
+                    "w600k_r50.onnx",
+                ),
+                (
+                    ModelRole::Swapper,
+                    "Inswapper128",
+                    CANONICAL_SWAPPER_FILENAME,
+                ),
+                (ModelRole::Emap, "InswapperEMap", "emap.bin"),
+            ] {
+                insert_artifact(&mut models, models_dir, role, logical_name, filename)?;
+            }
+        }
+        SwapperModel::Dfm => {
+            let root = dfm_root(models_dir);
+            let logical_name = Path::new(&params.dfm_model)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| anyhow::anyhow!("invalid DFM model filename"))?;
+            insert_artifact(
+                &mut models,
+                &root,
+                ModelRole::Dfm,
+                logical_name,
+                &params.dfm_model,
+            )?;
+        }
     }
 
     if params.restorer_enabled {
@@ -199,6 +219,21 @@ fn insert_artifact(
         },
     );
     Ok(())
+}
+
+fn dfm_root(models_dir: &Path) -> std::path::PathBuf {
+    models_dir
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("dfms")
+}
+
+fn artifact_path(models_dir: &Path, role: ModelRole, filename: &str) -> std::path::PathBuf {
+    if role == ModelRole::Dfm {
+        dfm_root(models_dir).join(filename)
+    } else {
+        models_dir.join(filename)
+    }
 }
 
 fn sha256_file(path: &Path) -> anyhow::Result<String> {
@@ -343,8 +378,11 @@ impl LiveEngine {
         if verify_files {
             validate_model_file(identity_path, &spec.identity_sha256)?;
             ensure_build_active(cancellation)?;
-            for artifact in spec.models.values() {
-                validate_model_file(&models_dir.join(&artifact.filename), &artifact.sha256)?;
+            for (role, artifact) in &spec.models {
+                validate_model_file(
+                    &artifact_path(models_dir, *role, &artifact.filename),
+                    &artifact.sha256,
+                )?;
                 ensure_build_active(cancellation)?;
             }
         }
@@ -358,18 +396,34 @@ impl LiveEngine {
             DetectorModel::Scrfd2_5g => manager.load("SCRFD2.5g", &detector_artifact.filename)?,
         }
         ensure_build_active(cancellation)?;
-        manager.load(
-            "Inswapper128ArcFace",
-            &required_artifact(spec, ModelRole::Recognizer)?.filename,
-        )?;
-        ensure_build_active(cancellation)?;
-        manager.load(
-            "Inswapper128",
-            &required_artifact(spec, ModelRole::Swapper)?.filename,
-        )?;
-        ensure_build_active(cancellation)?;
-        manager.load_emap_file(&required_artifact(spec, ModelRole::Emap)?.filename)?;
-        ensure_build_active(cancellation)?;
+        let dfm = match spec.params.swapper_model {
+            SwapperModel::Inswapper128 => {
+                manager.load(
+                    "Inswapper128ArcFace",
+                    &required_artifact(spec, ModelRole::Recognizer)?.filename,
+                )?;
+                ensure_build_active(cancellation)?;
+                manager.load(
+                    "Inswapper128",
+                    &required_artifact(spec, ModelRole::Swapper)?.filename,
+                )?;
+                ensure_build_active(cancellation)?;
+                manager.load_emap_file(&required_artifact(spec, ModelRole::Emap)?.filename)?;
+                ensure_build_active(cancellation)?;
+                None
+            }
+            SwapperModel::Dfm => {
+                let artifact = required_artifact(spec, ModelRole::Dfm)?;
+                manager.load_path(
+                    "DFM",
+                    &artifact_path(models_dir, ModelRole::Dfm, &artifact.filename),
+                )?;
+                ensure_build_active(cancellation)?;
+                Some(DfmContract::from_session(manager.get("DFM").ok_or_else(
+                    || anyhow::anyhow!("DFM session was not loaded"),
+                )?)?)
+            }
+        };
 
         for (role, session_name) in [
             (ModelRole::Restorer, restorer_session_name(&spec.params)?),
@@ -386,38 +440,42 @@ impl LiveEngine {
         let detector = FaceDetector::from_model(spec.detector, 0.5);
         let mut workspace = GpuWorkspace::new(stream)?;
         ensure_build_active(cancellation)?;
-        let identity = image::open(identity_path)?;
-        let (width, height) = identity.dimensions();
-        let rgb = identity.to_rgb8();
-        let input = gpu.upload_u8(rgb.as_raw())?;
-        let mut chw = gpu.alloc_zeros(3 * width as usize * height as usize)?;
-        gpu.hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
-        let (faces, _) =
-            detector.detect_gpu(&mut manager, &gpu, &chw, &mut workspace, height, width)?;
-        ensure_build_active(cancellation)?;
-        let face = faces
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No face in identity image"))?;
-        let embedding = FaceRecognizer::recognize_gpu(
-            &mut manager,
-            &gpu,
-            &chw,
-            height,
-            width,
-            &face.kps_5,
-            &mut workspace,
-        )?;
-        let emap = manager
-            .emap
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
-        let latent = FaceRecognizer::calc_latent(&embedding, emap);
-        ensure_build_active(cancellation)?;
-        let source_faces = vec![SourceFace {
-            embedding,
-            latent,
-            threshold: 0.0,
-        }];
+        let source_faces = if spec.params.swapper_model == SwapperModel::Inswapper128 {
+            let identity = image::open(identity_path)?;
+            let (width, height) = identity.dimensions();
+            let rgb = identity.to_rgb8();
+            let input = gpu.upload_u8(rgb.as_raw())?;
+            let mut chw = gpu.alloc_zeros(3 * width as usize * height as usize)?;
+            gpu.hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
+            let (faces, _) =
+                detector.detect_gpu(&mut manager, &gpu, &chw, &mut workspace, height, width)?;
+            ensure_build_active(cancellation)?;
+            let face = faces
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("No face in identity image"))?;
+            let embedding = FaceRecognizer::recognize_gpu(
+                &mut manager,
+                &gpu,
+                &chw,
+                height,
+                width,
+                &face.kps_5,
+                &mut workspace,
+            )?;
+            let emap = manager
+                .emap
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
+            let latent = FaceRecognizer::calc_latent(&embedding, emap);
+            ensure_build_active(cancellation)?;
+            vec![SourceFace {
+                embedding,
+                latent,
+                threshold: 0.0,
+            }]
+        } else {
+            Vec::new()
+        };
         let enhancer = if spec.params.enhancer_enabled {
             let artifact = required_artifact(spec, ModelRole::Enhancer)?;
             let enhancer = FrameEnhancer::new_with_filename(
@@ -442,6 +500,7 @@ impl LiveEngine {
             source_faces,
             params: spec.params.clone(),
             enhancer,
+            dfm,
         })
     }
 
@@ -461,6 +520,7 @@ impl LiveEngine {
             &mut self.workspace,
             &self.source_faces,
             &self.params,
+            self.dfm,
         )
     }
 

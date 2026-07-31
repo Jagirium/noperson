@@ -1,4 +1,4 @@
-use noperson::config::parameters::{FaceParserMaskParams, FaceSwapParams};
+use noperson::config::parameters::{FaceParserMaskParams, FaceSwapParams, SwapperModel};
 use noperson::pipeline::face_mask::{
     RestoreEllipse, SemanticRegion, apply_restore_ellipse_mask_reference, compose_face_parser_mask,
     eye_restore_ellipses, fake_diff_mask, generate_border_mask, mouth_restore_ellipse,
@@ -217,4 +217,12 @@ fn differencing_defaults_match_crossswap_controls() {
     assert!(!params.differencing_enabled);
     assert_eq!(params.differencing_amount, 4);
     assert_eq!(params.differencing_blur, 5);
+}
+
+#[test]
+fn dfm_defaults_match_crossswap_controls() {
+    let params = FaceSwapParams::default();
+    assert_eq!(params.swapper_model, SwapperModel::Inswapper128);
+    assert_eq!(params.dfm_morph, 0.5);
+    assert!(!params.dfm_rct);
 }

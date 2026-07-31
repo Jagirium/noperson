@@ -76,11 +76,15 @@ impl ModelManager {
     /// Load an ONNX model with CUDA execution provider.
     /// Session options match Python: ORT_ENABLE_ALL, ORT_SEQUENTIAL, 1 thread.
     pub fn load(&mut self, name: &str, filename: &str) -> anyhow::Result<()> {
+        let model_path = self.models_dir.join(filename);
+        self.load_path(name, &model_path)
+    }
+
+    pub fn load_path(&mut self, name: &str, model_path: &Path) -> anyhow::Result<()> {
         if self.sessions.contains_key(name) {
             return Ok(());
         }
 
-        let model_path = self.models_dir.join(filename);
         anyhow::ensure!(
             model_path.exists(),
             "Model not found: {}",
@@ -138,7 +142,7 @@ impl ModelManager {
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .with_intra_threads(1)
             .map_err(|e| anyhow::anyhow!("{e}"))?
-            .commit_from_file(&model_path)?;
+            .commit_from_file(model_path)?;
 
         self.sessions.insert(name.to_string(), session);
         tracing::info!("Loaded model: {name} from {}", model_path.display());

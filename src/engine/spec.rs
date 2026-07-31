@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::config::parameters::{FaceSwapParams, RestorerSize};
+use crate::config::parameters::{FaceSwapParams, RestorerSize, SwapperModel};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 
 /// A model's purpose inside one immutable engine generation.
@@ -80,6 +80,8 @@ pub enum EngineSpecError {
     InvalidEnhancerBlend(String),
     #[error("enhancer selection {selected} does not match artifact {artifact}")]
     EnhancerModelMismatch { selected: String, artifact: String },
+    #[error("DFM selection {selected} does not match artifact {artifact}")]
+    DfmModelMismatch { selected: String, artifact: String },
     #[error("mask control {control} is outside {min}..={max}: {value}")]
     InvalidMaskControl {
         control: String,
@@ -99,12 +101,7 @@ pub enum EngineSpecError {
 }
 
 impl EngineSpec {
-    const REQUIRED_MODELS: [ModelRole; 4] = [
-        ModelRole::Detector,
-        ModelRole::Recognizer,
-        ModelRole::Swapper,
-        ModelRole::Emap,
-    ];
+    const REQUIRED_MODELS: [ModelRole; 1] = [ModelRole::Detector];
 
     /// Reject incomplete or unsupported generations before allocating GPU memory.
     pub fn validate(&self) -> Result<(), EngineSpecError> {
@@ -114,6 +111,16 @@ impl EngineSpec {
 
         for role in Self::REQUIRED_MODELS {
             self.require(role)?;
+        }
+        match self.params.swapper_model {
+            SwapperModel::Inswapper128 => {
+                for role in [ModelRole::Recognizer, ModelRole::Swapper, ModelRole::Emap] {
+                    self.require(role)?;
+                }
+            }
+            SwapperModel::Dfm => {
+                self.require(ModelRole::Dfm)?;
+            }
         }
 
         validate_sha256("identity_sha256", &self.identity_sha256)?;
@@ -128,6 +135,7 @@ impl EngineSpec {
                 self.params.enhancer_blend.to_string(),
             ));
         }
+        validate_float_range("dfm_morph", self.params.dfm_morph, 0.01, 1.0)?;
         validate_range("occluder_size", self.params.occluder_size as i64, -100, 100)?;
         validate_range("xseg_size", self.params.xseg_size as i64, -100, 100)?;
         validate_range(
@@ -333,6 +341,15 @@ impl EngineSpec {
                 return Err(EngineSpecError::EnhancerModelMismatch {
                     selected: selected.to_owned(),
                     artifact: artifact.logical_name.clone(),
+                });
+            }
+        }
+        if self.params.swapper_model == SwapperModel::Dfm {
+            let artifact = self.require(ModelRole::Dfm)?;
+            if artifact.filename != self.params.dfm_model {
+                return Err(EngineSpecError::DfmModelMismatch {
+                    selected: self.params.dfm_model.clone(),
+                    artifact: artifact.filename.clone(),
                 });
             }
         }

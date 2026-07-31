@@ -124,6 +124,7 @@ fn main() -> anyhow::Result<()> {
             &mut ws,
             &sources,
             &params,
+            None,
         )?;
     }
     gpu.sync()?;
@@ -147,6 +148,7 @@ fn main() -> anyhow::Result<()> {
             &mut ws,
             &sources,
             &params,
+            None,
         )?;
         if (i + 1) % 10 == 0 {
             eprintln!("  {}/{} frames", i + 1, n_frames);

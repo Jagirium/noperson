@@ -16,9 +16,12 @@
         },
         {
           "python": "crosswap.app.processors.models_processor.ModelsProcessor.load_dfm_model",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::dfm::DfmContract::from_session",
+          "status": "partial",
+          "evidence": [
+            "tests/dfm_contract.rs::dfm_contract_accepts_plain_and_amp_models",
+            "tests/live_spec.rs::live_spec_addresses_local_dfm_without_inswapper_artifacts"
+          ]
         },
         {
           "python": "crosswap.app.processors.models_processor.ModelsProcessor.get_io_binding",
@@ -34,9 +37,11 @@
         },
         {
           "python": "crosswap.app.processors.models_processor.ModelsProcessor.swap_model_group",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::engine::EngineSpec::validate",
+          "status": "partial",
+          "evidence": [
+            "tests/engine_spec.rs::dfm_generation_replaces_the_inswapper_model_group"
+          ]
         },
         {
           "python": "crosswap.app.processors.models_processor.ModelsProcessor.switch_providers_priority",
@@ -433,15 +438,20 @@
       "items": [
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.__init__",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::dfm::DfmContract::from_session",
+          "status": "partial",
+          "evidence": [
+            "tests/dfm_contract.rs::dfm_contract_accepts_plain_and_amp_models",
+            "tests/dfm_contract.rs::dfm_contract_rejects_wrong_layout_or_outputs"
+          ]
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.convert",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::dfm::DfmContract::convert_gpu",
+          "status": "partial",
+          "evidence": [
+            "tests/dfm_contract.rs::dfm_contract_accepts_plain_and_amp_models"
+          ]
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.rct",
@@ -451,27 +461,35 @@
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.has_morph_value",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::dfm::DfmContract::has_morph_value",
+          "status": "parity",
+          "evidence": [
+            "tests/dfm_contract.rs::dfm_contract_accepts_plain_and_amp_models"
+          ]
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.convert_shape",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::dfm::DfmContract::convert_shape",
+          "status": "parity",
+          "evidence": [
+            "tests/dfm_contract.rs::dynamic_dfm_shapes_resolve_to_single_batch"
+          ]
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.to_dtype",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::gpu::ops::GpuOps::nhwc_bgr_unit_to_chw_rgb",
+          "status": "partial",
+          "evidence": [
+            "tests/dfm_contract.rs::dfm_contract_accepts_plain_and_amp_models"
+          ]
         },
         {
           "python": "crosswap.app.processors.utils.dfm_model.DFMModel.resize",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::gpu::ops::GpuOps::resize_npp",
+          "status": "partial",
+          "evidence": [
+            "tests/dfm_contract.rs::dfm_contract_accepts_plain_and_amp_models"
+          ]
         }
       ]
     },

@@ -58,6 +58,8 @@ pub struct GpuOps {
     chw_f32_to_nv12_scaled_fn: CudaFunction,
     letterbox_fn: CudaFunction,
     affine_scale_fn: CudaFunction,
+    chw_rgb_to_nhwc_bgr_unit_fn: CudaFunction,
+    nhwc_bgr_unit_to_chw_rgb_fn: CudaFunction,
     // Mask kernels
     blur_h_fn: CudaFunction,
     blur_v_fn: CudaFunction,
@@ -137,6 +139,8 @@ impl GpuOps {
             chw_f32_to_nv12_scaled_fn: load("frame_convert", "chw_f32_to_nv12_scaled_kernel"),
             letterbox_fn: load("frame_convert", "letterbox_resize_kernel"),
             affine_scale_fn: load("frame_convert", "affine_scale_kernel"),
+            chw_rgb_to_nhwc_bgr_unit_fn: load("layout_convert", "chw_rgb_to_nhwc_bgr_unit_kernel"),
+            nhwc_bgr_unit_to_chw_rgb_fn: load("layout_convert", "nhwc_bgr_unit_to_chw_rgb_kernel"),
             matmul_512_fn: load("matmul_512", "matmul_512_kernel"),
             l2_normalize_fn: load("matmul_512", "l2_normalize_kernel"),
             blur_h_fn: load("gaussian_blur", "gaussian_blur_h_kernel"),
@@ -523,6 +527,40 @@ impl GpuOps {
         b.arg(&dst_h);
         b.arg(&dst_w);
         b.arg(&channels);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn chw_rgb_to_nhwc_bgr_unit(
+        &self,
+        src: &CudaSlice<f32>,
+        dst: &mut CudaSlice<f32>,
+        pixels: u32,
+    ) -> Result<(), DriverError> {
+        let total = pixels * 3;
+        let mut b = self
+            .stream
+            .launch_builder(&self.chw_rgb_to_nhwc_bgr_unit_fn);
+        b.arg(src);
+        b.arg(dst);
+        b.arg(&pixels);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn nhwc_bgr_unit_to_chw_rgb(
+        &self,
+        src: &CudaSlice<f32>,
+        dst: &mut CudaSlice<f32>,
+        pixels: u32,
+    ) -> Result<(), DriverError> {
+        let total = pixels * 3;
+        let mut b = self
+            .stream
+            .launch_builder(&self.nhwc_bgr_unit_to_chw_rgb_fn);
+        b.arg(src);
+        b.arg(dst);
+        b.arg(&pixels);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())
     }

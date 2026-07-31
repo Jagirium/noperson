@@ -110,6 +110,7 @@ fn main() -> anyhow::Result<()> {
         &mut ws,
         &sources,
         &params,
+        None,
     )?;
     tracing::info!(
         "Pipeline done: {} detected, {} swapped",
