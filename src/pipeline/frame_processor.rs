@@ -153,42 +153,66 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
 
         match params.swapper_model {
             SwapperModel::Inswapper128 => {
-                gpu.resize_npp(
-                    &ws.face_512,
-                    &mut ws.face_256,
-                    pipeline_size,
-                    pipeline_size,
-                    swap_size,
-                    swap_size,
-                )?;
-                FaceSwapper::swap_gpu(
-                    manager,
-                    gpu,
-                    ws,
-                    &source.expect("Inswapper source selected above").latent,
-                    dim,
-                )?;
-                gpu.resize_npp(
-                    &ws.face_256,
-                    &mut ws.face_512,
-                    swap_size,
-                    swap_size,
-                    pipeline_size,
-                    pipeline_size,
-                )?;
+                let (iterations, fractional_blend) = strength_plan(params.strength);
+                if iterations == 0 {
+                    gpu.stream
+                        .memcpy_dtod(&ws.face_512_original, &mut ws.face_512)?;
+                } else {
+                    gpu.resize_npp(
+                        &ws.face_512,
+                        &mut ws.face_256,
+                        pipeline_size,
+                        pipeline_size,
+                        swap_size,
+                        swap_size,
+                    )?;
+                    for _ in 0..iterations {
+                        gpu.stream
+                            .memcpy_dtod(&ws.face_256, &mut ws.face_512_scratch)?;
+                        FaceSwapper::swap_gpu(
+                            manager,
+                            gpu,
+                            ws,
+                            &source.expect("Inswapper source selected above").latent,
+                            dim,
+                        )?;
+                    }
+                    if fractional_blend < 1.0 {
+                        gpu.scalar_blend_inplace(
+                            &ws.face_512_scratch,
+                            &mut ws.face_256,
+                            3 * swap_size as usize * swap_size as usize,
+                            1.0 - fractional_blend,
+                        )?;
+                    }
+                    gpu.resize_npp(
+                        &ws.face_256,
+                        &mut ws.face_512,
+                        swap_size,
+                        swap_size,
+                        pipeline_size,
+                        pipeline_size,
+                    )?;
+                }
             }
             SwapperModel::Dfm => {
-                dfm.ok_or_else(|| anyhow::anyhow!("DFM contract is not loaded"))?
-                    .convert_gpu(manager, gpu, ws, params.dfm_morph, params.dfm_rct)?;
+                let (iterations, fractional_blend) = strength_plan(params.strength);
+                if iterations == 0 {
+                    gpu.stream
+                        .memcpy_dtod(&ws.face_512_original, &mut ws.face_512)?;
+                } else {
+                    dfm.ok_or_else(|| anyhow::anyhow!("DFM contract is not loaded"))?
+                        .convert_gpu(manager, gpu, ws, params.dfm_morph, params.dfm_rct)?;
+                    if fractional_blend < 1.0 {
+                        gpu.scalar_blend_inplace(
+                            &ws.face_512_original,
+                            &mut ws.face_512,
+                            3 * pipeline_size as usize * pipeline_size as usize,
+                            1.0 - fractional_blend,
+                        )?;
+                    }
+                }
             }
-        }
-        if params.strength < 1.0 {
-            gpu.scalar_blend_inplace(
-                &ws.face_512_original,
-                &mut ws.face_512,
-                3 * pipeline_size as usize * pipeline_size as usize,
-                1.0 - params.strength,
-            )?;
         }
         let _ = gpu.profile_mark(4); // after_swap_ort
         gpu.stream
@@ -349,6 +373,16 @@ fn restorer_contract(size: RestorerSize) -> anyhow::Result<(&'static str, usize)
     }
 }
 
+fn strength_plan(amount: f32) -> (u32, f32) {
+    let amount = amount.clamp(0.0, 5.0);
+    if amount == 0.0 {
+        return (0, 0.0);
+    }
+    let iterations = amount.ceil() as u32;
+    let fraction = amount.fract();
+    (iterations, if fraction == 0.0 { 1.0 } else { fraction })
+}
+
 /// Compute face alignment template at target size.
 /// Match Crosswap's actual `get_arcface_template(..., mode="arcface128")`
 /// output: scale both coordinates, then shift the X coordinate of all points.
@@ -365,7 +399,7 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 
 #[cfg(test)]
 mod tests {
-    use super::{restorer_contract, scaled_arcface_template};
+    use super::{restorer_contract, scaled_arcface_template, strength_plan};
     use crate::config::parameters::RestorerSize;
 
     #[test]
@@ -387,5 +421,14 @@ mod tests {
         assert_eq!(template[0], [46.2946, 51.6963]);
         assert_eq!(template[1], [81.5318, 51.5014]);
         assert_eq!(template[4], [78.7299, 92.2041]);
+    }
+
+    #[test]
+    fn strength_plan_matches_crossswap_iteration_and_fractional_blend() {
+        assert_eq!(strength_plan(0.0), (0, 0.0));
+        assert_eq!(strength_plan(1.0), (1, 1.0));
+        assert_eq!(strength_plan(1.25), (2, 0.25));
+        assert_eq!(strength_plan(2.0), (2, 1.0));
+        assert_eq!(strength_plan(5.0), (5, 1.0));
     }
 }

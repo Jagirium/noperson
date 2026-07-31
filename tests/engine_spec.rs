@@ -271,7 +271,7 @@ fn detector_controls_are_generation_validated() {
 #[test]
 fn strength_and_similarity_are_generation_validated() {
     let mut spec = valid_spec(false);
-    spec.params.strength = 1.01;
+    spec.params.strength = 5.01;
     assert!(matches!(
         spec.validate(),
         Err(EngineSpecError::InvalidFloatControl { control, .. }) if control == "strength"
