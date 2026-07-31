@@ -110,7 +110,7 @@ if test -z "$runtime"; then
 fi
 command -v "$runtime" >/dev/null || die "container runtime not found: $runtime"
 
-"$runtime" run --rm --platform "linux/${oci_arch}" \
+"$runtime" run --rm --interactive --platform "linux/${oci_arch}" \
     -e "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
     -e "APT_SNAPSHOT=$APT_SNAPSHOT" \
     -e "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
