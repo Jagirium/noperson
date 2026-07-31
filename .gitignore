@@ -37,6 +37,7 @@ artifacts/
 swapped_output.png
 /tests/snapshots/
 /tests/fixtures/
+/docs/
 
 **/dfms/
 
