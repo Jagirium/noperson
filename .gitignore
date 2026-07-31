@@ -35,8 +35,8 @@ models/*
 .worktrees/
 artifacts/
 swapped_output.png
-**/tests/snapshots/**/*.diff.png
-**/tests/snapshots/**/*.new.png
+/tests/snapshots/
+/tests/fixtures/
 
 **/dfms/
 
@@ -44,5 +44,4 @@ swapped_output.png
 /tools/
 
 # Repository-local plans, reports, and release notes
-/docs/
 /TODO/
