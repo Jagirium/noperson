@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use noperson::config::parameters::{FaceSwapParams, RestorerSize};
+use noperson::config::parameters::{EnhancerModel, FaceSwapParams, RestorerSize};
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
 use noperson::engine::{EngineSpec, EngineSpecError, ModelArtifact, ModelRole};
 
@@ -113,6 +113,44 @@ fn enabled_optional_stage_requires_its_artifact() {
     assert_eq!(
         spec.validate(),
         Err(EngineSpecError::MissingModel(ModelRole::Restorer))
+    );
+}
+
+#[test]
+fn enabled_enhancer_requires_the_selected_model_artifact() {
+    let mut spec = valid_spec(false);
+    spec.params.enhancer_enabled = true;
+    spec.params.enhancer_model = EnhancerModel::UltraMixX4;
+
+    assert_eq!(
+        spec.validate(),
+        Err(EngineSpecError::MissingModel(ModelRole::Enhancer))
+    );
+
+    spec.models.insert(
+        ModelRole::Enhancer,
+        artifact("RealEsrganx2Plus", "RealESRGAN_x2plus.fp16.onnx", SHA_A),
+    );
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::EnhancerModelMismatch { .. })
+    ));
+}
+
+#[test]
+fn enhancer_selection_and_blend_are_generation_identity() {
+    let mut x2 = valid_spec(false);
+    x2.params.enhancer_enabled = true;
+    x2.models.insert(
+        ModelRole::Enhancer,
+        artifact("RealEsrganx2Plus", "RealESRGAN_x2plus.fp16.onnx", SHA_A),
+    );
+    let mut blended = x2.clone();
+    blended.params.enhancer_blend = 0.5;
+
+    assert_ne!(
+        x2.generation_digest().unwrap(),
+        blended.generation_digest().unwrap()
     );
 }
 

@@ -76,6 +76,10 @@ pub enum EngineSpecError {
     InvalidDeviceId(i32),
     #[error("restorer {0} is excluded from new engine generations")]
     UnsupportedRestorer(String),
+    #[error("enhancer blend must be finite and in [0,1], got {0}")]
+    InvalidEnhancerBlend(String),
+    #[error("enhancer selection {selected} does not match artifact {artifact}")]
+    EnhancerModelMismatch { selected: String, artifact: String },
     #[error("failed to serialize engine spec: {0}")]
     Serialization(String),
 }
@@ -102,6 +106,13 @@ impl EngineSpec {
 
         if matches!(self.params.restorer_size, RestorerSize::Gpen1024) {
             return Err(EngineSpecError::UnsupportedRestorer("GPEN-1024".to_owned()));
+        }
+        if !self.params.enhancer_blend.is_finite()
+            || !(0.0..=1.0).contains(&self.params.enhancer_blend)
+        {
+            return Err(EngineSpecError::InvalidEnhancerBlend(
+                self.params.enhancer_blend.to_string(),
+            ));
         }
 
         for (role, artifact) in &self.models {
@@ -142,9 +153,21 @@ impl EngineSpec {
             (self.params.occluder_enabled, ModelRole::Occluder),
             (self.params.xseg_enabled, ModelRole::Xseg),
             (self.params.faceparser_enabled, ModelRole::FaceParser),
+            (self.params.enhancer_enabled, ModelRole::Enhancer),
         ] {
             if enabled {
                 self.require(role)?;
+            }
+        }
+
+        if self.params.enhancer_enabled {
+            let artifact = self.require(ModelRole::Enhancer)?;
+            let selected = self.params.enhancer_model.registry_name();
+            if artifact.logical_name != selected {
+                return Err(EngineSpecError::EnhancerModelMismatch {
+                    selected: selected.to_owned(),
+                    artifact: artifact.logical_name.clone(),
+                });
             }
         }
 

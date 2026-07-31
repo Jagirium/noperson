@@ -21,8 +21,10 @@ use crate::engine::{BuildCancellation, EngineSpec, ModelArtifact, ModelRole};
 use crate::gpu::ops::GpuOps;
 use crate::models::live_catalog::{CANONICAL_SWAPPER_FILENAME, validate_model_file};
 use crate::models::manager::ModelManager;
+use crate::models::registry::find_model;
 use crate::pipeline::face_detector::{FaceDetector, FaceDetectorBackend};
 use crate::pipeline::face_recognizer::FaceRecognizer;
+use crate::pipeline::frame_enhancer::FrameEnhancer;
 use crate::pipeline::frame_processor::{FrameResult, SourceFace, process_frame_gpu};
 use crate::pipeline::workspace::GpuWorkspace;
 
@@ -65,6 +67,26 @@ pub struct LiveEngine {
     workspace: GpuWorkspace,
     source_faces: Vec<SourceFace>,
     params: FaceSwapParams,
+    enhancer: Option<FrameEnhancer>,
+}
+
+pub fn output_dimensions(
+    params: &FaceSwapParams,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<(u32, u32)> {
+    if !params.enhancer_enabled {
+        return Ok((width, height));
+    }
+    let scale = params.enhancer_model.scale();
+    Ok((
+        width
+            .checked_mul(scale)
+            .ok_or_else(|| anyhow::anyhow!("enhanced output width overflows"))?,
+        height
+            .checked_mul(scale)
+            .ok_or_else(|| anyhow::anyhow!("enhanced output height overflows"))?,
+    ))
 }
 
 pub fn build_live_spec(
@@ -111,6 +133,18 @@ pub fn build_live_spec(
             RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
         };
         insert_artifact(&mut models, models_dir, ModelRole::Restorer, name, filename)?;
+    }
+    if params.enhancer_enabled {
+        let model_name = params.enhancer_model.registry_name();
+        let artifact = find_model(model_name)
+            .ok_or_else(|| anyhow::anyhow!("enhancer model {model_name} is not registered"))?;
+        insert_artifact(
+            &mut models,
+            models_dir,
+            ModelRole::Enhancer,
+            model_name,
+            artifact.filename,
+        )?;
     }
     for (enabled, role, name, filename) in [
         (
@@ -384,6 +418,21 @@ impl LiveEngine {
             latent,
             threshold: 0.0,
         }];
+        let enhancer = if spec.params.enhancer_enabled {
+            let artifact = required_artifact(spec, ModelRole::Enhancer)?;
+            let enhancer = FrameEnhancer::new_with_filename(
+                Arc::clone(&gpu),
+                models_dir,
+                spec.provider,
+                spec.device_id,
+                spec.params.enhancer_model,
+                &artifact.filename,
+            )?;
+            ensure_build_active(cancellation)?;
+            Some(enhancer)
+        } else {
+            None
+        };
 
         Ok(Self {
             gpu,
@@ -392,6 +441,7 @@ impl LiveEngine {
             workspace,
             source_faces,
             params: spec.params.clone(),
+            enhancer,
         })
     }
 
@@ -426,14 +476,31 @@ impl LiveEngine {
         self.gpu
             .hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
         let result = self.process_chw(&mut chw, height, width)?;
-        let mut output_gpu = self.gpu.alloc_zeros_u8(data.len())?;
+        let (output_width, output_height) = output_dimensions(&self.params, width, height)?;
+        let enhanced = if let Some(enhancer) = &mut self.enhancer {
+            let output_elements = 3usize
+                .checked_mul(output_width as usize)
+                .and_then(|elements| elements.checked_mul(output_height as usize))
+                .ok_or_else(|| anyhow::anyhow!("enhanced output allocation overflows"))?;
+            let mut output = self.gpu.alloc_zeros(output_elements)?;
+            enhancer.enhance_into(&chw, &mut output, width, height, self.params.enhancer_blend)?;
+            Some(output)
+        } else {
+            None
+        };
+        let output_chw = enhanced.as_ref().unwrap_or(&chw);
+        let output_len = 3usize
+            .checked_mul(output_width as usize)
+            .and_then(|elements| elements.checked_mul(output_height as usize))
+            .ok_or_else(|| anyhow::anyhow!("RGB output allocation overflows"))?;
+        let mut output_gpu = self.gpu.alloc_zeros_u8(output_len)?;
         self.gpu
-            .chw_f32_to_hwc_u8(&chw, &mut output_gpu, height, width)?;
+            .chw_f32_to_hwc_u8(output_chw, &mut output_gpu, output_height, output_width)?;
         let data = self.gpu.download_u8(&output_gpu)?;
         Ok(ProcessedRgb {
             data,
-            width,
-            height,
+            width: output_width,
+            height: output_height,
             faces_detected: result.faces_detected,
             faces_swapped: result.faces_swapped,
         })

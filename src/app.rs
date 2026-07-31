@@ -941,13 +941,19 @@ fn run_photo_swap(
     let _ = tx.send(WorkerMsg::Status("Processing".into()));
     let result = engine.process_rgb(source_rgb.as_raw(), sw, sh)?;
     let _ = tx.send(WorkerMsg::FaceCount(result.faces_detected));
+    let (output_width, output_height) = (result.width, result.height);
     let output_hwc = result.data;
-    let _ = tx.send(WorkerMsg::Frame(output_hwc.clone(), sw, sh));
+    let _ = tx.send(WorkerMsg::Frame(
+        output_hwc.clone(),
+        output_width,
+        output_height,
+    ));
 
     match output_dest {
         OutputDest::VirtualCamera(dev) => {
             let _ = tx.send(WorkerMsg::Status(format!("Opening /dev/video{dev}")));
-            let mut vcam = VirtualCamera::open(dev, sw.max(640), sh.max(480), 30)?;
+            let mut vcam =
+                VirtualCamera::open(dev, output_width.max(640), output_height.max(480), 30)?;
             for _ in 0..60 {
                 if tx.send(WorkerMsg::Status("streaming".into())).is_err() {
                     break;
@@ -962,7 +968,13 @@ fn run_photo_swap(
                 path
             };
             let _ = tx.send(WorkerMsg::Status(format!("Saving {}", out_path.display())));
-            image::save_buffer(&out_path, &output_hwc, sw, sh, image::ColorType::Rgb8)?;
+            image::save_buffer(
+                &out_path,
+                &output_hwc,
+                output_width,
+                output_height,
+                image::ColorType::Rgb8,
+            )?;
         }
     }
     let _ = tx.send(WorkerMsg::Status("Done".into()));

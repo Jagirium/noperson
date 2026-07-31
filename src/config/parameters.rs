@@ -2,6 +2,74 @@
 //! Replaces dict-based parameters with string keys.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Full-frame enhancement model selected for photo/video output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EnhancerModel {
+    #[default]
+    RealEsrganX2Plus,
+    RealEsrganX4Plus,
+    RealEsrGeneralX4V3,
+    BsrganX2,
+    BsrganX4,
+    UltraSharpX4,
+    UltraMixX4,
+}
+
+impl EnhancerModel {
+    pub fn from_crosswap_name(name: &str) -> Result<Self, EnhancerModelParseError> {
+        match name {
+            "RealEsrgan-x2-Plus" => Ok(Self::RealEsrganX2Plus),
+            "RealEsrgan-x4-Plus" => Ok(Self::RealEsrganX4Plus),
+            "RealEsr-General-x4v3" => Ok(Self::RealEsrGeneralX4V3),
+            "BSRGan-x2" => Ok(Self::BsrganX2),
+            "BSRGan-x4" => Ok(Self::BsrganX4),
+            "UltraSharp-x4" => Ok(Self::UltraSharpX4),
+            "UltraMix-x4" => Ok(Self::UltraMixX4),
+            _ => Err(EnhancerModelParseError(name.to_owned())),
+        }
+    }
+
+    pub const fn crosswap_name(self) -> &'static str {
+        match self {
+            Self::RealEsrganX2Plus => "RealEsrgan-x2-Plus",
+            Self::RealEsrganX4Plus => "RealEsrgan-x4-Plus",
+            Self::RealEsrGeneralX4V3 => "RealEsr-General-x4v3",
+            Self::BsrganX2 => "BSRGan-x2",
+            Self::BsrganX4 => "BSRGan-x4",
+            Self::UltraSharpX4 => "UltraSharp-x4",
+            Self::UltraMixX4 => "UltraMix-x4",
+        }
+    }
+
+    pub const fn registry_name(self) -> &'static str {
+        match self {
+            Self::RealEsrganX2Plus => "RealEsrganx2Plus",
+            Self::RealEsrganX4Plus => "RealEsrganx4Plus",
+            Self::RealEsrGeneralX4V3 => "RealEsrx4v3",
+            Self::BsrganX2 => "BSRGANx2",
+            Self::BsrganX4 => "BSRGANx4",
+            Self::UltraSharpX4 => "UltraSharpx4",
+            Self::UltraMixX4 => "UltraMixx4",
+        }
+    }
+
+    pub const fn scale(self) -> u32 {
+        match self {
+            Self::RealEsrganX2Plus | Self::BsrganX2 => 2,
+            Self::RealEsrganX4Plus
+            | Self::RealEsrGeneralX4V3
+            | Self::BsrganX4
+            | Self::UltraSharpX4
+            | Self::UltraMixX4 => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown CrossSwap frame enhancer {0}")]
+pub struct EnhancerModelParseError(String);
 
 /// Swap resolution: how many tiles for Inswapper128.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +115,14 @@ pub struct FaceSwapParams {
     #[serde(default)]
     pub restorer_mode: RestorerMode,
 
+    // Full-frame enhancement (photo/video; disabled in realtime by CrossSwap)
+    #[serde(default)]
+    pub enhancer_enabled: bool,
+    #[serde(default)]
+    pub enhancer_model: EnhancerModel,
+    #[serde(default = "default_enhancer_blend")]
+    pub enhancer_blend: f32,
+
     // Masks
     pub occluder_enabled: bool,
     pub xseg_enabled: bool,
@@ -81,6 +157,9 @@ impl Default for FaceSwapParams {
             restorer_size: RestorerSize::Gpen512,
             restorer_alpha: 1.0,
             restorer_mode: RestorerMode::Realtime,
+            enhancer_enabled: false,
+            enhancer_model: EnhancerModel::default(),
+            enhancer_blend: default_enhancer_blend(),
             occluder_enabled: false,
             xseg_enabled: false,
             faceparser_enabled: false,
@@ -97,4 +176,8 @@ impl Default for FaceSwapParams {
             similarity_threshold: 0.6,
         }
     }
+}
+
+const fn default_enhancer_blend() -> f32 {
+    1.0
 }

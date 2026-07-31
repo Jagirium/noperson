@@ -4,74 +4,13 @@ use std::sync::Arc;
 use cudarc::driver::CudaSlice;
 use thiserror::Error;
 
+pub use crate::config::parameters::EnhancerModel;
 use crate::config::settings::ExecutionProvider;
 use crate::gpu::{ops::GpuOps, unified};
 use crate::models::{manager::ModelManager, registry::find_model};
 
 /// Tile size selected by CrossSwap's production `FrameWorker.enhance_core`.
 pub const CROSSSWAP_TILE_SIZE: u32 = 512;
-
-/// Frame-enhancer models exposed by the CrossSwap backend contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EnhancerModel {
-    RealEsrganX2Plus,
-    RealEsrganX4Plus,
-    RealEsrGeneralX4V3,
-    BsrganX2,
-    BsrganX4,
-    UltraSharpX4,
-    UltraMixX4,
-}
-
-impl EnhancerModel {
-    pub fn from_crosswap_name(name: &str) -> Result<Self, FrameEnhancerError> {
-        match name {
-            "RealEsrgan-x2-Plus" => Ok(Self::RealEsrganX2Plus),
-            "RealEsrgan-x4-Plus" => Ok(Self::RealEsrganX4Plus),
-            "RealEsr-General-x4v3" => Ok(Self::RealEsrGeneralX4V3),
-            "BSRGan-x2" => Ok(Self::BsrganX2),
-            "BSRGan-x4" => Ok(Self::BsrganX4),
-            "UltraSharp-x4" => Ok(Self::UltraSharpX4),
-            "UltraMix-x4" => Ok(Self::UltraMixX4),
-            _ => Err(FrameEnhancerError::UnknownModel(name.to_owned())),
-        }
-    }
-
-    pub const fn crosswap_name(self) -> &'static str {
-        match self {
-            Self::RealEsrganX2Plus => "RealEsrgan-x2-Plus",
-            Self::RealEsrganX4Plus => "RealEsrgan-x4-Plus",
-            Self::RealEsrGeneralX4V3 => "RealEsr-General-x4v3",
-            Self::BsrganX2 => "BSRGan-x2",
-            Self::BsrganX4 => "BSRGan-x4",
-            Self::UltraSharpX4 => "UltraSharp-x4",
-            Self::UltraMixX4 => "UltraMix-x4",
-        }
-    }
-
-    pub const fn registry_name(self) -> &'static str {
-        match self {
-            Self::RealEsrganX2Plus => "RealEsrganx2Plus",
-            Self::RealEsrganX4Plus => "RealEsrganx4Plus",
-            Self::RealEsrGeneralX4V3 => "RealEsrx4v3",
-            Self::BsrganX2 => "BSRGANx2",
-            Self::BsrganX4 => "BSRGANx4",
-            Self::UltraSharpX4 => "UltraSharpx4",
-            Self::UltraMixX4 => "UltraMixx4",
-        }
-    }
-
-    pub const fn scale(self) -> u32 {
-        match self {
-            Self::RealEsrganX2Plus | Self::BsrganX2 => 2,
-            Self::RealEsrganX4Plus
-            | Self::RealEsrGeneralX4V3
-            | Self::BsrganX4
-            | Self::UltraSharpX4
-            | Self::UltraMixX4 => 4,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnhancerTile {
@@ -234,9 +173,28 @@ impl FrameEnhancer {
         let registry_name = model.registry_name();
         let artifact = find_model(registry_name)
             .ok_or_else(|| anyhow::anyhow!("enhancer model {registry_name} is not registered"))?;
+        Self::new_with_filename(
+            gpu,
+            models_dir,
+            provider,
+            device_id,
+            model,
+            artifact.filename,
+        )
+    }
+
+    pub fn new_with_filename(
+        gpu: Arc<GpuOps>,
+        models_dir: impl AsRef<Path>,
+        provider: ExecutionProvider,
+        device_id: i32,
+        model: EnhancerModel,
+        filename: &str,
+    ) -> anyhow::Result<Self> {
+        let registry_name = model.registry_name();
         let mut manager = ModelManager::with_execution(models_dir, provider, device_id);
         manager.set_compute_stream(gpu.stream.cu_stream() as *mut ());
-        manager.load(registry_name, artifact.filename)?;
+        manager.load(registry_name, filename)?;
         Ok(Self {
             gpu,
             manager,
@@ -358,8 +316,6 @@ impl FrameEnhancer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FrameEnhancerError {
-    #[error("unknown CrossSwap frame enhancer {0}")]
-    UnknownModel(String),
     #[error("frame, tile, and scale dimensions must be non-zero")]
     ZeroDimension,
     #[error("frame enhancer dimensions overflow")]
