@@ -4,14 +4,21 @@ use std::sync::{Arc, RwLock};
 
 use cudarc::driver::{CudaSlice, CudaStream};
 
-use super::{LiveEngine, ProcessedRgb, sha256_file};
+use super::{LiveEngine, ProcessedRgb, ResolvedFaceAssignment, sha256_file};
 use crate::engine::{
     ActivationError, ActivationOutcome, BuildCancellation, BuildRequestOutcome, BuildSnapshot,
-    EngineGeneration, EngineSpec, FrameOutcome, OwnedEngineSupervisor, ShadowBuild,
-    ShadowBuildQueue, SupervisorPhase, SupervisorSnapshot,
+    EngineGeneration, EngineSpec, FaceAssignmentSpec, FrameOutcome, OwnedEngineSupervisor,
+    ShadowBuild, ShadowBuildQueue, SupervisorPhase, SupervisorSnapshot,
 };
 use crate::gpu::ops::GpuOps;
 use crate::pipeline::frame_processor::FrameResult;
+
+#[derive(Debug, Clone)]
+pub struct FaceAssignmentPaths {
+    pub source_path: PathBuf,
+    pub target_path: Option<PathBuf>,
+    pub similarity_threshold: f32,
+}
 
 #[derive(Default)]
 struct IdentityCatalog {
@@ -73,10 +80,35 @@ impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
             .identities
             .resolve(&spec.identity_sha256)
             .ok_or_else(|| anyhow::anyhow!("identity content is not registered"))?;
-        let engine = LiveEngine::new_from_spec_cancellable(
+        let assignments = spec
+            .assignments
+            .iter()
+            .map(|assignment| {
+                Ok(ResolvedFaceAssignment {
+                    source_path: self
+                        .identities
+                        .resolve(&assignment.source_identity_sha256)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("source identity content is not registered")
+                        })?,
+                    target_path: assignment
+                        .target_identity_sha256
+                        .as_deref()
+                        .map(|digest| {
+                            self.identities.resolve(digest).ok_or_else(|| {
+                                anyhow::anyhow!("target identity content is not registered")
+                            })
+                        })
+                        .transpose()?,
+                    similarity_threshold: assignment.similarity_threshold,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let engine = LiveEngine::new_from_spec_assignments_cancellable(
             Arc::clone(&self.gpu),
             &self.models_dir,
             &identity_path,
+            &assignments,
             spec,
             &self.stream,
             cancellation,
@@ -94,6 +126,31 @@ pub struct AtomicLiveEngine {
 }
 
 impl AtomicLiveEngine {
+    fn register_assignments(
+        identities: &IdentityCatalog,
+        spec: &mut EngineSpec,
+        assignments: &[FaceAssignmentPaths],
+    ) -> anyhow::Result<()> {
+        spec.assignments = assignments
+            .iter()
+            .map(|assignment| {
+                Ok(FaceAssignmentSpec {
+                    source_identity_sha256: identities.register(&assignment.source_path)?,
+                    target_identity_sha256: assignment
+                        .target_path
+                        .as_deref()
+                        .map(|path| identities.register(path))
+                        .transpose()?,
+                    similarity_threshold: assignment.similarity_threshold,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if let Some(first) = spec.assignments.first() {
+            spec.identity_sha256 = first.source_identity_sha256.clone();
+        }
+        Ok(())
+    }
+
     pub fn bootstrap(
         mut builder: LiveShadowBuilder,
         identity_path: &Path,
@@ -112,12 +169,52 @@ impl AtomicLiveEngine {
         })
     }
 
+    pub fn bootstrap_assignments(
+        mut builder: LiveShadowBuilder,
+        assignments: &[FaceAssignmentPaths],
+        mut initial_spec: EngineSpec,
+        probation_frames: u32,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !assignments.is_empty(),
+            "at least one face assignment is required"
+        );
+        Self::register_assignments(&builder.identities, &mut initial_spec, assignments)?;
+        let initial_engine = builder.build(&initial_spec, &BuildCancellation::default())?;
+        let initial = EngineGeneration::new(initial_spec, initial_engine)?;
+        let identities = Arc::clone(&builder.identities);
+        let builds = ShadowBuildQueue::spawn(builder)?;
+        Ok(Self {
+            supervisor: OwnedEngineSupervisor::new(initial, probation_frames),
+            builds,
+            identities,
+        })
+    }
+
     pub fn request(
         &self,
         mut spec: EngineSpec,
         identity_path: &Path,
     ) -> anyhow::Result<BuildRequestOutcome> {
         spec.identity_sha256 = self.identities.register(identity_path)?;
+        let generation = spec.generation_digest()?;
+        if self.supervisor.snapshot().active_generation == generation {
+            self.builds.cancel_pending();
+            return Ok(BuildRequestOutcome::Coalesced { generation });
+        }
+        Ok(self.builds.request(spec)?)
+    }
+
+    pub fn request_assignments(
+        &self,
+        mut spec: EngineSpec,
+        assignments: &[FaceAssignmentPaths],
+    ) -> anyhow::Result<BuildRequestOutcome> {
+        anyhow::ensure!(
+            !assignments.is_empty(),
+            "at least one face assignment is required"
+        );
+        Self::register_assignments(&self.identities, &mut spec, assignments)?;
         let generation = spec.generation_digest()?;
         if self.supervisor.snapshot().active_generation == generation {
             self.builds.cancel_pending();

@@ -4,7 +4,7 @@ use noperson::config::parameters::{
     EnhancerModel, FaceSwapParams, RestorerAlignment, RestorerSize, SwapperModel,
 };
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
-use noperson::engine::{EngineSpec, EngineSpecError, ModelArtifact, ModelRole};
+use noperson::engine::{EngineSpec, EngineSpecError, FaceAssignmentSpec, ModelArtifact, ModelRole};
 
 const SHA_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SHA_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -49,6 +49,7 @@ fn valid_spec(reverse: bool) -> EngineSpec {
         device_id: 0,
         detector: DetectorModel::YoloFace8n,
         identity_sha256: SHA_A.to_owned(),
+        assignments: Vec::new(),
         models: required_models(reverse),
         params: FaceSwapParams::default(),
     }
@@ -63,6 +64,34 @@ fn valid_spec_has_stable_generation_digest() {
     reverse.validate().expect("valid engine spec");
     assert_eq!(forward.generation_digest().unwrap().len(), 64);
     assert_eq!(forward.generation_digest(), reverse.generation_digest());
+}
+
+#[test]
+fn face_assignments_are_generation_identity_and_swap_all_is_last() {
+    let mut first = valid_spec(false);
+    first.assignments = vec![
+        FaceAssignmentSpec {
+            source_identity_sha256: SHA_A.to_owned(),
+            target_identity_sha256: Some(SHA_B.to_owned()),
+            similarity_threshold: 0.6,
+        },
+        FaceAssignmentSpec {
+            source_identity_sha256: SHA_B.to_owned(),
+            target_identity_sha256: None,
+            similarity_threshold: 0.5,
+        },
+    ];
+    first.validate().unwrap();
+
+    let mut changed = first.clone();
+    changed.assignments[0].similarity_threshold = 0.61;
+    assert_ne!(first.generation_digest(), changed.generation_digest());
+
+    first.assignments.swap(0, 1);
+    assert!(matches!(
+        first.validate(),
+        Err(EngineSpecError::InvalidAssignments(_))
+    ));
 }
 
 #[test]

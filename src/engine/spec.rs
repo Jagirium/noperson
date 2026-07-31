@@ -55,6 +55,17 @@ pub struct ModelArtifact {
     pub sha256: String,
 }
 
+/// One immutable source-to-target identity assignment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceAssignmentSpec {
+    /// Identity to render into the selected target face.
+    pub source_identity_sha256: String,
+    /// Reference identity used to select a target. `None` explicitly means all faces.
+    pub target_identity_sha256: Option<String>,
+    /// CrossSwap similarity score in the normalized `[0, 1]` domain.
+    pub similarity_threshold: f32,
+}
+
 /// Complete immutable configuration for a buildable engine generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineSpec {
@@ -62,6 +73,9 @@ pub struct EngineSpec {
     pub device_id: i32,
     pub detector: DetectorModel,
     pub identity_sha256: String,
+    /// Empty preserves the legacy single-source, swap-all generation contract.
+    #[serde(default)]
+    pub assignments: Vec<FaceAssignmentSpec>,
     pub models: BTreeMap<ModelRole, ModelArtifact>,
     pub params: FaceSwapParams,
 }
@@ -104,6 +118,8 @@ pub enum EngineSpecError {
     },
     #[error("failed to serialize engine spec: {0}")]
     Serialization(String),
+    #[error("invalid face assignments: {0}")]
+    InvalidAssignments(String),
 }
 
 impl EngineSpec {
@@ -150,6 +166,29 @@ impl EngineSpec {
         }
 
         validate_sha256("identity_sha256", &self.identity_sha256)?;
+        for (index, assignment) in self.assignments.iter().enumerate() {
+            validate_sha256(
+                &format!("assignments[{index}].source_identity_sha256"),
+                &assignment.source_identity_sha256,
+            )?;
+            if let Some(target) = &assignment.target_identity_sha256 {
+                validate_sha256(
+                    &format!("assignments[{index}].target_identity_sha256"),
+                    target,
+                )?;
+            }
+            validate_float_range(
+                &format!("assignments[{index}].similarity_threshold"),
+                assignment.similarity_threshold,
+                0.0,
+                1.0,
+            )?;
+            if assignment.target_identity_sha256.is_none() && index + 1 != self.assignments.len() {
+                return Err(EngineSpecError::InvalidAssignments(
+                    "an unscoped swap-all assignment must be last".to_owned(),
+                ));
+            }
+        }
 
         if matches!(self.params.restorer_size, RestorerSize::Gpen1024)
             || matches!(self.params.restorer2_size, RestorerSize::Gpen1024)

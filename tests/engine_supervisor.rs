@@ -33,6 +33,7 @@ fn spec(seed: char) -> EngineSpec {
         device_id: 0,
         detector: DetectorModel::YoloFace8n,
         identity_sha256: digest,
+        assignments: Vec::new(),
         models,
         params: FaceSwapParams::default(),
     }

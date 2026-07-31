@@ -8,7 +8,7 @@ pub use builder::{
     BuildCancellation, BuildPhase, BuildRequestOutcome, BuildSnapshot, ShadowBuild,
     ShadowBuildQueue,
 };
-pub use spec::{EngineSpec, EngineSpecError, ModelArtifact, ModelRole};
+pub use spec::{EngineSpec, EngineSpecError, FaceAssignmentSpec, ModelArtifact, ModelRole};
 pub use supervisor::{
     ActivationError, ActivationOutcome, EngineFrame, EngineGeneration, EngineSupervisor,
     FrameOutcome, OwnedEngineSupervisor, ProbationUpdate, SupervisorPhase, SupervisorSnapshot,

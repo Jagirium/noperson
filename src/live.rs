@@ -2,12 +2,12 @@
 
 mod atomic;
 
-pub use atomic::{AtomicLiveEngine, LiveShadowBuilder};
+pub use atomic::{AtomicLiveEngine, FaceAssignmentPaths, LiveShadowBuilder};
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream};
@@ -71,6 +71,12 @@ pub struct LiveEngine {
     params: FaceSwapParams,
     enhancer: Option<FrameEnhancer>,
     dfm: Option<DfmContract>,
+}
+
+pub(crate) struct ResolvedFaceAssignment {
+    pub source_path: PathBuf,
+    pub target_path: Option<PathBuf>,
+    pub similarity_threshold: f32,
 }
 
 pub fn output_dimensions(
@@ -234,6 +240,7 @@ pub fn build_live_spec(
         device_id,
         detector,
         identity_sha256: sha256_file(identity_path)?,
+        assignments: Vec::new(),
         models,
         params,
     };
@@ -324,6 +331,47 @@ fn ensure_build_active(cancellation: Option<&BuildCancellation>) -> anyhow::Resu
     Ok(())
 }
 
+fn identity_embedding_gpu(
+    path: &Path,
+    detector: &FaceDetector,
+    manager: &mut ModelManager,
+    gpu: &GpuOps,
+    workspace: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<Vec<f32>> {
+    let identity = image::open(path)?;
+    let (width, height) = identity.dimensions();
+    let rgb = identity.to_rgb8();
+    let input = gpu.upload_u8(rgb.as_raw())?;
+    let mut chw = gpu.alloc_zeros(3 * width as usize * height as usize)?;
+    gpu.hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
+    let (faces, _) = detector.detect_gpu(manager, gpu, &chw, workspace, height, width)?;
+    let face = faces
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No face in identity image {}", path.display()))?;
+    let refined = if params.landmark_enabled {
+        LandmarkModel::from(params.landmark_mode).detect_gpu(
+            manager,
+            gpu,
+            workspace,
+            &chw,
+            height,
+            width,
+            face.bbox,
+            &face.kps_5,
+            params.landmark_from_points,
+            params.landmark_score,
+        )?
+    } else {
+        None
+    };
+    let keypoints = refined
+        .as_ref()
+        .filter(|landmarks| landmarks.is_preferred_to(face.score))
+        .map_or(face.kps_5, |landmarks| landmarks.five);
+    FaceRecognizer::recognize_gpu(manager, gpu, &chw, height, width, &keypoints, workspace)
+}
+
 impl LiveEngine {
     pub fn new(
         gpu: Arc<GpuOps>,
@@ -380,7 +428,16 @@ impl LiveEngine {
             detector_model,
             device_id,
         )?;
-        Self::new_from_spec_inner(gpu, models_dir, identity_path, &spec, stream, false, None)
+        Self::new_from_spec_inner(
+            gpu,
+            models_dir,
+            identity_path,
+            &[],
+            &spec,
+            stream,
+            false,
+            None,
+        )
     }
 
     /// Build a fully content-verified generation before it becomes eligible for activation.
@@ -391,13 +448,27 @@ impl LiveEngine {
         spec: &EngineSpec,
         stream: &Arc<CudaStream>,
     ) -> anyhow::Result<Self> {
-        Self::new_from_spec_inner(gpu, models_dir, identity_path, spec, stream, true, None)
+        anyhow::ensure!(
+            spec.assignments.is_empty(),
+            "multi-face generations require the atomic identity catalog"
+        );
+        Self::new_from_spec_inner(
+            gpu,
+            models_dir,
+            identity_path,
+            &[],
+            spec,
+            stream,
+            true,
+            None,
+        )
     }
 
-    fn new_from_spec_cancellable(
+    pub(crate) fn new_from_spec_assignments_cancellable(
         gpu: Arc<GpuOps>,
         models_dir: &Path,
         identity_path: &Path,
+        assignments: &[ResolvedFaceAssignment],
         spec: &EngineSpec,
         stream: &Arc<CudaStream>,
         cancellation: &BuildCancellation,
@@ -406,6 +477,7 @@ impl LiveEngine {
             gpu,
             models_dir,
             identity_path,
+            assignments,
             spec,
             stream,
             true,
@@ -417,6 +489,7 @@ impl LiveEngine {
         gpu: Arc<GpuOps>,
         models_dir: &Path,
         identity_path: &Path,
+        assignments: &[ResolvedFaceAssignment],
         spec: &EngineSpec,
         stream: &Arc<CudaStream>,
         verify_files: bool,
@@ -426,6 +499,19 @@ impl LiveEngine {
         spec.validate()?;
         if verify_files {
             validate_model_file(identity_path, &spec.identity_sha256)?;
+            anyhow::ensure!(
+                assignments.len() == spec.assignments.len(),
+                "resolved face assignments do not match the generation spec"
+            );
+            for (resolved, assignment) in assignments.iter().zip(&spec.assignments) {
+                validate_model_file(&resolved.source_path, &assignment.source_identity_sha256)?;
+                match (&resolved.target_path, &assignment.target_identity_sha256) {
+                    (Some(path), Some(digest)) => validate_model_file(path, digest)?,
+                    (None, None) => {}
+                    _ => anyhow::bail!("resolved target identity does not match generation spec"),
+                }
+                ensure_build_active(cancellation)?;
+            }
             ensure_build_active(cancellation)?;
             for (role, artifact) in &spec.models {
                 validate_model_file(
@@ -509,58 +595,50 @@ impl LiveEngine {
         let mut workspace = GpuWorkspace::new(stream)?;
         ensure_build_active(cancellation)?;
         let source_faces = if spec.params.swapper_model == SwapperModel::Inswapper128 {
-            let identity = image::open(identity_path)?;
-            let (width, height) = identity.dimensions();
-            let rgb = identity.to_rgb8();
-            let input = gpu.upload_u8(rgb.as_raw())?;
-            let mut chw = gpu.alloc_zeros(3 * width as usize * height as usize)?;
-            gpu.hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
-            let (faces, _) =
-                detector.detect_gpu(&mut manager, &gpu, &chw, &mut workspace, height, width)?;
-            ensure_build_active(cancellation)?;
-            let face = faces
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("No face in identity image"))?;
-            let refined = if spec.params.landmark_enabled {
-                LandmarkModel::from(spec.params.landmark_mode).detect_gpu(
+            let legacy;
+            let resolved = if assignments.is_empty() {
+                legacy = [ResolvedFaceAssignment {
+                    source_path: identity_path.to_path_buf(),
+                    target_path: None,
+                    similarity_threshold: spec.params.similarity_threshold,
+                }];
+                &legacy[..]
+            } else {
+                assignments
+            };
+            let mut sources = Vec::with_capacity(resolved.len());
+            for assignment in resolved {
+                let source_embedding = identity_embedding_gpu(
+                    &assignment.source_path,
+                    &detector,
                     &mut manager,
                     &gpu,
                     &mut workspace,
-                    &chw,
-                    height,
-                    width,
-                    face.bbox,
-                    &face.kps_5,
-                    spec.params.landmark_from_points,
-                    spec.params.landmark_score,
-                )?
-            } else {
-                None
-            };
-            let identity_kps = refined
-                .as_ref()
-                .filter(|landmarks| landmarks.is_preferred_to(face.score))
-                .map_or(face.kps_5, |landmarks| landmarks.five);
-            let embedding = FaceRecognizer::recognize_gpu(
-                &mut manager,
-                &gpu,
-                &chw,
-                height,
-                width,
-                &identity_kps,
-                &mut workspace,
-            )?;
-            let emap = manager
-                .emap
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
-            let latent = FaceRecognizer::calc_latent(&embedding, emap);
-            ensure_build_active(cancellation)?;
-            vec![SourceFace {
-                target_embedding: None,
-                latent,
-                threshold: spec.params.similarity_threshold,
-            }]
+                    &spec.params,
+                )?;
+                let target_embedding = match &assignment.target_path {
+                    Some(path) => Some(identity_embedding_gpu(
+                        path,
+                        &detector,
+                        &mut manager,
+                        &gpu,
+                        &mut workspace,
+                        &spec.params,
+                    )?),
+                    None => None,
+                };
+                let emap = manager
+                    .emap
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
+                sources.push(SourceFace {
+                    target_embedding,
+                    latent: FaceRecognizer::calc_latent(&source_embedding, emap),
+                    threshold: assignment.similarity_threshold,
+                });
+                ensure_build_active(cancellation)?;
+            }
+            sources
         } else {
             Vec::new()
         };
