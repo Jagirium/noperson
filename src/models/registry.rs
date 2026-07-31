@@ -101,12 +101,6 @@ pub const MODELS: &[ModelEntry] = &[
         url: "https://github.com/Jagirium/noperson/releases/download/models-v0.1.0/GPEN-BFR-512.onnx",
     },
     ModelEntry {
-        name: "GPENBFR1024",
-        filename: "GPEN-BFR-1024.onnx",
-        sha256: Some("2a579f36202f451a5e1fcf69e1ae8ce25d156a08cd5e43d484c44da16cd6c6fe"),
-        url: "https://github.com/Jagirium/noperson/releases/download/models-v0.1.0/GPEN-BFR-1024.onnx",
-    },
-    ModelEntry {
         name: "RealEsrganx2Plus",
         filename: "RealESRGAN_x2plus.fp16.onnx",
         sha256: Some("80f8b0f9cfaa7b3e972495bd21291f027aa60bf66af9c38d58c52cdf086b0a59"),
@@ -247,11 +241,6 @@ pub const MODEL_IO: &[ModelIO] = &[
         input_names: &["input"],
         output_names: &["output"],
     },
-    ModelIO {
-        name: "GPENBFR1024",
-        input_names: &["input"],
-        output_names: &["output"],
-    },
     // Frame enhancers — all use input/output
     ModelIO {
         name: "RealEsrganx2Plus",
@@ -308,7 +297,7 @@ pub const MODEL_IO: &[ModelIO] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::MODELS;
+    use super::{MODEL_IO, MODELS, find_model};
     use std::collections::HashSet;
 
     #[test]
@@ -316,7 +305,7 @@ mod tests {
         let prefix = "https://github.com/Jagirium/noperson/releases/download/models-v0.1.0/";
         let mut urls = HashSet::new();
 
-        assert_eq!(MODELS.len(), 26);
+        assert_eq!(MODELS.len(), 25);
         for model in MODELS {
             assert!(
                 model.filename.ends_with(".onnx"),
@@ -326,5 +315,16 @@ mod tests {
             assert_eq!(model.url, format!("{prefix}{}", model.filename));
             assert!(urls.insert(model.url), "duplicate URL for {}", model.name);
         }
+    }
+
+    #[test]
+    fn runtime_registry_excludes_oversized_gpen_variants() {
+        assert!(find_model("GPENBFR1024").is_none());
+        assert!(find_model("GPENBFR2048").is_none());
+        assert!(
+            MODEL_IO
+                .iter()
+                .all(|model| model.name != "GPENBFR1024" && model.name != "GPENBFR2048")
+        );
     }
 }
