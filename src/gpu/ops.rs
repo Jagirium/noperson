@@ -2,7 +2,7 @@
 //!
 //! All ops work on CudaSlice<f32> buffers, zero CPU involvement.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use cudarc::driver::{
     CudaContext, CudaEvent, CudaFunction, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
@@ -116,11 +116,16 @@ impl GpuOps {
             })?;
         }
 
-        let load = |name: &str, entry: &str| -> CudaFunction {
-            let ptx = Ptx::from_file(format!("{out_dir}/{name}.ptx"));
-            let module = ctx
-                .load_module(ptx)
-                .unwrap_or_else(|e| panic!("Failed to load {name}.ptx: {e}"));
+        // Several source files expose multiple entry points. Loading the same
+        // PTX once per function makes CUDA re-JIT and retain duplicate modules,
+        // which is especially expensive when constructing a shadow generation.
+        let mut modules = HashMap::new();
+        let mut load = |name: &str, entry: &str| -> CudaFunction {
+            let module = modules.entry(name.to_owned()).or_insert_with(|| {
+                let ptx = Ptx::from_file(format!("{out_dir}/{name}.ptx"));
+                ctx.load_module(ptx)
+                    .unwrap_or_else(|e| panic!("Failed to load {name}.ptx: {e}"))
+            });
             module
                 .load_function(entry)
                 .unwrap_or_else(|e| panic!("Failed to load {entry} from {name}.ptx: {e}"))
