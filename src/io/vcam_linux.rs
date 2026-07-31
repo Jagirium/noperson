@@ -29,4 +29,6 @@ impl VirtualCamera {
     pub fn device_path(&self) -> String {
         self.camera.device().to_owned()
     }
+
+    pub fn close(self) {}
 }

@@ -349,9 +349,11 @@
         },
         {
           "python": "crosswap.app.processors.face_restorers.FaceRestorers.run_GPEN_256",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::gpu::unified::run_gpen",
+          "status": "partial",
+          "evidence": [
+            "noperson::pipeline::frame_processor::tests::restorer_contract_maps_only_supported_runtime_sizes"
+          ]
         },
         {
           "python": "crosswap.app.processors.face_restorers.FaceRestorers.run_GPEN_512",
@@ -531,15 +533,20 @@
         },
         {
           "python": "crosswap.app.processors.video_processor.VideoProcessor.disable_virtualcam",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::io::virtualcam::VirtualCamera::close",
+          "status": "parity",
+          "evidence": [
+            "Rust ownership drops the platform camera handle synchronously"
+          ]
         },
         {
           "python": "crosswap.app.processors.video_processor.VideoProcessor.create_ffmpeg_subprocess",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::io::video::FfmpegVideoSource::open",
+          "status": "partial",
+          "evidence": [
+            "tests/video_contract.rs::ffmpeg_decode_contract_streams_exact_rgb_frames",
+            "tests/video_contract.rs::ffmpeg_encode_contract_preserves_geometry_and_frame_rate"
+          ]
         },
         {
           "python": "crosswap.app.processors.video_processor.VideoProcessor.stop_processing",
