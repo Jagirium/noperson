@@ -18,7 +18,7 @@ use noperson::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
 use noperson::models::manager::ModelManager;
 use noperson::pipeline::face_detector::YoloFaceDetector;
 use noperson::pipeline::face_recognizer::FaceRecognizer;
-use noperson::pipeline::frame_processor::{SourceFace, process_frame_gpu};
+use noperson::pipeline::frame_processor::{AssignmentBackend, SourceFace, process_frame_gpu};
 use noperson::pipeline::workspace::GpuWorkspace;
 
 fn main() -> anyhow::Result<()> {
@@ -81,7 +81,7 @@ fn main() -> anyhow::Result<()> {
 
     let sources = vec![SourceFace {
         target_embedding: None,
-        latent,
+        backend: AssignmentBackend::Inswapper { latent },
         threshold: 0.0,
         params: None,
     }];
@@ -111,7 +111,6 @@ fn main() -> anyhow::Result<()> {
         &mut ws,
         &sources,
         &params,
-        None,
     )?;
     tracing::info!(
         "Pipeline done: {} detected, {} swapped",

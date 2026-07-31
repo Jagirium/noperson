@@ -67,6 +67,10 @@ pub struct FaceAssignmentSpec {
     /// Optional target-local controls. `None` inherits generation defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<FaceSwapParams>,
+    /// Content-addressed model overrides used only by this target assignment.
+    /// Empty preserves the legacy generation-wide model set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<ModelRole, ModelArtifact>,
 }
 
 /// Complete immutable configuration for a buildable engine generation.
@@ -192,9 +196,9 @@ impl EngineSpec {
                 ));
             }
             if let Some(params) = &assignment.params {
-                if !same_model_topology(&self.params, params) {
+                if !same_generation_controls(&self.params, params) {
                     return Err(EngineSpecError::InvalidAssignments(format!(
-                        "assignments[{index}] changes model topology; model-local overrides require a separate generation"
+                        "assignments[{index}] overrides generation-wide detection, rotation, or enhancement controls"
                     )));
                 }
                 if params.face_likeness_enabled && assignment.target_identity_sha256.is_none() {
@@ -208,9 +212,36 @@ impl EngineSpec {
                 let mut scoped = self.clone();
                 scoped.assignments.clear();
                 scoped.params = params.clone();
+                scoped.models.extend(assignment.models.clone());
                 scoped.params.face_likeness_enabled = false;
                 scoped.validate()?;
+            } else if !assignment.models.is_empty() {
+                return Err(EngineSpecError::InvalidAssignments(format!(
+                    "assignments[{index}] provides model overrides without target-local parameters"
+                )));
             }
+        }
+        if self
+            .assignments
+            .iter()
+            .any(|assignment| assignment.target_identity_sha256.is_some())
+            && !self.models.contains_key(&ModelRole::Recognizer)
+            && !self
+                .assignments
+                .iter()
+                .any(|assignment| assignment.models.contains_key(&ModelRole::Recognizer))
+        {
+            return Err(EngineSpecError::MissingModel(ModelRole::Recognizer));
+        }
+        let mut sessions = BTreeMap::<String, String>::new();
+        register_runtime_sessions(&mut sessions, &self.params, &self.models)?;
+        for assignment in &self.assignments {
+            let Some(params) = &assignment.params else {
+                continue;
+            };
+            let mut models = self.models.clone();
+            models.extend(assignment.models.clone());
+            register_runtime_sessions(&mut sessions, params, &models)?;
         }
 
         if matches!(self.params.restorer_size, RestorerSize::Gpen1024)
@@ -612,25 +643,84 @@ impl EngineSpec {
     }
 }
 
-fn same_model_topology(a: &FaceSwapParams, b: &FaceSwapParams) -> bool {
-    a.swapper_model == b.swapper_model
-        && a.landmark_enabled == b.landmark_enabled
-        && a.landmark_mode == b.landmark_mode
-        && a.restorer_enabled == b.restorer_enabled
-        && (!a.restorer_enabled || a.restorer_size == b.restorer_size)
-        && (!b.restorer_enabled
-            || (a.restorer_alignment == crate::config::parameters::RestorerAlignment::Reference)
-                == (b.restorer_alignment
-                    == crate::config::parameters::RestorerAlignment::Reference))
-        && a.restorer2_enabled == b.restorer2_enabled
-        && (!a.restorer2_enabled || a.restorer2_size == b.restorer2_size)
-        && (!b.restorer2_enabled
-            || (a.restorer2_alignment == crate::config::parameters::RestorerAlignment::Reference)
-                == (b.restorer2_alignment
-                    == crate::config::parameters::RestorerAlignment::Reference))
-        && a.occluder_enabled == b.occluder_enabled
-        && a.xseg_enabled == b.xseg_enabled
-        && a.faceparser_enabled == b.faceparser_enabled
+fn same_generation_controls(a: &FaceSwapParams, b: &FaceSwapParams) -> bool {
+    a.detector_score == b.detector_score
+        && a.max_faces == b.max_faces
+        && a.auto_rotation == b.auto_rotation
+        && a.manual_rotation_enabled == b.manual_rotation_enabled
+        && a.manual_rotation_angle == b.manual_rotation_angle
+        && a.enhancer_enabled == b.enhancer_enabled
+        && a.enhancer_model == b.enhancer_model
+        && a.enhancer_blend == b.enhancer_blend
+}
+
+fn register_runtime_sessions(
+    sessions: &mut BTreeMap<String, String>,
+    params: &FaceSwapParams,
+    models: &BTreeMap<ModelRole, ModelArtifact>,
+) -> Result<(), EngineSpecError> {
+    let mut roles = Vec::<(String, ModelRole)>::new();
+    if params.swapper_model == SwapperModel::Inswapper128 {
+        roles.extend([
+            ("Inswapper128ArcFace".to_owned(), ModelRole::Recognizer),
+            ("Inswapper128".to_owned(), ModelRole::Swapper),
+            ("InswapperEMap".to_owned(), ModelRole::Emap),
+        ]);
+    }
+    if params.landmark_enabled {
+        roles.push((
+            params.landmark_mode.registry_name().to_owned(),
+            ModelRole::Landmark,
+        ));
+    }
+    if params.restorer_enabled {
+        roles.push((
+            match params.restorer_size {
+                RestorerSize::Gpen256 => "GPENBFR256",
+                RestorerSize::Gpen512 => "GPENBFR512",
+                RestorerSize::Gpen1024 => "GPENBFR1024",
+            }
+            .to_owned(),
+            ModelRole::Restorer,
+        ));
+    }
+    if params.restorer2_enabled {
+        roles.push((
+            match params.restorer2_size {
+                RestorerSize::Gpen256 => "GPENBFR256_2",
+                RestorerSize::Gpen512 => "GPENBFR512_2",
+                RestorerSize::Gpen1024 => "GPENBFR1024_2",
+            }
+            .to_owned(),
+            ModelRole::Restorer2,
+        ));
+    }
+    for (enabled, name, role) in [
+        (params.occluder_enabled, "Occluder", ModelRole::Occluder),
+        (params.xseg_enabled, "XSeg", ModelRole::Xseg),
+        (
+            params.faceparser_enabled,
+            "FaceParser",
+            ModelRole::FaceParser,
+        ),
+    ] {
+        if enabled {
+            roles.push((name.to_owned(), role));
+        }
+    }
+    for (session, role) in roles {
+        let Some(artifact) = models.get(&role) else {
+            continue;
+        };
+        if let Some(previous) = sessions.insert(session.clone(), artifact.sha256.clone())
+            && previous != artifact.sha256
+        {
+            return Err(EngineSpecError::InvalidAssignments(format!(
+                "runtime session {session} maps to multiple model digests"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_range(control: &str, value: i64, min: i64, max: i64) -> Result<(), EngineSpecError> {

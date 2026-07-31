@@ -5,7 +5,7 @@
 
 use cudarc::driver::CudaSlice;
 
-use crate::config::parameters::{FaceSwapParams, RestorerAlignment, RestorerSize, SwapperModel};
+use crate::config::parameters::{FaceSwapParams, RestorerAlignment, RestorerSize};
 use crate::gpu::ops::GpuOps;
 use crate::math::affine;
 use crate::models::manager::ModelManager;
@@ -23,12 +23,32 @@ use crate::pipeline::workspace::GpuWorkspace;
 pub struct SourceFace {
     /// Reference target identity. `None` is the explicit swap-all shortcut.
     pub target_embedding: Option<Vec<f32>>,
-    /// Inswapper latent is invariant for an identity. Compute it once when the
-    /// source is loaded instead of doing a 512x512 CPU matmul for every face.
-    pub latent: Vec<f32>,
+    pub backend: AssignmentBackend,
     pub threshold: f32,
     /// Per-target controls. `None` inherits generation defaults.
     pub params: Option<FaceSwapParams>,
+}
+
+/// Assignment-local swap implementation. Session names are content-addressed,
+/// allowing several DFM graphs to coexist in one immutable generation.
+#[derive(Clone)]
+pub enum AssignmentBackend {
+    Inswapper {
+        latent: Vec<f32>,
+    },
+    Dfm {
+        session_name: String,
+        contract: DfmContract,
+    },
+}
+
+impl AssignmentBackend {
+    pub fn session_name(&self) -> Option<&str> {
+        match self {
+            Self::Inswapper { .. } => None,
+            Self::Dfm { session_name, .. } => Some(session_name),
+        }
+    }
 }
 
 /// Result of processing a single frame.
@@ -51,15 +71,14 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     ws: &mut GpuWorkspace,
     sources: &[SourceFace],
     params: &FaceSwapParams,
-    dfm: Option<DfmContract>,
 ) -> anyhow::Result<FrameResult> {
-    if !params.enabled || (params.swapper_model == SwapperModel::Inswapper128 && sources.is_empty())
-    {
+    if sources.is_empty() || !pipeline_has_enabled_assignment(sources, params) {
         return Ok(FrameResult {
             faces_detected: 0,
             faces_swapped: 0,
         });
     }
+    let generation_params = params;
 
     // Profiling: record start
     let _ = gpu.profile_mark(0);
@@ -99,42 +118,59 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             .map_or(face.kps_5, |landmarks| landmarks.five);
 
         // 2a. Match against sources
-        let source = if params.swapper_model == SwapperModel::Inswapper128 {
-            Some(
-                if sources.len() == 1 && sources[0].target_embedding.is_none() {
-                    &sources[0]
-                } else {
-                    let embedding = FaceRecognizer::recognize_gpu(
-                        manager,
-                        gpu,
-                        frame_chw,
-                        frame_h,
-                        frame_w,
-                        &effective_kps,
-                        ws,
-                    )?;
-                    match sources
-                        .iter()
-                        .find(|candidate| assignment_matches(candidate, &embedding))
-                    {
-                        Some(source) => source,
-                        None => continue,
-                    }
-                },
-            )
+        let source = if sources.len() == 1 && sources[0].target_embedding.is_none() {
+            &sources[0]
         } else {
-            None
+            let embedding = FaceRecognizer::recognize_gpu(
+                manager,
+                gpu,
+                frame_chw,
+                frame_h,
+                frame_w,
+                &effective_kps,
+                ws,
+            )?;
+            match sources
+                .iter()
+                .find(|candidate| assignment_matches(candidate, &embedding))
+            {
+                Some(source) => source,
+                None => continue,
+            }
         };
         let _ = gpu.profile_mark(2); // after_recognize
 
         // CrossSwap stores controls per target face. Model topology is fixed
         // for this immutable generation, while all hot-path values may vary.
-        let params = source
-            .and_then(|selected| selected.params.as_ref())
-            .unwrap_or(params);
+        let params = source.params.as_ref().unwrap_or(generation_params);
         if !params.enabled {
             continue;
         }
+        let effective_kps =
+            if source.params.is_some() && needs_local_landmark(params, generation_params) {
+                if params.landmark_enabled {
+                    LandmarkModel::from(params.landmark_mode)
+                        .detect_gpu(
+                            manager,
+                            gpu,
+                            ws,
+                            frame_chw,
+                            frame_h,
+                            frame_w,
+                            face.bbox,
+                            &face.kps_5,
+                            params.landmark_from_points,
+                            params.landmark_score,
+                        )?
+                        .as_ref()
+                        .filter(|landmarks| landmarks.is_preferred_to(face.score))
+                        .map_or(face.kps_5, |landmarks| landmarks.five)
+                } else {
+                    face.kps_5
+                }
+            } else {
+                effective_kps
+            };
         let dim = (params.dim as u32).max(1);
         let swap_size = dim * 128;
 
@@ -169,8 +205,8 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             .memcpy_dtod(&ws.face_512, &mut ws.face_512_original)?;
         let _ = gpu.profile_mark(3); // after_warp_swap
 
-        match params.swapper_model {
-            SwapperModel::Inswapper128 => {
+        match &source.backend {
+            AssignmentBackend::Inswapper { latent } => {
                 let (iterations, fractional_blend) = strength_plan(params.strength);
                 if iterations == 0 {
                     gpu.stream
@@ -218,7 +254,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                             manager,
                             gpu,
                             ws,
-                            &source.expect("Inswapper source selected above").latent,
+                            latent,
                             dim,
                             iteration == 0,
                             input_from_scratch,
@@ -242,14 +278,23 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                     )?;
                 }
             }
-            SwapperModel::Dfm => {
+            AssignmentBackend::Dfm {
+                session_name,
+                contract,
+            } => {
                 let (iterations, fractional_blend) = strength_plan(params.strength);
                 if iterations == 0 {
                     gpu.stream
                         .memcpy_dtod(&ws.face_512_original, &mut ws.face_512)?;
                 } else {
-                    dfm.ok_or_else(|| anyhow::anyhow!("DFM contract is not loaded"))?
-                        .convert_gpu(manager, gpu, ws, params.dfm_morph, params.dfm_rct)?;
+                    contract.convert_gpu(
+                        manager,
+                        gpu,
+                        ws,
+                        session_name,
+                        params.dfm_morph,
+                        params.dfm_rct,
+                    )?;
                     if fractional_blend < 1.0 {
                         gpu.scalar_blend_inplace(
                             &ws.face_512_original,
@@ -401,6 +446,19 @@ fn assignment_matches(assignment: &SourceFace, detected_embedding: &[f32]) -> bo
         let cosine = FaceRecognizer::cosine_similarity(detected_embedding, target);
         crosswap_similarity(cosine) >= assignment.threshold
     })
+}
+
+fn pipeline_has_enabled_assignment(sources: &[SourceFace], generation: &FaceSwapParams) -> bool {
+    sources
+        .iter()
+        .any(|source| source.params.as_ref().unwrap_or(generation).enabled)
+}
+
+fn needs_local_landmark(local: &FaceSwapParams, generation: &FaceSwapParams) -> bool {
+    local.landmark_enabled != generation.landmark_enabled
+        || local.landmark_mode != generation.landmark_mode
+        || local.landmark_from_points != generation.landmark_from_points
+        || local.landmark_score != generation.landmark_score
 }
 
 fn crosswap_similarity(cosine: f32) -> f32 {
@@ -600,8 +658,9 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 #[cfg(test)]
 mod tests {
     use super::{
-        SourceFace, adjusted_keypoints, assignment_matches, blend_restorer_affine,
-        crosswap_similarity, needs_strength_copy, needs_strength_snapshot, restorer_contract,
+        AssignmentBackend, SourceFace, adjusted_keypoints, assignment_matches,
+        blend_restorer_affine, crosswap_similarity, needs_local_landmark, needs_strength_copy,
+        needs_strength_snapshot, pipeline_has_enabled_assignment, restorer_contract,
         scaled_arcface_template, strength_plan,
     };
     use crate::config::parameters::FaceSwapParams;
@@ -673,6 +732,30 @@ mod tests {
     }
 
     #[test]
+    fn local_landmark_plan_changes_for_any_alignment_control() {
+        let base = FaceSwapParams::default();
+        let mut local = base.clone();
+        assert!(!needs_local_landmark(&local, &base));
+        local.landmark_score += 0.01;
+        assert!(needs_local_landmark(&local, &base));
+    }
+
+    #[test]
+    fn assignment_can_enable_pipeline_when_generation_default_is_disabled() {
+        let generation = FaceSwapParams {
+            enabled: false,
+            ..FaceSwapParams::default()
+        };
+        let source = SourceFace {
+            target_embedding: None,
+            backend: AssignmentBackend::Inswapper { latent: vec![] },
+            threshold: 0.0,
+            params: Some(FaceSwapParams::default()),
+        };
+        assert!(pipeline_has_enabled_assignment(&[source], &generation));
+    }
+
+    #[test]
     fn target_assignment_is_separate_from_source_latent() {
         let mut target = vec![0.0; 512];
         target[0] = 1.0;
@@ -682,7 +765,9 @@ mod tests {
         different[1] = 1.0;
         let scoped = SourceFace {
             target_embedding: Some(target),
-            latent: vec![9.0, 8.0],
+            backend: AssignmentBackend::Inswapper {
+                latent: vec![9.0, 8.0],
+            },
             threshold: 0.75,
             params: None,
         };
@@ -691,11 +776,35 @@ mod tests {
 
         let swap_all = SourceFace {
             target_embedding: None,
-            latent: vec![9.0, 8.0],
+            backend: AssignmentBackend::Dfm {
+                session_name: "dfm-bbbbbbbbbbbb".to_owned(),
+                contract: crate::pipeline::dfm::DfmContract::from_io(
+                    &[crate::pipeline::dfm::DfmTensor {
+                        name: "in_face:0".to_owned(),
+                        shape: vec![1, 256, 256, 3],
+                    }],
+                    &[
+                        crate::pipeline::dfm::DfmTensor {
+                            name: "out_face_mask:0".to_owned(),
+                            shape: vec![1, 256, 256, 1],
+                        },
+                        crate::pipeline::dfm::DfmTensor {
+                            name: "out_celeb_face:0".to_owned(),
+                            shape: vec![1, 256, 256, 3],
+                        },
+                        crate::pipeline::dfm::DfmTensor {
+                            name: "out_celeb_face_mask:0".to_owned(),
+                            shape: vec![1, 256, 256, 1],
+                        },
+                    ],
+                )
+                .unwrap(),
+            },
             threshold: 1.0,
             params: None,
         };
         assert!(assignment_matches(&swap_all, &different));
+        assert_eq!(swap_all.backend.session_name(), Some("dfm-bbbbbbbbbbbb"));
     }
 
     #[test]

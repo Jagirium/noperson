@@ -21,6 +21,8 @@ pub struct FaceAssignmentPaths {
     pub similarity_threshold: f32,
     /// Target-local controls; `None` inherits the generation defaults.
     pub params: Option<FaceSwapParams>,
+    /// Content-addressed artifacts selected by this assignment.
+    pub models: std::collections::BTreeMap<crate::engine::ModelRole, crate::engine::ModelArtifact>,
 }
 
 #[derive(Default)]
@@ -147,6 +149,7 @@ impl AtomicLiveEngine {
                         .transpose()?,
                     similarity_threshold: assignment.similarity_threshold,
                     params: assignment.params.clone(),
+                    models: assignment.models.clone(),
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

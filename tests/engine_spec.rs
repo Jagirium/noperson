@@ -75,12 +75,14 @@ fn face_assignments_are_generation_identity_and_swap_all_is_last() {
             target_identity_sha256: Some(SHA_B.to_owned()),
             similarity_threshold: 0.6,
             params: None,
+            models: BTreeMap::new(),
         },
         FaceAssignmentSpec {
             source_identity_sha256: SHA_B.to_owned(),
             target_identity_sha256: None,
             similarity_threshold: 0.5,
             params: None,
+            models: BTreeMap::new(),
         },
     ];
     first.validate().unwrap();
@@ -104,6 +106,7 @@ fn per_face_parameters_are_part_of_generation_identity() {
         target_identity_sha256: Some(SHA_B.to_owned()),
         similarity_threshold: 0.6,
         params: Some(FaceSwapParams::default()),
+        models: BTreeMap::new(),
     }];
     let mut changed = first.clone();
     changed.assignments[0].params.as_mut().unwrap().strength = 2.0;
@@ -112,7 +115,7 @@ fn per_face_parameters_are_part_of_generation_identity() {
 }
 
 #[test]
-fn per_face_parameters_are_validated_and_cannot_change_loaded_models() {
+fn per_face_parameters_are_validated_and_can_select_content_addressed_models() {
     let mut spec = valid_spec(false);
     let params = FaceSwapParams {
         restorer_alpha: 2.0,
@@ -123,16 +126,25 @@ fn per_face_parameters_are_validated_and_cannot_change_loaded_models() {
         target_identity_sha256: Some(SHA_B.to_owned()),
         similarity_threshold: 0.6,
         params: Some(params),
+        models: BTreeMap::new(),
     }];
     assert!(spec.validate().is_err());
 
     spec.assignments[0].params.as_mut().unwrap().restorer_alpha = 1.0;
     spec.assignments[0].params.as_mut().unwrap().swapper_model = SwapperModel::Dfm;
-    assert!(matches!(
-        spec.validate(),
-        Err(EngineSpecError::InvalidAssignments(message))
-            if message.contains("model topology")
-    ));
+    spec.assignments[0].params.as_mut().unwrap().dfm_model = "statham.dfm".to_owned();
+    spec.assignments[0]
+        .models
+        .insert(ModelRole::Dfm, artifact("StathamDFM", "statham.dfm", SHA_B));
+    spec.validate().expect("assignment-local DFM is valid");
+
+    let digest = spec.generation_digest().unwrap();
+    spec.assignments[0]
+        .models
+        .get_mut(&ModelRole::Dfm)
+        .unwrap()
+        .sha256 = SHA_A.to_owned();
+    assert_ne!(digest, spec.generation_digest().unwrap());
 }
 
 #[test]
@@ -144,6 +156,84 @@ fn missing_required_model_is_rejected() {
         spec.validate(),
         Err(EngineSpecError::MissingModel(ModelRole::Swapper))
     );
+}
+
+#[test]
+fn targeted_dfm_generation_requires_arcface_for_assignment_matching() {
+    let mut spec = valid_spec(false);
+    spec.params.swapper_model = SwapperModel::Dfm;
+    spec.params.dfm_model = "statham.dfm".to_owned();
+    spec.models.remove(&ModelRole::Swapper);
+    spec.models.remove(&ModelRole::Emap);
+    spec.models.remove(&ModelRole::Recognizer);
+    spec.models
+        .insert(ModelRole::Dfm, artifact("StathamDFM", "statham.dfm", SHA_B));
+    spec.assignments = vec![FaceAssignmentSpec {
+        source_identity_sha256: SHA_A.to_owned(),
+        target_identity_sha256: Some(SHA_B.to_owned()),
+        similarity_threshold: 0.6,
+        params: None,
+        models: BTreeMap::new(),
+    }];
+    assert_eq!(
+        spec.validate(),
+        Err(EngineSpecError::MissingModel(ModelRole::Recognizer))
+    );
+}
+
+#[test]
+fn assignment_model_union_rejects_runtime_session_name_collisions() {
+    let mut spec = valid_spec(false);
+    let params = FaceSwapParams {
+        occluder_enabled: true,
+        ..FaceSwapParams::default()
+    };
+    spec.assignments = vec![
+        FaceAssignmentSpec {
+            source_identity_sha256: SHA_A.to_owned(),
+            target_identity_sha256: Some(SHA_A.to_owned()),
+            similarity_threshold: 0.6,
+            params: Some(params.clone()),
+            models: BTreeMap::from([(
+                ModelRole::Occluder,
+                artifact("Occluder", "occluder-a.onnx", SHA_A),
+            )]),
+        },
+        FaceAssignmentSpec {
+            source_identity_sha256: SHA_B.to_owned(),
+            target_identity_sha256: Some(SHA_B.to_owned()),
+            similarity_threshold: 0.6,
+            params: Some(params),
+            models: BTreeMap::from([(
+                ModelRole::Occluder,
+                artifact("Occluder", "occluder-b.onnx", SHA_B),
+            )]),
+        },
+    ];
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidAssignments(message)) if message.contains("session Occluder")
+    ));
+}
+
+#[test]
+fn assignment_cannot_override_generation_wide_detection_or_enhancement() {
+    let mut spec = valid_spec(false);
+    let params = FaceSwapParams {
+        detector_score: 0.7,
+        ..FaceSwapParams::default()
+    };
+    spec.assignments = vec![FaceAssignmentSpec {
+        source_identity_sha256: SHA_A.to_owned(),
+        target_identity_sha256: Some(SHA_B.to_owned()),
+        similarity_threshold: 0.6,
+        params: Some(params),
+        models: BTreeMap::new(),
+    }];
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidAssignments(message)) if message.contains("generation-wide")
+    ));
 }
 
 #[test]

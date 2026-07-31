@@ -27,7 +27,9 @@ use crate::pipeline::face_detector::{FaceDetector, FaceDetectorBackend};
 use crate::pipeline::face_landmark::LandmarkModel;
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::frame_enhancer::FrameEnhancer;
-use crate::pipeline::frame_processor::{FrameResult, SourceFace, process_frame_gpu};
+use crate::pipeline::frame_processor::{
+    AssignmentBackend, FrameResult, SourceFace, process_frame_gpu,
+};
 use crate::pipeline::workspace::GpuWorkspace;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -70,8 +72,11 @@ pub struct LiveEngine {
     source_faces: Vec<SourceFace>,
     params: FaceSwapParams,
     enhancer: Option<FrameEnhancer>,
-    dfm: Option<DfmContract>,
     rotation_scratch: Option<CudaSlice<f32>>,
+    rgb_input_scratch: Option<CudaSlice<u8>>,
+    frame_scratch: Option<CudaSlice<f32>>,
+    enhanced_scratch: Option<CudaSlice<f32>>,
+    rgb_output_scratch: Option<CudaSlice<u8>>,
 }
 
 pub(crate) struct ResolvedFaceAssignment {
@@ -303,6 +308,10 @@ fn required_artifact(spec: &EngineSpec, role: ModelRole) -> anyhow::Result<&Mode
         .ok_or_else(|| anyhow::anyhow!("engine generation is missing {}", role.as_str()))
 }
 
+fn dfm_session_name(artifact: &ModelArtifact) -> String {
+    format!("DFM-{}", &artifact.sha256[..16])
+}
+
 fn restorer_session_name(params: &FaceSwapParams) -> anyhow::Result<Option<&'static str>> {
     if !params.restorer_enabled {
         return Ok(None);
@@ -530,6 +539,15 @@ impl LiveEngine {
                 )?;
                 ensure_build_active(cancellation)?;
             }
+            for assignment in &spec.assignments {
+                for (role, artifact) in &assignment.models {
+                    validate_model_file(
+                        &artifact_path(models_dir, *role, &artifact.filename),
+                        &artifact.sha256,
+                    )?;
+                    ensure_build_active(cancellation)?;
+                }
+            }
         }
 
         let mut manager = ModelManager::with_execution(models_dir, spec.provider, spec.device_id);
@@ -541,59 +559,86 @@ impl LiveEngine {
             DetectorModel::Scrfd2_5g => manager.load("SCRFD2.5g", &detector_artifact.filename)?,
         }
         ensure_build_active(cancellation)?;
-        if spec.params.landmark_enabled {
-            let artifact = required_artifact(spec, ModelRole::Landmark)?;
-            manager.load(
-                spec.params.landmark_mode.registry_name(),
-                &artifact.filename,
-            )?;
-            ensure_build_active(cancellation)?;
-        }
-        if let Some(artifact) = spec.models.get(&ModelRole::RestorerLandmark)
-            && manager.get("FaceLandmark5").is_none()
-        {
-            manager.load("FaceLandmark5", &artifact.filename)?;
-            ensure_build_active(cancellation)?;
-        }
-        let dfm = match spec.params.swapper_model {
-            SwapperModel::Inswapper128 => {
-                manager.load(
-                    "Inswapper128ArcFace",
-                    &required_artifact(spec, ModelRole::Recognizer)?.filename,
-                )?;
-                ensure_build_active(cancellation)?;
-                manager.load(
-                    "Inswapper128",
-                    &required_artifact(spec, ModelRole::Swapper)?.filename,
-                )?;
-                ensure_build_active(cancellation)?;
-                manager.load_emap_file(&required_artifact(spec, ModelRole::Emap)?.filename)?;
-                ensure_build_active(cancellation)?;
-                None
+        let mut effective_models = Vec::with_capacity(spec.assignments.len().max(1));
+        if spec.assignments.is_empty() {
+            effective_models.push(spec.models.clone());
+        } else {
+            for assignment in &spec.assignments {
+                let mut models = spec.models.clone();
+                models.extend(assignment.models.clone());
+                effective_models.push(models);
             }
-            SwapperModel::Dfm => {
-                let artifact = required_artifact(spec, ModelRole::Dfm)?;
+        }
+        let effective_params: Vec<&FaceSwapParams> = if assignments.is_empty() {
+            vec![&spec.params]
+        } else {
+            assignments
+                .iter()
+                .map(|assignment| assignment.params.as_ref().unwrap_or(&spec.params))
+                .collect()
+        };
+        let needs_inswapper = effective_params
+            .iter()
+            .any(|params| params.swapper_model == SwapperModel::Inswapper128);
+        let needs_recognizer = needs_inswapper
+            || assignments
+                .iter()
+                .any(|assignment| assignment.target_path.is_some());
+        if needs_recognizer {
+            let artifact = effective_models
+                .iter()
+                .find_map(|models| models.get(&ModelRole::Recognizer))
+                .ok_or_else(|| anyhow::anyhow!("target matching requires a recognizer model"))?;
+            manager.load("Inswapper128ArcFace", &artifact.filename)?;
+            ensure_build_active(cancellation)?;
+        }
+        if needs_inswapper {
+            let swapper = effective_models
+                .iter()
+                .find_map(|models| models.get(&ModelRole::Swapper))
+                .ok_or_else(|| anyhow::anyhow!("Inswapper assignment requires a swapper model"))?;
+            let emap = effective_models
+                .iter()
+                .find_map(|models| models.get(&ModelRole::Emap))
+                .ok_or_else(|| anyhow::anyhow!("Inswapper assignment requires an emap"))?;
+            manager.load("Inswapper128", &swapper.filename)?;
+            manager.load_emap_file(&emap.filename)?;
+            ensure_build_active(cancellation)?;
+        }
+        for (params, models) in effective_params.iter().zip(&effective_models) {
+            if params.landmark_enabled {
+                let artifact = models
+                    .get(&ModelRole::Landmark)
+                    .ok_or_else(|| anyhow::anyhow!("landmark assignment requires a model"))?;
+                manager.load(params.landmark_mode.registry_name(), &artifact.filename)?;
+                ensure_build_active(cancellation)?;
+            }
+            if let Some(artifact) = models.get(&ModelRole::RestorerLandmark) {
+                manager.load("FaceLandmark5", &artifact.filename)?;
+                ensure_build_active(cancellation)?;
+            }
+            if params.swapper_model == SwapperModel::Dfm {
+                let artifact = models
+                    .get(&ModelRole::Dfm)
+                    .ok_or_else(|| anyhow::anyhow!("DFM assignment requires a model"))?;
+                let session_name = dfm_session_name(artifact);
                 manager.load_path(
-                    "DFM",
+                    &session_name,
                     &artifact_path(models_dir, ModelRole::Dfm, &artifact.filename),
                 )?;
                 ensure_build_active(cancellation)?;
-                Some(DfmContract::from_session(manager.get("DFM").ok_or_else(
-                    || anyhow::anyhow!("DFM session was not loaded"),
-                )?)?)
             }
-        };
-
-        for (role, session_name) in [
-            (ModelRole::Restorer, restorer_session_name(&spec.params)?),
-            (ModelRole::Restorer2, restorer2_session_name(&spec.params)?),
-            (ModelRole::Occluder, Some("Occluder")),
-            (ModelRole::Xseg, Some("XSeg")),
-            (ModelRole::FaceParser, Some("FaceParser")),
-        ] {
-            if let (Some(artifact), Some(session_name)) = (spec.models.get(&role), session_name) {
-                manager.load(session_name, &artifact.filename)?;
-                ensure_build_active(cancellation)?;
+            for (role, session_name) in [
+                (ModelRole::Restorer, restorer_session_name(params)?),
+                (ModelRole::Restorer2, restorer2_session_name(params)?),
+                (ModelRole::Occluder, Some("Occluder")),
+                (ModelRole::Xseg, Some("XSeg")),
+                (ModelRole::FaceParser, Some("FaceParser")),
+            ] {
+                if let (Some(artifact), Some(session_name)) = (models.get(&role), session_name) {
+                    manager.load(session_name, &artifact.filename)?;
+                    ensure_build_active(cancellation)?;
+                }
             }
         }
 
@@ -604,69 +649,83 @@ impl LiveEngine {
         );
         let mut workspace = GpuWorkspace::new(stream)?;
         ensure_build_active(cancellation)?;
-        let source_faces = if spec.params.swapper_model == SwapperModel::Inswapper128 {
-            let legacy;
-            let resolved = if assignments.is_empty() {
-                legacy = [ResolvedFaceAssignment {
-                    source_path: identity_path.to_path_buf(),
-                    target_path: None,
-                    similarity_threshold: spec.params.similarity_threshold,
-                    params: None,
-                }];
-                &legacy[..]
-            } else {
-                assignments
-            };
-            let mut sources = Vec::with_capacity(resolved.len());
-            for assignment in resolved {
-                let face_params = assignment.params.as_ref().unwrap_or(&spec.params);
-                let source_embedding = identity_embedding_gpu(
-                    &assignment.source_path,
+        let legacy;
+        let resolved = if assignments.is_empty() {
+            legacy = [ResolvedFaceAssignment {
+                source_path: identity_path.to_path_buf(),
+                target_path: None,
+                similarity_threshold: spec.params.similarity_threshold,
+                params: None,
+            }];
+            &legacy[..]
+        } else {
+            assignments
+        };
+        let mut source_faces = Vec::with_capacity(resolved.len());
+        for (index, assignment) in resolved.iter().enumerate() {
+            let face_params = assignment.params.as_ref().unwrap_or(&spec.params);
+            let target_embedding = match &assignment.target_path {
+                Some(path) => Some(identity_embedding_gpu(
+                    path,
                     &detector,
                     &mut manager,
                     &gpu,
                     &mut workspace,
                     &spec.params,
-                )?;
-                let target_embedding = match &assignment.target_path {
-                    Some(path) => Some(identity_embedding_gpu(
-                        path,
+                )?),
+                None => None,
+            };
+            let backend = match face_params.swapper_model {
+                SwapperModel::Inswapper128 => {
+                    let source_embedding = identity_embedding_gpu(
+                        &assignment.source_path,
                         &detector,
                         &mut manager,
                         &gpu,
                         &mut workspace,
                         &spec.params,
-                    )?),
-                    None => None,
-                };
-                let emap = manager
-                    .emap
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
-                let mut latent = FaceRecognizer::calc_latent(&source_embedding, emap);
-                if face_params.face_likeness_enabled {
-                    let target = target_embedding.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("face likeness requires a target identity")
-                    })?;
-                    let target_latent = FaceRecognizer::calc_latent(target, emap);
-                    apply_face_likeness(
-                        &mut latent,
-                        &target_latent,
-                        face_params.face_likeness_factor,
-                    );
+                    )?;
+                    let emap = manager
+                        .emap
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
+                    let mut latent = FaceRecognizer::calc_latent(&source_embedding, emap);
+                    if face_params.face_likeness_enabled {
+                        let target = target_embedding.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("face likeness requires a target identity")
+                        })?;
+                        let target_latent = FaceRecognizer::calc_latent(target, emap);
+                        apply_face_likeness(
+                            &mut latent,
+                            &target_latent,
+                            face_params.face_likeness_factor,
+                        );
+                    }
+                    AssignmentBackend::Inswapper { latent }
                 }
-                sources.push(SourceFace {
-                    target_embedding,
-                    latent,
-                    threshold: assignment.similarity_threshold,
-                    params: assignment.params.clone(),
-                });
-                ensure_build_active(cancellation)?;
-            }
-            sources
-        } else {
-            Vec::new()
-        };
+                SwapperModel::Dfm => {
+                    let artifact = effective_models[index]
+                        .get(&ModelRole::Dfm)
+                        .ok_or_else(|| anyhow::anyhow!("DFM assignment requires a model"))?;
+                    let session_name = dfm_session_name(artifact);
+                    let contract =
+                        DfmContract::from_session(manager.get(&session_name).ok_or_else(
+                            || anyhow::anyhow!("DFM session {session_name} was not loaded"),
+                        )?)?;
+                    AssignmentBackend::Dfm {
+                        session_name,
+                        contract,
+                    }
+                }
+            };
+            source_faces.push(SourceFace {
+                target_embedding,
+                backend,
+                threshold: assignment.similarity_threshold,
+                params: assignment.params.clone(),
+            });
+            ensure_build_active(cancellation)?;
+        }
         let enhancer = if spec.params.enhancer_enabled {
             let artifact = required_artifact(spec, ModelRole::Enhancer)?;
             let enhancer = FrameEnhancer::new_with_filename(
@@ -691,8 +750,11 @@ impl LiveEngine {
             source_faces,
             params: spec.params.clone(),
             enhancer,
-            dfm,
             rotation_scratch: None,
+            rgb_input_scratch: None,
+            frame_scratch: None,
+            enhanced_scratch: None,
+            rgb_output_scratch: None,
         })
     }
 
@@ -718,7 +780,6 @@ impl LiveEngine {
                 &mut self.workspace,
                 &self.source_faces,
                 &self.params,
-                self.dfm,
             );
         }
 
@@ -744,7 +805,6 @@ impl LiveEngine {
             &mut self.workspace,
             &self.source_faces,
             &self.params,
-            self.dfm,
         )?;
         self.gpu.rotate_quadrants(
             &rotated,
@@ -764,18 +824,30 @@ impl LiveEngine {
         height: u32,
     ) -> anyhow::Result<ProcessedRgb> {
         validate_rgb_frame(data, width, height)?;
-        let input = self.gpu.upload_u8(data)?;
-        let mut chw = self.gpu.alloc_zeros(3 * width as usize * height as usize)?;
+        let input_len = data.len();
+        let mut input = match self.rgb_input_scratch.take() {
+            Some(buffer) if buffer.len() == input_len => buffer,
+            _ => self.gpu.alloc_zeros_u8(input_len)?,
+        };
+        self.gpu.upload_into_u8(data, &mut input)?;
+        let frame_elements = 3 * width as usize * height as usize;
+        let mut chw = match self.frame_scratch.take() {
+            Some(buffer) if buffer.len() == frame_elements => buffer,
+            _ => self.gpu.alloc_zeros(frame_elements)?,
+        };
         self.gpu
             .hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
         let result = self.process_chw(&mut chw, height, width)?;
         let (output_width, output_height) = output_dimensions(&self.params, width, height)?;
-        let enhanced = if let Some(enhancer) = &mut self.enhancer {
+        let mut enhanced = if let Some(enhancer) = &mut self.enhancer {
             let output_elements = 3usize
                 .checked_mul(output_width as usize)
                 .and_then(|elements| elements.checked_mul(output_height as usize))
                 .ok_or_else(|| anyhow::anyhow!("enhanced output allocation overflows"))?;
-            let mut output = self.gpu.alloc_zeros(output_elements)?;
+            let mut output = match self.enhanced_scratch.take() {
+                Some(buffer) if buffer.len() == output_elements => buffer,
+                _ => self.gpu.alloc_zeros(output_elements)?,
+            };
             enhancer.enhance_into(&chw, &mut output, width, height, self.params.enhancer_blend)?;
             Some(output)
         } else {
@@ -786,10 +858,17 @@ impl LiveEngine {
             .checked_mul(output_width as usize)
             .and_then(|elements| elements.checked_mul(output_height as usize))
             .ok_or_else(|| anyhow::anyhow!("RGB output allocation overflows"))?;
-        let mut output_gpu = self.gpu.alloc_zeros_u8(output_len)?;
+        let mut output_gpu = match self.rgb_output_scratch.take() {
+            Some(buffer) if buffer.len() == output_len => buffer,
+            _ => self.gpu.alloc_zeros_u8(output_len)?,
+        };
         self.gpu
             .chw_f32_to_hwc_u8(output_chw, &mut output_gpu, output_height, output_width)?;
         let data = self.gpu.download_u8(&output_gpu)?;
+        self.rgb_input_scratch = Some(input);
+        self.frame_scratch = Some(chw);
+        self.enhanced_scratch = enhanced.take();
+        self.rgb_output_scratch = Some(output_gpu);
         Ok(ProcessedRgb {
             data,
             width: output_width,

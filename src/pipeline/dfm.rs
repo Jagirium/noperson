@@ -227,6 +227,7 @@ impl DfmContract {
         manager: &mut ModelManager,
         gpu: &GpuOps,
         workspace: &mut GpuWorkspace,
+        session_name: &str,
         morph: f32,
         rct: bool,
     ) -> anyhow::Result<()> {
@@ -270,7 +271,7 @@ impl DfmContract {
             let celeb_mask =
                 unsafe { create_cuda_tensor_f32(&memory, celeb_mask_ptr, &mask_shape)? };
 
-            let (session, binding) = manager.session_and_binding("DFM")?;
+            let (session, binding) = manager.session_and_binding(session_name)?;
             unsafe {
                 bind_input_raw(binding, "in_face:0", &input)?;
                 if self.has_morph_value {
