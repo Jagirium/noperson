@@ -16,6 +16,8 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
         "git diff-index --quiet HEAD --",
         "run --rm --interactive",
         "libssl-dev",
+        "output_uid=0",
+        "OUTPUT_UID",
         "container did not export archive",
         "container did not export checksum",
     ] {

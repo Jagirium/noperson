@@ -110,14 +110,24 @@ if test -z "$runtime"; then
 fi
 command -v "$runtime" >/dev/null || die "container runtime not found: $runtime"
 
+output_uid=$host_uid
+output_gid=$host_gid
+if test "$runtime" = podman; then
+    rootless=$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
+    if test "$rootless" = true; then
+        output_uid=0
+        output_gid=0
+    fi
+fi
+
 "$runtime" run --rm --interactive --platform "linux/${oci_arch}" \
     -e "RUST_TOOLCHAIN=$RUST_TOOLCHAIN" \
     -e "APT_SNAPSHOT=$APT_SNAPSHOT" \
     -e "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
     -e "RELEASE_COMMIT=$commit" \
     -e "RELEASE_ARTIFACT=$artifact" \
-    -e "HOST_UID=$host_uid" \
-    -e "HOST_GID=$host_gid" \
+    -e "OUTPUT_UID=$output_uid" \
+    -e "OUTPUT_GID=$output_gid" \
     -v "$source_dir:/input:ro" \
     -v "$repo_root/dist:/dist" \
     "$cuda_image" bash -Eeuo pipefail -s <<'BUILD'
@@ -181,7 +191,7 @@ tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 \
     | gzip -n -9 >"/dist/${RELEASE_ARTIFACT}.tar.gz"
 cd /dist
 sha256sum "${RELEASE_ARTIFACT}.tar.gz" >"${RELEASE_ARTIFACT}.tar.gz.sha256"
-chown "$HOST_UID:$HOST_GID" "${RELEASE_ARTIFACT}.tar.gz" "${RELEASE_ARTIFACT}.tar.gz.sha256"
+chown "$OUTPUT_UID:$OUTPUT_GID" "${RELEASE_ARTIFACT}.tar.gz" "${RELEASE_ARTIFACT}.tar.gz.sha256"
 BUILD
 
 test -f "$repo_root/dist/${artifact}.tar.gz" \
