@@ -4,15 +4,27 @@
 //! NPP libraries provide optimized image geometry (warp, resize, blur).
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
     let kernels_dir = Path::new("gpu_kernels");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let cuda_path = env::var("CUDA_HOME")
         .or_else(|_| env::var("CUDA_PATH"))
-        .unwrap_or_else(|_| "/usr/local/cuda".to_string());
-    let nvcc = format!("{cuda_path}/bin/nvcc");
+        .unwrap_or_else(|_| {
+            if target_os == "windows" {
+                r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8".to_owned()
+            } else {
+                "/usr/local/cuda".to_owned()
+            }
+        });
+    let nvcc = if target_os == "windows" {
+        PathBuf::from(&cuda_path).join("bin").join("nvcc.exe")
+    } else {
+        PathBuf::from(&cuda_path).join("bin").join("nvcc")
+    };
+    let cuda_arch = env::var("NOPERSON_CUDA_ARCH").unwrap_or_else(|_| "sm_86".to_owned());
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         let out_dir = env::var("OUT_DIR").unwrap();
@@ -43,9 +55,12 @@ fn main() {
 
     // Compile each .cu file to .ptx
     if kernels_dir.exists() {
-        for entry in std::fs::read_dir(kernels_dir).expect("Failed to read gpu_kernels/") {
-            let entry = entry.unwrap();
-            let path = entry.path();
+        let mut paths = std::fs::read_dir(kernels_dir)
+            .expect("Failed to read gpu_kernels/")
+            .map(|entry| entry.expect("invalid gpu kernel entry").path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
             if path.extension().is_some_and(|e| e == "cu") {
                 let stem = path.file_stem().unwrap().to_str().unwrap();
                 let out_dir = env::var("OUT_DIR").unwrap();
@@ -54,9 +69,8 @@ fn main() {
                 let status = Command::new(&nvcc)
                     .args([
                         "--ptx",
-                        "-arch=sm_86", // RTX 3090
+                        &format!("-arch={cuda_arch}"),
                         "-O3",
-                        "--use_fast_math",
                         "-o",
                         &ptx_out,
                         path.to_str().unwrap(),
@@ -71,8 +85,12 @@ fn main() {
     }
 
     // Link NPP libraries
-    let npp_lib_dir = format!("{cuda_path}/lib64");
-    println!("cargo:rustc-link-search=native={npp_lib_dir}");
+    let npp_lib_dir = if target_os == "windows" {
+        PathBuf::from(&cuda_path).join("lib/x64")
+    } else {
+        PathBuf::from(&cuda_path).join("lib64")
+    };
+    println!("cargo:rustc-link-search=native={}", npp_lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=nppc"); // NPP core
     println!("cargo:rustc-link-lib=dylib=nppig"); // NPP image geometry (warp, resize)
     println!("cargo:rustc-link-lib=dylib=nppif"); // NPP image filtering (gaussian blur)
@@ -86,4 +104,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=gpu_kernels/");
+    println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=CUDA_PATH");
+    println!("cargo:rerun-if-env-changed=NOPERSON_CUDA_ARCH");
 }
