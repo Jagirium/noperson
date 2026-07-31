@@ -186,26 +186,6 @@ impl GpuWorkspace {
     }
 }
 
-/// Frame-sized buffers (held separately from the scratch workspace so borrows
-/// can be split).
-pub struct FrameBuffers {
-    pub u8_in: CudaSlice<u8>,  // [H, W, 3]
-    pub u8_out: CudaSlice<u8>, // [H, W, 3]
-    pub chw: CudaSlice<f32>,   // [3, H, W]
-}
-
-impl FrameBuffers {
-    pub fn new(stream: &Arc<CudaStream>) -> Result<Self, DriverError> {
-        let frame_f32 = 3 * MAX_HEIGHT * MAX_WIDTH;
-        let frame_u8 = 3 * MAX_HEIGHT * MAX_WIDTH;
-        Ok(Self {
-            u8_in: stream.alloc_zeros::<u8>(frame_u8)?,
-            u8_out: stream.alloc_zeros::<u8>(frame_u8)?,
-            chw: stream.alloc_zeros::<f32>(frame_f32)?,
-        })
-    }
-}
-
 /// One slot in the live-frame ring. Device addresses never change, which is
 /// required for stable I/O binding and future CUDA Graph capture.
 pub struct FrameSlot {
