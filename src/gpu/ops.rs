@@ -65,6 +65,7 @@ pub struct GpuOps {
     letterbox_fn: CudaFunction,
     rotate_quadrants_fn: CudaFunction,
     affine_scale_fn: CudaFunction,
+    affine_scale_copy_fn: CudaFunction,
     chw_rgb_to_nhwc_bgr_unit_fn: CudaFunction,
     nhwc_bgr_unit_to_chw_rgb_fn: CudaFunction,
     dfm_rct_stats_fn: CudaFunction,
@@ -175,6 +176,7 @@ impl GpuOps {
             letterbox_fn: load("frame_convert", "letterbox_resize_kernel"),
             rotate_quadrants_fn: load("rotate", "rotate_quadrants_chw_kernel"),
             affine_scale_fn: load("frame_convert", "affine_scale_kernel"),
+            affine_scale_copy_fn: load("frame_convert", "affine_scale_copy_kernel"),
             chw_rgb_to_nhwc_bgr_unit_fn: load("layout_convert", "chw_rgb_to_nhwc_bgr_unit_kernel"),
             nhwc_bgr_unit_to_chw_rgb_fn: load("layout_convert", "nhwc_bgr_unit_to_chw_rgb_kernel"),
             dfm_rct_stats_fn: load("dfm_color", "dfm_rct_stats_kernel"),
@@ -301,6 +303,27 @@ impl GpuOps {
         let n = data.len() as u32;
         let mut b = self.stream.launch_builder(&self.affine_scale_fn);
         b.arg(data);
+        b.arg(&n);
+        b.arg(&mul);
+        b.arg(&add);
+        unsafe { b.launch(LaunchConfig::for_num_elems(n)) }?;
+        Ok(())
+    }
+
+    /// destination[i] = source[i] * mul + add
+    pub fn affine_scale_copy(
+        &self,
+        source: &CudaSlice<f32>,
+        destination: &mut CudaSlice<f32>,
+        len: usize,
+        mul: f32,
+        add: f32,
+    ) -> Result<(), DriverError> {
+        assert!(len <= source.len() && len <= destination.len());
+        let n = len as u32;
+        let mut b = self.stream.launch_builder(&self.affine_scale_copy_fn);
+        b.arg(source);
+        b.arg(destination);
         b.arg(&n);
         b.arg(&mul);
         b.arg(&add);

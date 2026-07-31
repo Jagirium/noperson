@@ -508,10 +508,16 @@ fn apply_restorer_gpu(
         )?;
     } else {
         if matches!(alignment, RestorerAlignmentPlan::Original) {
-            gpu.stream
-                .memcpy_dtod(&ws.face_512, &mut ws.face_512_scratch)?;
+            gpu.affine_scale_copy(
+                &ws.face_512,
+                &mut ws.face_512_scratch,
+                3 * 512 * 512,
+                1.0 / 127.5,
+                -1.0,
+            )?;
+        } else {
+            gpu.affine_scale(&mut ws.face_512_scratch, 1.0 / 127.5, -1.0)?;
         }
-        gpu.affine_scale(&mut ws.face_512_scratch, 1.0 / 127.5, -1.0)?;
         run_bound_f32(
             manager,
             &gpu.stream,

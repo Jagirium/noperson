@@ -215,3 +215,18 @@ void affine_scale_kernel(
     if (idx >= n) return;
     data[idx] = data[idx] * mul + add;
 }
+
+// Out-of-place variant used when model input staging would otherwise require
+// a full device copy followed by affine_scale_kernel.
+extern "C" __global__
+void affine_scale_copy_kernel(
+    const float* __restrict__ source,
+    float* __restrict__ destination,
+    const unsigned int n,
+    const float mul,
+    const float add
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    destination[idx] = source[idx] * mul + add;
+}
