@@ -46,3 +46,5 @@ swapped_output.png
 
 # Repository-local plans, reports, and release notes
 /TODO/
+/.codex-run
+/dist
