@@ -314,6 +314,32 @@ impl Default for ColorAdjustParams {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FaceGeometryParams {
+    pub enabled: bool,
+    pub keypoints_x: f32,
+    pub keypoints_y: f32,
+    pub keypoints_scale: f32,
+    pub face_scale: f32,
+    pub landmark_offsets_enabled: bool,
+    /// Left eye, right eye, nose, left mouth, right mouth offsets.
+    pub landmark_offsets: [[f32; 2]; 5],
+}
+
+impl Default for FaceGeometryParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keypoints_x: 0.0,
+            keypoints_y: 0.0,
+            keypoints_scale: 0.0,
+            face_scale: 0.0,
+            landmark_offsets_enabled: false,
+            landmark_offsets: [[0.0; 2]; 5],
+        }
+    }
+}
+
 /// Per-face swap parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaceSwapParams {
@@ -398,6 +424,8 @@ pub struct FaceSwapParams {
     pub auto_color: AutoColorParams,
     #[serde(default)]
     pub color_adjust: ColorAdjustParams,
+    #[serde(default)]
+    pub geometry: FaceGeometryParams,
     /// Legacy compact-GUI toggle. Kept for config compatibility.
     pub color_correction: bool,
     /// Legacy compact-GUI toggle. Kept for config compatibility.
@@ -466,6 +494,7 @@ impl Default for FaceSwapParams {
             border_blur: 10,
             auto_color: AutoColorParams::default(),
             color_adjust: ColorAdjustParams::default(),
+            geometry: FaceGeometryParams::default(),
             color_correction: false,
             histogram_matching: false,
             jpeg_compression_enabled: false,

@@ -221,6 +221,48 @@ impl EngineSpec {
             0,
             100,
         )?;
+        for (control, value, min, max) in [
+            (
+                "geometry.keypoints_x",
+                self.params.geometry.keypoints_x,
+                -100.0,
+                100.0,
+            ),
+            (
+                "geometry.keypoints_y",
+                self.params.geometry.keypoints_y,
+                -100.0,
+                100.0,
+            ),
+            (
+                "geometry.keypoints_scale",
+                self.params.geometry.keypoints_scale,
+                -100.0,
+                100.0,
+            ),
+            (
+                "geometry.face_scale",
+                self.params.geometry.face_scale,
+                -20.0,
+                20.0,
+            ),
+        ] {
+            validate_float_range(control, value, min, max)?;
+        }
+        for (index, offset) in self.params.geometry.landmark_offsets.iter().enumerate() {
+            validate_float_range(
+                &format!("geometry.landmark_offsets[{index}].x"),
+                offset[0],
+                -100.0,
+                100.0,
+            )?;
+            validate_float_range(
+                &format!("geometry.landmark_offsets[{index}].y"),
+                offset[1],
+                -100.0,
+                100.0,
+            )?;
+        }
         validate_float_range(
             "similarity_threshold",
             self.params.similarity_threshold,

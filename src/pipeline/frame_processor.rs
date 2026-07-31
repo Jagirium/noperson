@@ -126,6 +126,8 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         };
         let _ = gpu.profile_mark(2); // after_recognize
 
+        let effective_kps = adjusted_keypoints(effective_kps, params);
+
         // 2b. Latent from source embedding
         // 2c. Match Crosswap exactly: align once in canonical 512-space, then
         // resize that crop for the requested Inswapper dimension. Re-estimating
@@ -170,6 +172,25 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                         swap_size,
                         swap_size,
                     )?;
+                    if params.geometry.enabled && params.geometry.face_scale != 0.0 {
+                        let scale = 1.0 + f64::from(params.geometry.face_scale) / 100.0;
+                        let center = f64::from(swap_size) / 2.0;
+                        let transform = [
+                            [scale, 0.0, center * (1.0 - scale)],
+                            [0.0, scale, center * (1.0 - scale)],
+                        ];
+                        gpu.warp_affine_npp(
+                            &ws.face_256,
+                            &mut ws.face_512_scratch,
+                            swap_size,
+                            swap_size,
+                            swap_size,
+                            swap_size,
+                            &transform,
+                        )?;
+                        gpu.stream
+                            .memcpy_dtod(&ws.face_512_scratch, &mut ws.face_256)?;
+                    }
                     for _ in 0..iterations {
                         gpu.stream
                             .memcpy_dtod(&ws.face_256, &mut ws.face_512_scratch)?;
@@ -385,6 +406,23 @@ fn crosswap_similarity(cosine: f32) -> f32 {
     (1.0 + cosine) * 0.5
 }
 
+fn adjusted_keypoints(mut keypoints: [[f32; 2]; 5], params: &FaceSwapParams) -> [[f32; 2]; 5] {
+    if params.geometry.enabled {
+        let scale = 1.0 + params.geometry.keypoints_scale / 100.0;
+        for point in &mut keypoints {
+            point[0] = (point[0] + params.geometry.keypoints_x - 255.0) * scale + 255.0;
+            point[1] = (point[1] + params.geometry.keypoints_y - 255.0) * scale + 255.0;
+        }
+    }
+    if params.geometry.landmark_offsets_enabled {
+        for (point, offset) in keypoints.iter_mut().zip(params.geometry.landmark_offsets) {
+            point[0] += offset[0];
+            point[1] += offset[1];
+        }
+    }
+    keypoints
+}
+
 fn restorer_contract(size: RestorerSize) -> anyhow::Result<(&'static str, usize)> {
     match size {
         RestorerSize::Gpen256 => Ok(("GPENBFR256", 256)),
@@ -420,9 +458,10 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 #[cfg(test)]
 mod tests {
     use super::{
-        SourceFace, assignment_matches, crosswap_similarity, restorer_contract,
+        SourceFace, adjusted_keypoints, assignment_matches, crosswap_similarity, restorer_contract,
         scaled_arcface_template, strength_plan,
     };
+    use crate::config::parameters::FaceSwapParams;
     use crate::config::parameters::RestorerSize;
 
     #[test]
@@ -484,5 +523,22 @@ mod tests {
             threshold: 1.0,
         };
         assert!(assignment_matches(&swap_all, &different));
+    }
+
+    #[test]
+    fn keypoint_adjustments_follow_crossswap_order_and_fixed_center() {
+        let mut params = FaceSwapParams::default();
+        params.geometry.enabled = true;
+        params.geometry.keypoints_x = 10.0;
+        params.geometry.keypoints_y = -5.0;
+        params.geometry.keypoints_scale = 10.0;
+        params.geometry.landmark_offsets_enabled = true;
+        params.geometry.landmark_offsets[0] = [3.0, -2.0];
+        let input = [[100.0, 200.0]; 5];
+        let output = adjusted_keypoints(input, &params);
+        assert!((output[0][0] - 98.5).abs() < 1e-5);
+        assert!((output[0][1] - 187.0).abs() < 1e-5);
+        assert!((output[1][0] - 95.5).abs() < 1e-5);
+        assert!((output[1][1] - 189.0).abs() < 1e-5);
     }
 }
