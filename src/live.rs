@@ -122,6 +122,20 @@ pub fn build_live_spec(
             params.landmark_mode.filename(),
         )?;
     }
+    if (params.restorer_enabled
+        && params.restorer_alignment == crate::config::parameters::RestorerAlignment::Reference)
+        || (params.restorer2_enabled
+            && params.restorer2_alignment
+                == crate::config::parameters::RestorerAlignment::Reference)
+    {
+        insert_artifact(
+            &mut models,
+            models_dir,
+            ModelRole::RestorerLandmark,
+            "FaceLandmark5",
+            "res50.onnx",
+        )?;
+    }
     match params.swapper_model {
         SwapperModel::Inswapper128 => {
             for (role, logical_name, filename) in [
@@ -163,6 +177,20 @@ pub fn build_live_spec(
             RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
         };
         insert_artifact(&mut models, models_dir, ModelRole::Restorer, name, filename)?;
+    }
+    if params.restorer2_enabled {
+        let (name, filename) = match params.restorer2_size {
+            RestorerSize::Gpen256 => ("GPENBFR256", "GPEN-BFR-256.onnx"),
+            RestorerSize::Gpen512 => ("GPENBFR512", "GPEN-BFR-512.onnx"),
+            RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
+        };
+        insert_artifact(
+            &mut models,
+            models_dir,
+            ModelRole::Restorer2,
+            name,
+            filename,
+        )?;
     }
     if params.enhancer_enabled {
         let model_name = params.enhancer_model.registry_name();
@@ -273,6 +301,17 @@ fn restorer_session_name(params: &FaceSwapParams) -> anyhow::Result<Option<&'sta
     match params.restorer_size {
         RestorerSize::Gpen256 => Ok(Some("GPENBFR256")),
         RestorerSize::Gpen512 => Ok(Some("GPENBFR512")),
+        RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
+    }
+}
+
+fn restorer2_session_name(params: &FaceSwapParams) -> anyhow::Result<Option<&'static str>> {
+    if !params.restorer2_enabled {
+        return Ok(None);
+    }
+    match params.restorer2_size {
+        RestorerSize::Gpen256 => Ok(Some("GPENBFR256_2")),
+        RestorerSize::Gpen512 => Ok(Some("GPENBFR512_2")),
         RestorerSize::Gpen1024 => anyhow::bail!("GPEN-1024 is excluded from the runtime"),
     }
 }
@@ -414,6 +453,12 @@ impl LiveEngine {
             )?;
             ensure_build_active(cancellation)?;
         }
+        if let Some(artifact) = spec.models.get(&ModelRole::RestorerLandmark)
+            && manager.get("FaceLandmark5").is_none()
+        {
+            manager.load("FaceLandmark5", &artifact.filename)?;
+            ensure_build_active(cancellation)?;
+        }
         let dfm = match spec.params.swapper_model {
             SwapperModel::Inswapper128 => {
                 manager.load(
@@ -445,6 +490,7 @@ impl LiveEngine {
 
         for (role, session_name) in [
             (ModelRole::Restorer, restorer_session_name(&spec.params)?),
+            (ModelRole::Restorer2, restorer2_session_name(&spec.params)?),
             (ModelRole::Occluder, Some("Occluder")),
             (ModelRole::Xseg, Some("XSeg")),
             (ModelRole::FaceParser, Some("FaceParser")),

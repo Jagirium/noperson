@@ -252,9 +252,14 @@ fn dfm_defaults_match_crossswap_controls() {
 
 #[test]
 fn restorer_defaults_preserve_crossswap_quality() {
-    use noperson::config::parameters::{RestorerMode, RestorerSize};
+    use noperson::config::parameters::{RestorerAlignment, RestorerMode, RestorerSize};
 
     let params = FaceSwapParams::default();
     assert!(matches!(params.restorer_size, RestorerSize::Gpen256));
     assert_eq!(params.restorer_mode, RestorerMode::Quality);
+    assert_eq!(params.restorer_alignment, RestorerAlignment::Original);
+    assert!(!params.restorer2_enabled);
+    assert!(matches!(params.restorer2_size, RestorerSize::Gpen256));
+    assert_eq!(params.restorer2_mode, RestorerMode::Quality);
+    assert_eq!(params.restorer2_alignment, RestorerAlignment::Original);
 }

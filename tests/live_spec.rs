@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use noperson::config::parameters::{EnhancerModel, FaceSwapParams, LandmarkMode, SwapperModel};
+use noperson::config::parameters::{
+    EnhancerModel, FaceSwapParams, LandmarkMode, RestorerAlignment, SwapperModel,
+};
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
 use noperson::engine::ModelRole;
 use noperson::live::build_live_spec;
@@ -97,6 +99,91 @@ fn live_spec_addresses_the_enabled_frame_enhancer() {
     assert_eq!(
         spec.models[&ModelRole::Enhancer].filename,
         "4x-UltraMix_Smooth.fp16.onnx"
+    );
+    spec.validate().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn live_spec_addresses_both_restorer_sessions_independently() {
+    let root = fixture_dir();
+    let models = root.join("models");
+    fs::create_dir_all(&models).unwrap();
+    for (name, content) in [
+        ("yoloface_8n.onnx", b"detector".as_slice()),
+        ("w600k_r50.onnx", b"recognizer".as_slice()),
+        ("inswapper_128.fp16.onnx", b"swapper".as_slice()),
+        ("emap.bin", b"emap".as_slice()),
+        ("GPEN-BFR-256.onnx", b"restorer".as_slice()),
+    ] {
+        fs::write(models.join(name), content).unwrap();
+    }
+    let identity = root.join("identity.jpg");
+    fs::write(&identity, b"identity").unwrap();
+    let params = FaceSwapParams {
+        restorer_enabled: true,
+        restorer2_enabled: true,
+        ..FaceSwapParams::default()
+    };
+
+    let spec = build_live_spec(
+        &models,
+        &identity,
+        params,
+        ExecutionProvider::Cuda,
+        DetectorModel::YoloFace8n,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        spec.models[&ModelRole::Restorer].filename,
+        "GPEN-BFR-256.onnx"
+    );
+    assert_eq!(
+        spec.models[&ModelRole::Restorer2].filename,
+        "GPEN-BFR-256.onnx"
+    );
+    spec.validate().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn live_spec_addresses_reference_alignment_landmarks() {
+    let root = fixture_dir();
+    let models = root.join("models");
+    fs::create_dir_all(&models).unwrap();
+    for (name, content) in [
+        ("yoloface_8n.onnx", b"detector".as_slice()),
+        ("w600k_r50.onnx", b"recognizer".as_slice()),
+        ("inswapper_128.fp16.onnx", b"swapper".as_slice()),
+        ("emap.bin", b"emap".as_slice()),
+        ("GPEN-BFR-256.onnx", b"restorer".as_slice()),
+        ("res50.onnx", b"landmarks".as_slice()),
+    ] {
+        fs::write(models.join(name), content).unwrap();
+    }
+    let identity = root.join("identity.jpg");
+    fs::write(&identity, b"identity").unwrap();
+    let params = FaceSwapParams {
+        restorer_enabled: true,
+        restorer_alignment: RestorerAlignment::Reference,
+        ..FaceSwapParams::default()
+    };
+
+    let spec = build_live_spec(
+        &models,
+        &identity,
+        params,
+        ExecutionProvider::Cuda,
+        DetectorModel::YoloFace8n,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(
+        spec.models[&ModelRole::RestorerLandmark].filename,
+        "res50.onnx"
     );
     spec.validate().unwrap();
     fs::remove_dir_all(root).unwrap();

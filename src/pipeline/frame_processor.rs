@@ -5,7 +5,7 @@
 
 use cudarc::driver::CudaSlice;
 
-use crate::config::parameters::{FaceSwapParams, RestorerMode, RestorerSize, SwapperModel};
+use crate::config::parameters::{FaceSwapParams, RestorerAlignment, RestorerSize, SwapperModel};
 use crate::gpu::ops::GpuOps;
 use crate::gpu::unified;
 use crate::math::affine;
@@ -246,70 +246,49 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         // 2f. Optional GPEN restoration. The original swapped face remains in
         // face_512; inference input/output and alpha blending stay on GPU.
         if params.restorer_enabled {
-            let values = 3 * pipeline_size as usize * pipeline_size as usize;
-            let (restorer_name, restorer_size) = restorer_contract(params.restorer_size)?;
-            // Refresh the temporally stable GPEN-512 output every second frame
-            // and reuse the device-resident result in between.
-            // A single cache is safe only for the common one-face live path.
-            // With multiple faces refresh each aligned crop to avoid leaking
-            // one person's expression/pose into the next face.
-            let refresh = params.restorer_mode == RestorerMode::Quality
-                || faces.len() != 1
-                || !ws.restorer_cache_valid
-                || ws.restorer_frame.is_multiple_of(2);
-            if refresh {
-                let session = manager
-                    .get_mut(restorer_name)
-                    .ok_or_else(|| anyhow::anyhow!("{restorer_name} is not loaded"))?;
-                if restorer_size == 256 {
-                    gpu.resize_npp(
-                        &ws.face_512,
-                        &mut ws.restorer_256_input,
-                        pipeline_size,
-                        pipeline_size,
-                        256,
-                        256,
-                    )?;
-                    gpu.affine_scale(&mut ws.restorer_256_input, 1.0 / 127.5, -1.0)?;
-                    unified::run_gpen(
-                        session,
-                        &gpu.stream,
-                        &mut ws.restorer_256_input,
-                        &mut ws.restorer_256_output,
-                        256,
-                    )?;
-                    gpu.affine_scale(&mut ws.restorer_256_output, 127.5, 127.5)?;
-                    gpu.resize_npp(
-                        &ws.restorer_256_output,
-                        &mut ws.restorer_cache,
-                        256,
-                        256,
-                        pipeline_size,
-                        pipeline_size,
-                    )?;
-                } else {
-                    gpu.stream
-                        .memcpy_dtod(&ws.face_512, &mut ws.face_512_scratch)?;
-                    // GPEN expects [-1, 1] and returns [-1, 1].
-                    gpu.affine_scale(&mut ws.face_512_scratch, 1.0 / 127.5, -1.0)?;
-                    unified::run_gpen(
-                        session,
-                        &gpu.stream,
-                        &mut ws.face_512_scratch,
-                        &mut ws.restorer_cache,
-                        restorer_size,
-                    )?;
-                    gpu.affine_scale(&mut ws.restorer_cache, 127.5, 127.5)?;
-                }
-                ws.restorer_cache_valid = true;
+            let (session_name, size) = restorer_contract(params.restorer_size)?;
+            if let Some(alignment) = restorer_alignment_plan(
+                gpu,
+                manager,
+                ws,
+                params.restorer_alignment,
+                params.detector_score,
+            )? {
+                apply_restorer_gpu(
+                    gpu,
+                    manager,
+                    ws,
+                    session_name,
+                    size,
+                    params.restorer_alpha,
+                    alignment,
+                )?;
             }
-            gpu.scalar_blend_inplace(
-                &ws.restorer_cache,
-                &mut ws.face_512,
-                values,
-                params.restorer_alpha,
-            )?;
-            ws.restorer_frame += 1;
+        }
+        if params.restorer2_enabled {
+            let (_, size) = restorer_contract(params.restorer2_size)?;
+            let session_name = match params.restorer2_size {
+                RestorerSize::Gpen256 => "GPENBFR256_2",
+                RestorerSize::Gpen512 => "GPENBFR512_2",
+                RestorerSize::Gpen1024 => unreachable!("rejected by restorer_contract"),
+            };
+            if let Some(alignment) = restorer_alignment_plan(
+                gpu,
+                manager,
+                ws,
+                params.restorer2_alignment,
+                params.detector_score,
+            )? {
+                apply_restorer_gpu(
+                    gpu,
+                    manager,
+                    ws,
+                    session_name,
+                    size,
+                    params.restorer2_alpha,
+                    alignment,
+                )?;
+            }
         }
         let _ = gpu.profile_mark(5); // after_resize_512
 
@@ -336,7 +315,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             params.border_right.min(100),
             blur_ks,
             blur_sigma,
-            params.restorer_enabled,
+            params.restorer_enabled || params.restorer2_enabled,
             learned_mask,
             params.overall_mask_blur,
         )?;
@@ -423,6 +402,124 @@ fn adjusted_keypoints(mut keypoints: [[f32; 2]; 5], params: &FaceSwapParams) -> 
     keypoints
 }
 
+#[derive(Clone, Copy)]
+enum RestorerAlignmentPlan {
+    Original,
+    Aligned([[f64; 3]; 2]),
+}
+
+fn blend_restorer_affine() -> [[f64; 3]; 2] {
+    affine::estimate_face_affine(
+        &scaled_arcface_template(512),
+        &crate::math::constants::FFHQ_KPS,
+    )
+}
+
+fn restorer_alignment_plan(
+    gpu: &GpuOps,
+    manager: &mut ModelManager,
+    ws: &mut GpuWorkspace,
+    alignment: RestorerAlignment,
+    score_threshold: f32,
+) -> anyhow::Result<Option<RestorerAlignmentPlan>> {
+    Ok(match alignment {
+        RestorerAlignment::Original => Some(RestorerAlignmentPlan::Original),
+        RestorerAlignment::Blend => Some(RestorerAlignmentPlan::Aligned(blend_restorer_affine())),
+        RestorerAlignment::Reference => LandmarkModel::Points5
+            .detect_restorer_reference_gpu(manager, gpu, ws, score_threshold)?
+            .map(|result| {
+                RestorerAlignmentPlan::Aligned(affine::estimate_face_affine(
+                    &result.five,
+                    &crate::math::constants::FFHQ_KPS,
+                ))
+            }),
+    })
+}
+
+fn apply_restorer_gpu(
+    gpu: &GpuOps,
+    manager: &mut ModelManager,
+    ws: &mut GpuWorkspace,
+    session_name: &str,
+    size: usize,
+    alpha: f32,
+    alignment: RestorerAlignmentPlan,
+) -> anyhow::Result<()> {
+    let session = manager
+        .get_mut(session_name)
+        .ok_or_else(|| anyhow::anyhow!("{session_name} is not loaded"))?;
+
+    if let RestorerAlignmentPlan::Aligned(matrix) = alignment {
+        gpu.warp_affine_npp(
+            &ws.face_512,
+            &mut ws.face_512_scratch,
+            512,
+            512,
+            512,
+            512,
+            &matrix,
+        )?;
+    }
+
+    if size == 256 {
+        let source = match alignment {
+            RestorerAlignmentPlan::Original => &ws.face_512,
+            RestorerAlignmentPlan::Aligned(_) => &ws.face_512_scratch,
+        };
+        gpu.resize_npp(source, &mut ws.restorer_256_input, 512, 512, 256, 256)?;
+        gpu.affine_scale(&mut ws.restorer_256_input, 1.0 / 127.5, -1.0)?;
+        unified::run_gpen(
+            session,
+            &gpu.stream,
+            &mut ws.restorer_256_input,
+            &mut ws.restorer_256_output,
+            256,
+        )?;
+        gpu.affine_scale(&mut ws.restorer_256_output, 127.5, 127.5)?;
+        gpu.resize_npp(
+            &ws.restorer_256_output,
+            &mut ws.restorer_cache,
+            256,
+            256,
+            512,
+            512,
+        )?;
+    } else {
+        if matches!(alignment, RestorerAlignmentPlan::Original) {
+            gpu.stream
+                .memcpy_dtod(&ws.face_512, &mut ws.face_512_scratch)?;
+        }
+        gpu.affine_scale(&mut ws.face_512_scratch, 1.0 / 127.5, -1.0)?;
+        unified::run_gpen(
+            session,
+            &gpu.stream,
+            &mut ws.face_512_scratch,
+            &mut ws.restorer_cache,
+            size,
+        )?;
+        gpu.affine_scale(&mut ws.restorer_cache, 127.5, 127.5)?;
+    }
+
+    match alignment {
+        RestorerAlignmentPlan::Original => {
+            gpu.scalar_blend_inplace(&ws.restorer_cache, &mut ws.face_512, 3 * 512 * 512, alpha)?
+        }
+        RestorerAlignmentPlan::Aligned(matrix) => {
+            gpu.warp_affine_npp(
+                &ws.restorer_cache,
+                &mut ws.face_512_scratch,
+                512,
+                512,
+                512,
+                512,
+                &affine::invert_2x3(&matrix),
+            )?;
+            gpu.scalar_blend_inplace(&ws.face_512_scratch, &mut ws.face_512, 3 * 512 * 512, alpha)?;
+        }
+    }
+    Ok(())
+}
+
 fn restorer_contract(size: RestorerSize) -> anyhow::Result<(&'static str, usize)> {
     match size {
         RestorerSize::Gpen256 => Ok(("GPENBFR256", 256)),
@@ -458,8 +555,8 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 #[cfg(test)]
 mod tests {
     use super::{
-        SourceFace, adjusted_keypoints, assignment_matches, crosswap_similarity, restorer_contract,
-        scaled_arcface_template, strength_plan,
+        SourceFace, adjusted_keypoints, assignment_matches, blend_restorer_affine,
+        crosswap_similarity, restorer_contract, scaled_arcface_template, strength_plan,
     };
     use crate::config::parameters::FaceSwapParams;
     use crate::config::parameters::RestorerSize;
@@ -475,6 +572,25 @@ mod tests {
             ("GPENBFR512", 512)
         );
         assert!(restorer_contract(RestorerSize::Gpen1024).is_err());
+    }
+
+    #[test]
+    fn blend_restorer_alignment_matches_crossswap_skimage_oracle() {
+        let actual = blend_restorer_affine();
+        let expected = [
+            [0.850048963, -0.000129492873, 38.9094548],
+            [0.000129492873, 0.850048963, 62.8344332],
+        ];
+        for row in 0..2 {
+            for column in 0..3 {
+                assert!(
+                    (actual[row][column] - expected[row][column]).abs() < 5e-5,
+                    "matrix[{row}][{column}]={} expected {}",
+                    actual[row][column],
+                    expected[row][column]
+                );
+            }
+        }
     }
 
     #[test]

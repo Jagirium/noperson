@@ -18,6 +18,8 @@ pub enum ModelRole {
     Swapper,
     Emap,
     Restorer,
+    Restorer2,
+    RestorerLandmark,
     Occluder,
     Xseg,
     FaceParser,
@@ -34,6 +36,8 @@ impl ModelRole {
             Self::Swapper => "swapper",
             Self::Emap => "emap",
             Self::Restorer => "restorer",
+            Self::Restorer2 => "restorer-2",
+            Self::RestorerLandmark => "restorer-landmark",
             Self::Occluder => "occluder",
             Self::Xseg => "xseg",
             Self::FaceParser => "face-parser",
@@ -135,10 +139,21 @@ impl EngineSpec {
                 });
             }
         }
+        if (self.params.restorer_enabled
+            && self.params.restorer_alignment
+                == crate::config::parameters::RestorerAlignment::Reference)
+            || (self.params.restorer2_enabled
+                && self.params.restorer2_alignment
+                    == crate::config::parameters::RestorerAlignment::Reference)
+        {
+            self.require(ModelRole::RestorerLandmark)?;
+        }
 
         validate_sha256("identity_sha256", &self.identity_sha256)?;
 
-        if matches!(self.params.restorer_size, RestorerSize::Gpen1024) {
+        if matches!(self.params.restorer_size, RestorerSize::Gpen1024)
+            || matches!(self.params.restorer2_size, RestorerSize::Gpen1024)
+        {
             return Err(EngineSpecError::UnsupportedRestorer("GPEN-1024".to_owned()));
         }
         if !self.params.enhancer_blend.is_finite()
@@ -154,6 +169,8 @@ impl EngineSpec {
         validate_float_range("landmark_score", self.params.landmark_score, 0.01, 1.0)?;
         validate_float_range("strength", self.params.strength, 0.0, 5.0)?;
         validate_float_range("auto_color.blend", self.params.auto_color.blend, 0.0, 1.0)?;
+        validate_float_range("restorer_alpha", self.params.restorer_alpha, 0.0, 1.0)?;
+        validate_float_range("restorer2_alpha", self.params.restorer2_alpha, 0.0, 1.0)?;
         for (control, value, min, max) in [
             (
                 "color_adjust.red",
@@ -450,13 +467,14 @@ impl EngineSpec {
                 &artifact.sha256,
             )?;
 
-            if *role == ModelRole::Restorer {
+            if matches!(role, ModelRole::Restorer | ModelRole::Restorer2) {
                 validate_restorer(&artifact.logical_name)?;
             }
         }
 
         for (enabled, role) in [
             (self.params.restorer_enabled, ModelRole::Restorer),
+            (self.params.restorer2_enabled, ModelRole::Restorer2),
             (self.params.occluder_enabled, ModelRole::Occluder),
             (self.params.xseg_enabled, ModelRole::Xseg),
             (self.params.faceparser_enabled, ModelRole::FaceParser),

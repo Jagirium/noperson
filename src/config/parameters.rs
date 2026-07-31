@@ -249,6 +249,18 @@ pub enum RestorerMode {
     Realtime,
 }
 
+/// Landmark source used to align a face before restoration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RestorerAlignment {
+    /// Restore the swap crop without a second alignment pass.
+    #[default]
+    Original,
+    /// Re-align the canonical ArcFace points to the FFHQ restorer template.
+    Blend,
+    /// Detect fresh five-point landmarks on the swapped crop, then align them.
+    Reference,
+}
+
 /// CrossSwap auto-color algorithm.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AutoColorMode {
@@ -376,6 +388,18 @@ pub struct FaceSwapParams {
     pub restorer_alpha: f32,
     #[serde(default)]
     pub restorer_mode: RestorerMode,
+    #[serde(default)]
+    pub restorer_alignment: RestorerAlignment,
+    #[serde(default)]
+    pub restorer2_enabled: bool,
+    #[serde(default = "default_restorer_size")]
+    pub restorer2_size: RestorerSize,
+    #[serde(default = "default_restorer_alpha")]
+    pub restorer2_alpha: f32,
+    #[serde(default)]
+    pub restorer2_mode: RestorerMode,
+    #[serde(default)]
+    pub restorer2_alignment: RestorerAlignment,
 
     // Full-frame enhancement (photo/video; disabled in realtime by CrossSwap)
     #[serde(default)]
@@ -469,6 +493,12 @@ impl Default for FaceSwapParams {
             restorer_size: RestorerSize::Gpen256,
             restorer_alpha: 1.0,
             restorer_mode: RestorerMode::Quality,
+            restorer_alignment: RestorerAlignment::Original,
+            restorer2_enabled: false,
+            restorer2_size: default_restorer_size(),
+            restorer2_alpha: default_restorer_alpha(),
+            restorer2_mode: RestorerMode::Quality,
+            restorer2_alignment: RestorerAlignment::Original,
             enhancer_enabled: false,
             enhancer_model: EnhancerModel::default(),
             enhancer_blend: default_enhancer_blend(),
@@ -509,6 +539,14 @@ impl Default for FaceSwapParams {
 }
 
 const fn default_enhancer_blend() -> f32 {
+    1.0
+}
+
+const fn default_restorer_size() -> RestorerSize {
+    RestorerSize::Gpen256
+}
+
+const fn default_restorer_alpha() -> f32 {
     1.0
 }
 

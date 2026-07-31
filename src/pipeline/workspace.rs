@@ -42,10 +42,8 @@ pub struct GpuWorkspace {
     pub face_512_scratch: CudaSlice<f32>,  // Scratch for upscaled swap [3, 512, 512]
     pub restorer_256_input: CudaSlice<f32>,
     pub restorer_256_output: CudaSlice<f32>,
-    /// Last GPEN output in aligned 512-space. Reused between inference keyframes.
+    /// Current GPEN output in aligned 512-space.
     pub restorer_cache: CudaSlice<f32>,
-    pub restorer_cache_valid: bool,
-    pub restorer_frame: u64,
 
     // ArcFace output: [1, 512] — pre-allocated for IoBinding path
     pub arcface_embedding: CudaSlice<f32>, // [1, 512]
@@ -150,8 +148,6 @@ impl GpuWorkspace {
             restorer_256_input: stream.alloc_zeros::<f32>(3 * 256 * 256)?,
             restorer_256_output: stream.alloc_zeros::<f32>(3 * 256 * 256)?,
             restorer_cache: stream.alloc_zeros::<f32>(face_512_size)?,
-            restorer_cache_valid: false,
-            restorer_frame: 0,
 
             arcface_embedding: stream.alloc_zeros::<f32>(512)?,
 

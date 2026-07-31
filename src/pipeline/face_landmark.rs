@@ -316,6 +316,39 @@ impl LandmarkModel {
         }
         Ok(Some(result))
     }
+
+    /// Run CrossSwap's restorer `Reference` five-point detector against the
+    /// current 512x512 swapped crop held by the persistent workspace.
+    pub fn detect_restorer_reference_gpu(
+        self,
+        manager: &mut ModelManager,
+        gpu: &GpuOps,
+        workspace: &mut GpuWorkspace,
+        score_threshold: f32,
+    ) -> anyhow::Result<Option<LandmarkResult>> {
+        debug_assert_eq!(self, Self::Points5);
+        let crop_affine = self.bbox_affine([0.0, 0.0, 512.0, 512.0])?;
+        gpu.warp_affine_npp(
+            &workspace.face_512,
+            &mut workspace.landmark_input,
+            512,
+            512,
+            512,
+            512,
+            &crop_affine,
+        )?;
+        gpu.landmark_normalize(&mut workspace.landmark_input, 512 * 512, 0)?;
+        run_landmark_session(self, manager, gpu, workspace)?;
+        let inverse = affine::invert_2x3(&crop_affine);
+        let result = decode_landmarks(self, workspace, &inverse)?;
+        if !result.scores.is_empty()
+            && result.scores.iter().copied().sum::<f32>() / (result.scores.len() as f32)
+                < score_threshold
+        {
+            return Ok(None);
+        }
+        Ok(Some(result))
+    }
 }
 
 fn landmark_points_affine(

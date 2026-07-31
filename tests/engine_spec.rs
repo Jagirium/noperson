@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use noperson::config::parameters::{EnhancerModel, FaceSwapParams, RestorerSize, SwapperModel};
+use noperson::config::parameters::{
+    EnhancerModel, FaceSwapParams, RestorerAlignment, RestorerSize, SwapperModel,
+};
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
 use noperson::engine::{EngineSpec, EngineSpecError, ModelArtifact, ModelRole};
 
@@ -114,6 +116,45 @@ fn enabled_optional_stage_requires_its_artifact() {
         spec.validate(),
         Err(EngineSpecError::MissingModel(ModelRole::Restorer))
     );
+}
+
+#[test]
+fn enabled_second_restorer_requires_an_independent_artifact() {
+    let mut spec = valid_spec(false);
+    spec.params.restorer2_enabled = true;
+
+    assert_eq!(
+        spec.validate(),
+        Err(EngineSpecError::MissingModel(ModelRole::Restorer2))
+    );
+
+    spec.models.insert(
+        ModelRole::Restorer2,
+        artifact("GPENBFR256", "GPEN-BFR-256.onnx", SHA_A),
+    );
+    spec.validate().expect("valid second-restorer generation");
+}
+
+#[test]
+fn reference_restorer_alignment_requires_five_point_landmarks() {
+    let mut spec = valid_spec(false);
+    spec.params.restorer_enabled = true;
+    spec.params.restorer_alignment = RestorerAlignment::Reference;
+    spec.models.insert(
+        ModelRole::Restorer,
+        artifact("GPENBFR256", "GPEN-BFR-256.onnx", SHA_A),
+    );
+
+    assert_eq!(
+        spec.validate(),
+        Err(EngineSpecError::MissingModel(ModelRole::RestorerLandmark))
+    );
+
+    spec.models.insert(
+        ModelRole::RestorerLandmark,
+        artifact("FaceLandmark5", "res50.onnx", SHA_B),
+    );
+    spec.validate().expect("valid reference-aligned restorer");
 }
 
 #[test]
