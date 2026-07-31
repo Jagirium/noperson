@@ -3,6 +3,7 @@
 //! Each stage uses ort (ONNX Runtime) + cudarc (GPU compute).
 //! Pipeline orchestration: detect → recognize → swap → mask → paste-back.
 
+pub mod color;
 pub mod dfm;
 pub mod face_detector;
 pub mod face_landmark;

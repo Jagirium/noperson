@@ -286,6 +286,21 @@ fn strength_and_similarity_are_generation_validated() {
 }
 
 #[test]
+fn auto_color_blend_is_generation_validated() {
+    let mut spec = valid_spec(false);
+    spec.params.auto_color.enabled = true;
+    spec.params.auto_color.blend = 1.01;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidFloatControl { control, .. })
+            if control == "auto_color.blend"
+    ));
+
+    spec.params.auto_color.blend = 0.8;
+    spec.validate().expect("valid auto-color generation");
+}
+
+#[test]
 fn face_parser_controls_are_validated_before_gpu_allocation() {
     let mut spec = valid_spec(false);
     spec.params.faceparser.background = 51;

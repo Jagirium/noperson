@@ -127,3 +127,78 @@ void dfm_rct_apply_kernel(
         source[pixel * 3 + channel] = rgb[channel];
     }
 }
+
+extern "C" __global__
+void auto_color_dfl_stats_kernel(
+    const float* __restrict__ original_chw,
+    const float* __restrict__ swapped_chw,
+    const float* __restrict__ mask,
+    float* __restrict__ stats,
+    const unsigned int pixels,
+    const unsigned int use_mask
+) {
+    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels || (use_mask && mask[pixel] < 0.2f)) return;
+
+    float original_rgb[3];
+    float swapped_rgb[3];
+    for (int channel = 0; channel < 3; ++channel) {
+        original_rgb[channel] = original_chw[channel * pixels + pixel] / 255.0f;
+        swapped_rgb[channel] = swapped_chw[channel * pixels + pixel] / 255.0f;
+    }
+    float original_lab[3];
+    float swapped_lab[3];
+    rgb_to_lab(original_rgb, original_lab);
+    rgb_to_lab(swapped_rgb, swapped_lab);
+    for (int channel = 0; channel < 3; ++channel) {
+        atomicAdd(&stats[channel], original_lab[channel]);
+        atomicAdd(&stats[3 + channel], original_lab[channel] * original_lab[channel]);
+        atomicAdd(&stats[6 + channel], swapped_lab[channel]);
+        atomicAdd(&stats[9 + channel], swapped_lab[channel] * swapped_lab[channel]);
+    }
+    atomicAdd(&stats[12], 1.0f);
+}
+
+extern "C" __global__
+void auto_color_dfl_apply_kernel(
+    float* __restrict__ swapped_chw,
+    const float* __restrict__ stats,
+    const unsigned int pixels,
+    const float blend
+) {
+    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels || stats[12] < 1.0f) return;
+
+    float target_rgb[3];
+    for (int channel = 0; channel < 3; ++channel) {
+        target_rgb[channel] = swapped_chw[channel * pixels + pixel] / 255.0f;
+    }
+    float lab[3];
+    rgb_to_lab(target_rgb, lab);
+    float count = stats[12];
+    float correction = fmaxf(count - 1.0f, 1.0f);
+    for (int channel = 0; channel < 3; ++channel) {
+        float original_mean = stats[channel] / count;
+        float swapped_mean = stats[6 + channel] / count;
+        float original_var = fmaxf(
+            (stats[3 + channel] - count * original_mean * original_mean) / correction,
+            0.0f
+        );
+        float swapped_var = fmaxf(
+            (stats[9 + channel] - count * swapped_mean * swapped_mean) / correction,
+            0.0f
+        );
+        lab[channel] = (lab[channel] - swapped_mean)
+            * ((sqrtf(original_var) + 1e-6f) / (sqrtf(swapped_var) + 1e-6f))
+            + original_mean;
+    }
+    lab[0] = fminf(fmaxf(lab[0], 0.0f), 100.0f);
+    lab[1] = fminf(fmaxf(lab[1], -127.0f), 127.0f);
+    lab[2] = fminf(fmaxf(lab[2], -127.0f), 127.0f);
+    float matched_rgb[3];
+    lab_to_rgb(lab, matched_rgb);
+    for (int channel = 0; channel < 3; ++channel) {
+        float value = ((1.0f - blend) * target_rgb[channel] + blend * matched_rgb[channel]) * 255.0f;
+        swapped_chw[channel * pixels + pixel] = fminf(fmaxf(value, 0.0f), 255.0f);
+    }
+}

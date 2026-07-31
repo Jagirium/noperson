@@ -249,6 +249,38 @@ pub enum RestorerMode {
     Realtime,
 }
 
+/// CrossSwap auto-color algorithm.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoColorMode {
+    /// Global empirical-CDF histogram matching (CrossSwap `Test`).
+    #[default]
+    Histogram,
+    /// Histogram matching blended through the face mask (`Test_Mask`).
+    HistogramMasked,
+    /// Global LAB mean/std transfer (`DFL_Test`).
+    Dfl,
+    /// LAB mean/std transfer using masked statistics (`DFL_Orig`).
+    DflMasked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoColorParams {
+    pub enabled: bool,
+    pub mode: AutoColorMode,
+    /// CrossSwap's AutoColor blend slider normalized to 0..1.
+    pub blend: f32,
+}
+
+impl Default for AutoColorParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: AutoColorMode::Histogram,
+            blend: 0.8,
+        }
+    }
+}
+
 /// Per-face swap parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FaceSwapParams {
@@ -329,7 +361,11 @@ pub struct FaceSwapParams {
     pub border_blur: u32,
 
     // Color correction
+    #[serde(default)]
+    pub auto_color: AutoColorParams,
+    /// Legacy compact-GUI toggle. Kept for config compatibility.
     pub color_correction: bool,
+    /// Legacy compact-GUI toggle. Kept for config compatibility.
     pub histogram_matching: bool,
 
     // Strength
@@ -381,6 +417,7 @@ impl Default for FaceSwapParams {
             border_left: 10,
             border_right: 10,
             border_blur: 10,
+            auto_color: AutoColorParams::default(),
             color_correction: false,
             histogram_matching: false,
             strength: 1.0,

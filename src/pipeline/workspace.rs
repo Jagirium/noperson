@@ -81,6 +81,7 @@ pub struct GpuWorkspace {
     pub semantic_mouth_valid: CudaSlice<u32>,
     pub dfm_morph: CudaSlice<f32>,
     pub dfm_rct_stats: CudaSlice<f32>,
+    pub auto_color_stats: CudaSlice<f32>,
     pub mask_512: CudaSlice<f32>, // [512, 512] — final face mask
 
     // Blur kernel weights (uploaded once per param change)
@@ -92,11 +93,14 @@ pub struct GpuWorkspace {
     pub emap: CudaSlice<f32>, // [512*512]
 
     // Pre-allocated host staging buffers (reused to avoid per-frame Vec alloc)
-    pub host_det_input: Vec<f32>,  // [3*640*640]
-    pub host_det_output: Vec<f32>, // [1*20*8400] — YoloFace output
-    pub host_face_112: Vec<f32>,   // [3*112*112]
-    pub host_embedding: Vec<f32>,  // [512] — ArcFace embedding
-    pub host_swap_tiles: Vec<f32>, // [16*3*128*128]
+    pub host_det_input: Vec<f32>,      // [3*640*640]
+    pub host_det_output: Vec<f32>,     // [1*20*8400] — YoloFace output
+    pub host_face_112: Vec<f32>,       // [3*112*112]
+    pub host_embedding: Vec<f32>,      // [512] — ArcFace embedding
+    pub host_swap_tiles: Vec<f32>,     // [16*3*128*128]
+    pub host_color_original: Vec<f32>, // [3*512*512], exact histogram fallback
+    pub host_color_swapped: Vec<f32>,  // [3*512*512], exact histogram fallback
+    pub host_color_mask: Vec<f32>,     // [512*512], exact masked histogram fallback
 
     // Current frame dimensions
     pub width: u32,
@@ -172,6 +176,7 @@ impl GpuWorkspace {
             semantic_mouth_valid: stream.alloc_zeros::<u32>(1)?,
             dfm_morph: stream.alloc_zeros::<f32>(1)?,
             dfm_rct_stats: stream.alloc_zeros::<f32>(12)?,
+            auto_color_stats: stream.alloc_zeros::<f32>(13)?,
             mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
 
             blur_kernel: stream.alloc_zeros::<f32>(MAX_BLUR_KS)?,
@@ -187,6 +192,9 @@ impl GpuWorkspace {
             host_face_112: vec![0.0f32; 3 * 112 * 112],
             host_embedding: vec![0.0f32; 512],
             host_swap_tiles: vec![0.0f32; swap_batch_size],
+            host_color_original: vec![0.0f32; face_512_size],
+            host_color_swapped: vec![0.0f32; face_512_size],
+            host_color_mask: vec![0.0f32; 512 * 512],
 
             width: 0,
             height: 0,

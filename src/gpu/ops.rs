@@ -62,6 +62,8 @@ pub struct GpuOps {
     nhwc_bgr_unit_to_chw_rgb_fn: CudaFunction,
     dfm_rct_stats_fn: CudaFunction,
     dfm_rct_apply_fn: CudaFunction,
+    auto_color_dfl_stats_fn: CudaFunction,
+    auto_color_dfl_apply_fn: CudaFunction,
     // Mask kernels
     blur_h_fn: CudaFunction,
     blur_v_fn: CudaFunction,
@@ -146,6 +148,8 @@ impl GpuOps {
             nhwc_bgr_unit_to_chw_rgb_fn: load("layout_convert", "nhwc_bgr_unit_to_chw_rgb_kernel"),
             dfm_rct_stats_fn: load("dfm_color", "dfm_rct_stats_kernel"),
             dfm_rct_apply_fn: load("dfm_color", "dfm_rct_apply_kernel"),
+            auto_color_dfl_stats_fn: load("dfm_color", "auto_color_dfl_stats_kernel"),
+            auto_color_dfl_apply_fn: load("dfm_color", "auto_color_dfl_apply_kernel"),
             matmul_512_fn: load("matmul_512", "matmul_512_kernel"),
             l2_normalize_fn: load("matmul_512", "l2_normalize_kernel"),
             blur_h_fn: load("gaussian_blur", "gaussian_blur_h_kernel"),
@@ -594,6 +598,36 @@ impl GpuOps {
         apply.arg(source_nhwc);
         apply.arg(&*stats);
         apply.arg(&pixels);
+        unsafe { apply.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    pub fn auto_color_dfl(
+        &self,
+        original_chw: &CudaSlice<f32>,
+        swapped_chw: &mut CudaSlice<f32>,
+        mask: &CudaSlice<f32>,
+        stats: &mut CudaSlice<f32>,
+        pixels: u32,
+        use_mask: bool,
+        blend: f32,
+    ) -> Result<(), DriverError> {
+        self.stream.memcpy_htod(&[0.0f32; 13], stats)?;
+        let use_mask = u32::from(use_mask);
+        let mut reduce = self.stream.launch_builder(&self.auto_color_dfl_stats_fn);
+        reduce.arg(original_chw);
+        reduce.arg(&*swapped_chw);
+        reduce.arg(mask);
+        reduce.arg(&mut *stats);
+        reduce.arg(&pixels);
+        reduce.arg(&use_mask);
+        unsafe { reduce.launch(LaunchConfig::for_num_elems(pixels)) }?;
+
+        let mut apply = self.stream.launch_builder(&self.auto_color_dfl_apply_fn);
+        apply.arg(swapped_chw);
+        apply.arg(&*stats);
+        apply.arg(&pixels);
+        apply.arg(&blend);
         unsafe { apply.launch(LaunchConfig::for_num_elems(pixels)) }?;
         Ok(())
     }

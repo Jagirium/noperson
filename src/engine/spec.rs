@@ -153,6 +153,7 @@ impl EngineSpec {
         validate_range("max_faces", self.params.max_faces as i64, 1, 50)?;
         validate_float_range("landmark_score", self.params.landmark_score, 0.01, 1.0)?;
         validate_float_range("strength", self.params.strength, 0.0, 5.0)?;
+        validate_float_range("auto_color.blend", self.params.auto_color.blend, 0.0, 1.0)?;
         validate_float_range(
             "similarity_threshold",
             self.params.similarity_threshold,
