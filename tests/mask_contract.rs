@@ -1,8 +1,8 @@
 use noperson::config::parameters::{FaceParserMaskParams, FaceSwapParams};
 use noperson::pipeline::face_mask::{
     RestoreEllipse, SemanticRegion, apply_restore_ellipse_mask_reference, compose_face_parser_mask,
-    eye_restore_ellipses, generate_border_mask, mouth_restore_ellipse, postprocess_occluder_mask,
-    postprocess_xseg_mask, semantic_region_mask,
+    eye_restore_ellipses, fake_diff_mask, generate_border_mask, mouth_restore_ellipse,
+    postprocess_occluder_mask, postprocess_xseg_mask, semantic_region_mask,
 };
 
 #[test]
@@ -201,4 +201,20 @@ fn fallback_restore_ellipse_uses_crossswap_soft_blend() {
     assert_eq!(mask[3 * 7 + 2], 0.75);
     assert_eq!(mask[3 * 7 + 1], 1.0);
     assert_eq!(mask[0], 1.0);
+}
+
+#[test]
+fn fake_diff_uses_crossswap_per_channel_bimodal_threshold() {
+    let swapped = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+    let original = [0.0, 9.0, 20.0, 30.0, 40.0, 49.0];
+
+    assert_eq!(fake_diff_mask(&swapped, &original, 2, 4), [0.0, 1.0]);
+}
+
+#[test]
+fn differencing_defaults_match_crossswap_controls() {
+    let params = FaceSwapParams::default();
+    assert!(!params.differencing_enabled);
+    assert_eq!(params.differencing_amount, 4);
+    assert_eq!(params.differencing_blur, 5);
 }

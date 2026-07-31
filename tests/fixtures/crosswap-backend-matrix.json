@@ -323,9 +323,13 @@
         },
         {
           "python": "crosswap.app.processors.face_masks.FaceMasks.apply_fake_diff",
-          "rust": null,
-          "status": "missing",
-          "evidence": []
+          "rust": "noperson::pipeline::face_mask::gpu_apply_fake_diff",
+          "status": "partial",
+          "evidence": [
+            "tests/mask_contract.rs::fake_diff_uses_crossswap_per_channel_bimodal_threshold",
+            "tests/mask_contract.rs::differencing_defaults_match_crossswap_controls",
+            "tests/engine_spec.rs::differencing_controls_are_validated_before_gpu_allocation"
+          ]
         }
       ]
     },

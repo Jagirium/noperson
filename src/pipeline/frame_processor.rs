@@ -222,6 +222,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         let learned_mask = face_mask::gpu_generate_learned_mask_128(gpu, manager, ws, params)?;
         face_mask::gpu_apply_landmark_restore_mask(gpu, ws, params, &aligned_landmarks)?;
         face_mask::gpu_restore_semantic_regions(gpu, ws, params)?;
+        face_mask::gpu_apply_fake_diff(gpu, ws, params)?;
         face_mask::gpu_generate_mask_512(
             gpu,
             ws,

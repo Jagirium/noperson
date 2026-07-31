@@ -260,6 +260,25 @@ fn restore_region_controls_are_validated_before_gpu_allocation() {
 }
 
 #[test]
+fn differencing_controls_are_validated_before_gpu_allocation() {
+    let mut spec = valid_spec(false);
+    spec.params.differencing_amount = 101;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "differencing_amount"
+    ));
+
+    spec.params.differencing_amount = 4;
+    spec.params.differencing_blur = 101;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidMaskControl { control, .. })
+            if control == "differencing_blur"
+    ));
+}
+
+#[test]
 fn model_filenames_cannot_escape_the_generation_root() {
     let mut absolute = valid_spec(false);
     absolute

@@ -265,6 +265,18 @@ impl EngineSpec {
                 0,
                 50,
             ),
+            (
+                "differencing_amount",
+                self.params.differencing_amount as i64,
+                0,
+                100,
+            ),
+            (
+                "differencing_blur",
+                self.params.differencing_blur as i64,
+                0,
+                100,
+            ),
         ] {
             validate_range(control, value, min, max)?;
         }

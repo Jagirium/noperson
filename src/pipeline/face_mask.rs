@@ -26,6 +26,26 @@ pub fn postprocess_xseg_mask(mask: &mut [f32]) {
     }
 }
 
+pub fn fake_diff_mask(
+    swapped_chw: &[f32],
+    original_chw: &[f32],
+    pixels: usize,
+    amount: u32,
+) -> Vec<f32> {
+    assert_eq!(swapped_chw.len(), pixels * 3);
+    assert_eq!(original_chw.len(), pixels * 3);
+    let threshold = amount as f32 * 2.55;
+    (0..pixels)
+        .map(|pixel| {
+            let changed = (0..3).any(|channel| {
+                let index = channel * pixels + pixel;
+                (swapped_chw[index] - original_chw[index]).abs() >= threshold
+            });
+            f32::from(changed)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticRegion {
     Eyes,
@@ -619,6 +639,44 @@ pub fn gpu_restore_semantic_regions(
     if params.restore_eyes {
         restore_semantic_region(gpu, ws, params, SemanticRegion::Eyes)?;
     }
+    Ok(())
+}
+
+pub fn gpu_apply_fake_diff(
+    gpu: &GpuOps,
+    ws: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<()> {
+    if !params.differencing_enabled {
+        return Ok(());
+    }
+    let pixels = 512 * 512;
+    gpu.fake_diff_mask(
+        &ws.face_512,
+        &ws.face_512_original,
+        &mut ws.parser_mask_512,
+        pixels,
+        params.differencing_amount,
+    )?;
+    if params.differencing_blur > 0 {
+        let kernel_size = params.differencing_blur * 2 + 1;
+        let sigma = (params.differencing_blur as f32 + 1.0) * 0.2;
+        let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
+        gpu.gaussian_blur_mask(
+            &mut ws.parser_mask_512,
+            &mut ws.parser_tmp_512,
+            512,
+            512,
+            &ws.blur_kernel,
+            ks,
+        )?;
+    }
+    gpu.fake_diff_composite(
+        &mut ws.face_512,
+        &ws.face_512_original,
+        &ws.parser_mask_512,
+        pixels,
+    )?;
     Ok(())
 }
 

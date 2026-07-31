@@ -237,6 +237,12 @@ pub struct FaceSwapParams {
     pub restore_eyes_params: RestoreEyesParams,
     #[serde(default)]
     pub restore_eyes_mouth_blur: u32,
+    #[serde(default)]
+    pub differencing_enabled: bool,
+    #[serde(default = "default_differencing_amount")]
+    pub differencing_amount: u32,
+    #[serde(default = "default_differencing_blur")]
+    pub differencing_blur: u32,
 
     // Border mask
     pub border_top: u32,
@@ -280,6 +286,9 @@ impl Default for FaceSwapParams {
             restore_mouth_params: RestoreMouthParams::default(),
             restore_eyes_params: RestoreEyesParams::default(),
             restore_eyes_mouth_blur: 0,
+            differencing_enabled: false,
+            differencing_amount: default_differencing_amount(),
+            differencing_blur: default_differencing_blur(),
             border_top: 10,
             border_bottom: 10,
             border_left: 10,
@@ -295,4 +304,12 @@ impl Default for FaceSwapParams {
 
 const fn default_enhancer_blend() -> f32 {
     1.0
+}
+
+const fn default_differencing_amount() -> u32 {
+    4
+}
+
+const fn default_differencing_blur() -> u32 {
+    5
 }

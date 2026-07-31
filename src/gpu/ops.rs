@@ -70,6 +70,8 @@ pub struct GpuOps {
     parser_class_mask_fn: CudaFunction,
     mask_invert_fn: CudaFunction,
     restore_ellipse_mask_fn: CudaFunction,
+    fake_diff_mask_fn: CudaFunction,
+    fake_diff_composite_fn: CudaFunction,
     semantic_region_mask_fn: CudaFunction,
     semantic_temporal_mask_fn: CudaFunction,
     semantic_mark_valid_fn: CudaFunction,
@@ -148,6 +150,8 @@ impl GpuOps {
             parser_class_mask_fn: load("mask_postprocess", "parser_class_mask_kernel"),
             mask_invert_fn: load("mask_postprocess", "mask_invert_kernel"),
             restore_ellipse_mask_fn: load("mask_postprocess", "restore_ellipse_mask_kernel"),
+            fake_diff_mask_fn: load("mask_postprocess", "fake_diff_mask_kernel"),
+            fake_diff_composite_fn: load("mask_postprocess", "fake_diff_composite_kernel"),
             semantic_region_mask_fn: load("mask_postprocess", "semantic_region_mask_kernel"),
             semantic_temporal_mask_fn: load("mask_postprocess", "semantic_temporal_mask_kernel"),
             semantic_mark_valid_fn: load("mask_postprocess", "semantic_mark_valid_kernel"),
@@ -934,6 +938,43 @@ impl GpuOps {
         b.arg(&blend);
         b.arg(&feather);
         unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    pub fn fake_diff_mask(
+        &self,
+        swapped: &CudaSlice<f32>,
+        original: &CudaSlice<f32>,
+        mask: &mut CudaSlice<f32>,
+        pixels: u32,
+        amount: u32,
+    ) -> Result<(), DriverError> {
+        let threshold = amount as f32 * 2.55;
+        let mut b = self.stream.launch_builder(&self.fake_diff_mask_fn);
+        b.arg(swapped);
+        b.arg(original);
+        b.arg(mask);
+        b.arg(&pixels);
+        b.arg(&threshold);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
+    pub fn fake_diff_composite(
+        &self,
+        swapped: &mut CudaSlice<f32>,
+        original: &CudaSlice<f32>,
+        mask: &CudaSlice<f32>,
+        pixels: u32,
+    ) -> Result<(), DriverError> {
+        let total = pixels * 3;
+        let mut b = self.stream.launch_builder(&self.fake_diff_composite_fn);
+        b.arg(swapped);
+        b.arg(original);
+        b.arg(mask);
+        b.arg(&pixels);
+        b.arg(&total);
+        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())
     }
 

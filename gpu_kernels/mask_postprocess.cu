@@ -115,6 +115,38 @@ void restore_ellipse_mask_kernel(
 }
 
 extern "C" __global__
+void fake_diff_mask_kernel(
+    const float* __restrict__ swapped,
+    const float* __restrict__ original,
+    float* __restrict__ mask,
+    const unsigned int pixels,
+    const float threshold
+) {
+    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels) return;
+    bool changed = false;
+    for (unsigned int channel = 0; channel < 3; ++channel) {
+        unsigned int idx = channel * pixels + pixel;
+        changed = changed || fabsf(swapped[idx] - original[idx]) >= threshold;
+    }
+    mask[pixel] = changed ? 1.0f : 0.0f;
+}
+
+extern "C" __global__
+void fake_diff_composite_kernel(
+    float* __restrict__ swapped,
+    const float* __restrict__ original,
+    const float* __restrict__ mask,
+    const unsigned int pixels,
+    const unsigned int total
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    float keep_swap = mask[idx % pixels];
+    swapped[idx] = swapped[idx] * keep_swap + original[idx] * (1.0f - keep_swap);
+}
+
+extern "C" __global__
 void semantic_region_mask_kernel(
     const unsigned char* __restrict__ classes,
     float* __restrict__ mask,
