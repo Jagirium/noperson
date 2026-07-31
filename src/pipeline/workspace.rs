@@ -23,6 +23,14 @@ pub struct GpuWorkspace {
     /// YoloFace output: [1, 20, 8400] for 640 input — 4 bbox + 1 score + 15 kps
     pub detect_output: CudaSlice<f32>, // [1, 20, 8400]
 
+    pub landmark_input: CudaSlice<f32>,
+    pub landmark_output_a: CudaSlice<f32>,
+    pub landmark_output_b: CudaSlice<f32>,
+    pub landmark_output_c: CudaSlice<f32>,
+    pub host_landmark_a: Vec<f32>,
+    pub host_landmark_b: Vec<f32>,
+    pub host_landmark_c: Vec<f32>,
+
     // Per-face buffers (reused)
     pub face_112: CudaSlice<f32>,          // ArcFace input [3, 112, 112]
     pub face_256: CudaSlice<f32>,          // swap face [3, dim*128, dim*128] (max 512)
@@ -115,6 +123,13 @@ impl GpuWorkspace {
             face_112_batch: stream.alloc_zeros::<f32>(MAX_FACES * face_112_size)?,
             arcface_embeddings_batch: stream.alloc_zeros::<f32>(MAX_FACES * 512)?,
             detect_output: stream.alloc_zeros::<f32>(det_output_size)?,
+            landmark_input: stream.alloc_zeros::<f32>(3 * 512 * 512)?,
+            landmark_output_a: stream.alloc_zeros::<f32>(278_528)?,
+            landmark_output_b: stream.alloc_zeros::<f32>(278_528)?,
+            landmark_output_c: stream.alloc_zeros::<f32>(278_528)?,
+            host_landmark_a: vec![0.0; 278_528],
+            host_landmark_b: vec![0.0; 278_528],
+            host_landmark_c: vec![0.0; 278_528],
 
             face_112: stream.alloc_zeros::<f32>(face_112_size)?,
             face_256: stream.alloc_zeros::<f32>(face_256_size)?,

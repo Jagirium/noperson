@@ -36,6 +36,24 @@ void imagenet_normalize_kernel(
 }
 
 extern "C" __global__
+void landmark_normalize_kernel(
+    float* __restrict__ image,
+    const unsigned int pixels,
+    const unsigned int mode
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int total = pixels * 3;
+    if (idx >= total) return;
+    unsigned int channel = idx / pixels;
+    if (mode == 0) {
+        const float means[3] = {104.0f, 117.0f, 123.0f};
+        image[idx] -= means[channel];
+    } else if (mode == 1) {
+        image[idx] *= 1.0f / 255.0f;
+    }
+}
+
+extern "C" __global__
 void parser_argmax_kernel(
     const float* __restrict__ logits, // [19,H,W]
     unsigned char* __restrict__ classes,

@@ -24,6 +24,7 @@ use crate::models::manager::ModelManager;
 use crate::models::registry::find_model;
 use crate::pipeline::dfm::DfmContract;
 use crate::pipeline::face_detector::{FaceDetector, FaceDetectorBackend};
+use crate::pipeline::face_landmark::LandmarkModel;
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::frame_enhancer::FrameEnhancer;
 use crate::pipeline::frame_processor::{FrameResult, SourceFace, process_frame_gpu};
@@ -112,6 +113,15 @@ pub fn build_live_spec(
         detector_name,
         detector_filename,
     )?;
+    if params.landmark_enabled {
+        insert_artifact(
+            &mut models,
+            models_dir,
+            ModelRole::Landmark,
+            params.landmark_mode.registry_name(),
+            params.landmark_mode.filename(),
+        )?;
+    }
     match params.swapper_model {
         SwapperModel::Inswapper128 => {
             for (role, logical_name, filename) in [
@@ -396,6 +406,14 @@ impl LiveEngine {
             DetectorModel::Scrfd2_5g => manager.load("SCRFD2.5g", &detector_artifact.filename)?,
         }
         ensure_build_active(cancellation)?;
+        if spec.params.landmark_enabled {
+            let artifact = required_artifact(spec, ModelRole::Landmark)?;
+            manager.load(
+                spec.params.landmark_mode.registry_name(),
+                &artifact.filename,
+            )?;
+            ensure_build_active(cancellation)?;
+        }
         let dfm = match spec.params.swapper_model {
             SwapperModel::Inswapper128 => {
                 manager.load(
@@ -453,13 +471,33 @@ impl LiveEngine {
             let face = faces
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("No face in identity image"))?;
+            let refined = if spec.params.landmark_enabled {
+                LandmarkModel::from(spec.params.landmark_mode).detect_gpu(
+                    &mut manager,
+                    &gpu,
+                    &mut workspace,
+                    &chw,
+                    height,
+                    width,
+                    face.bbox,
+                    &face.kps_5,
+                    spec.params.landmark_from_points,
+                    spec.params.landmark_score,
+                )?
+            } else {
+                None
+            };
+            let identity_kps = refined
+                .as_ref()
+                .filter(|landmarks| landmarks.is_preferred_to(face.score))
+                .map_or(face.kps_5, |landmarks| landmarks.five);
             let embedding = FaceRecognizer::recognize_gpu(
                 &mut manager,
                 &gpu,
                 &chw,
                 height,
                 width,
-                &face.kps_5,
+                &identity_kps,
                 &mut workspace,
             )?;
             let emap = manager

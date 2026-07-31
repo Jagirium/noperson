@@ -185,6 +185,52 @@ pub enum SwapperModel {
     Dfm,
 }
 
+/// Detailed landmark refiner selected for one immutable engine generation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LandmarkMode {
+    #[serde(rename = "5")]
+    Points5,
+    #[serde(rename = "68")]
+    Points68,
+    #[serde(rename = "3d68")]
+    Points3d68,
+    #[serde(rename = "98")]
+    Points98,
+    #[serde(rename = "106")]
+    Points106,
+    #[default]
+    #[serde(rename = "203")]
+    Points203,
+    #[serde(rename = "478")]
+    Points478,
+}
+
+impl LandmarkMode {
+    pub const fn registry_name(self) -> &'static str {
+        match self {
+            Self::Points5 => "FaceLandmark5",
+            Self::Points68 => "FaceLandmark68",
+            Self::Points3d68 => "FaceLandmark3d68",
+            Self::Points98 => "FaceLandmark98",
+            Self::Points106 => "FaceLandmark106",
+            Self::Points203 => "FaceLandmark203",
+            Self::Points478 => "FaceLandmark478",
+        }
+    }
+
+    pub const fn filename(self) -> &'static str {
+        match self {
+            Self::Points5 => "res50.onnx",
+            Self::Points68 => "2dfan4.onnx",
+            Self::Points3d68 => "1k3d68.onnx",
+            Self::Points98 => "peppapig_teacher_Nx3x256x256.onnx",
+            Self::Points106 => "2d106det.onnx",
+            Self::Points203 => "landmark.onnx",
+            Self::Points478 => "face_landmarks_detector_Nx3x256x256.onnx",
+        }
+    }
+}
+
 /// Face restorer model size.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RestorerSize {
@@ -216,6 +262,16 @@ pub struct FaceSwapParams {
     pub dfm_morph: f32,
     #[serde(default)]
     pub dfm_rct: bool,
+
+    // Detailed face alignment
+    #[serde(default)]
+    pub landmark_enabled: bool,
+    #[serde(default)]
+    pub landmark_mode: LandmarkMode,
+    #[serde(default = "default_landmark_score")]
+    pub landmark_score: f32,
+    #[serde(default)]
+    pub landmark_from_points: bool,
 
     // Restorer
     pub restorer_enabled: bool,
@@ -286,6 +342,10 @@ impl Default for FaceSwapParams {
             dfm_model: default_dfm_model(),
             dfm_morph: default_dfm_morph(),
             dfm_rct: false,
+            landmark_enabled: false,
+            landmark_mode: LandmarkMode::default(),
+            landmark_score: default_landmark_score(),
+            landmark_from_points: false,
             restorer_enabled: false,
             restorer_size: RestorerSize::Gpen512,
             restorer_alpha: 1.0,
@@ -323,6 +383,10 @@ impl Default for FaceSwapParams {
 
 const fn default_enhancer_blend() -> f32 {
     1.0
+}
+
+const fn default_landmark_score() -> f32 {
+    0.5
 }
 
 const fn default_differencing_amount() -> u32 {

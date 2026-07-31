@@ -117,6 +117,32 @@ fn enabled_optional_stage_requires_its_artifact() {
 }
 
 #[test]
+fn enabled_landmark_refiner_requires_its_generation_artifact() {
+    let mut spec = valid_spec(false);
+    spec.params.landmark_enabled = true;
+
+    assert_eq!(
+        spec.validate(),
+        Err(EngineSpecError::MissingModel(ModelRole::Landmark))
+    );
+
+    spec.models.insert(
+        ModelRole::Landmark,
+        artifact("FaceLandmark203", "landmark.onnx", SHA_A),
+    );
+    spec.validate().expect("valid landmark generation");
+
+    spec.models
+        .get_mut(&ModelRole::Landmark)
+        .unwrap()
+        .logical_name = "FaceLandmark68".to_owned();
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::LandmarkModelMismatch { .. })
+    ));
+}
+
+#[test]
 fn dfm_generation_replaces_the_inswapper_model_group() {
     let mut spec = valid_spec(false);
     spec.params.swapper_model = SwapperModel::Dfm;

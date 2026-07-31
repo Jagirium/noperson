@@ -1,4 +1,4 @@
-use noperson::pipeline::face_landmark::{LandmarkError, LandmarkModel};
+use noperson::pipeline::face_landmark::{LandmarkError, LandmarkModel, LandmarkResult};
 
 fn points(count: usize) -> Vec<[f32; 2]> {
     (0..count)
@@ -109,4 +109,66 @@ fn per_model_normalization_matches_the_python_oracle() {
     assert_eq!(LandmarkModel::Points203.normalize(127.5, 2), 0.5);
     assert_eq!(LandmarkModel::Points3d68.normalize(255.0, 0), 255.0);
     assert_eq!(LandmarkModel::Points106.normalize(64.0, 2), 64.0);
+}
+
+#[test]
+fn landmark_onnx_bindings_match_crossswap_models() {
+    assert_eq!(LandmarkModel::Points5.input_name(), "input");
+    assert_eq!(
+        LandmarkModel::Points5.output_specs(),
+        [("conf", 21_504), ("landmarks", 107_520)].as_slice()
+    );
+    assert_eq!(LandmarkModel::Points3d68.input_name(), "data");
+    assert_eq!(
+        LandmarkModel::Points3d68.output_specs(),
+        [("fc1", 3_309)].as_slice()
+    );
+    assert_eq!(
+        LandmarkModel::Points203.output_specs(),
+        [("output", 214), ("853", 262), ("856", 406)].as_slice()
+    );
+    assert_eq!(
+        LandmarkModel::Points478.output_specs(),
+        [("Identity", 1_434), ("Identity_1", 1), ("Identity_2", 1)].as_slice()
+    );
+}
+
+#[test]
+fn bbox_crop_affines_match_crossswap_geometry() {
+    let bbox = [10.0, 20.0, 110.0, 100.0];
+    let fan = LandmarkModel::Points68.bbox_affine(bbox).unwrap();
+    assert_eq!(fan, [[1.95, 0.0, 11.0], [0.0, 1.95, 11.0]]);
+
+    let dense = LandmarkModel::Points106.bbox_affine(bbox).unwrap();
+    assert!((dense[0][0] - 1.28).abs() < 1e-6);
+    assert!((dense[0][2] - 19.2).abs() < 1e-5);
+    assert!((dense[1][2] - 19.2).abs() < 1e-5);
+}
+
+#[test]
+fn dense_scores_reduce_before_thresholding() {
+    let scores: Vec<f32> = (0..98).map(|index| index as f32).collect();
+    assert_eq!(
+        LandmarkModel::Points98.to_five_scores(&scores).unwrap(),
+        vec![96.0, 97.0, 54.0, 76.0, 82.0]
+    );
+
+    let scores: Vec<f32> = (0..68).map(|index| index as f32).collect();
+    assert_eq!(
+        LandmarkModel::Points68.to_five_scores(&scores).unwrap(),
+        vec![37.5, 43.5, 30.0, 48.0, 54.0]
+    );
+}
+
+#[test]
+fn refiner_replaces_detector_only_when_crossswap_would() {
+    let mut result = LandmarkResult {
+        five: [[0.0; 2]; 5],
+        points: Vec::new(),
+        scores: vec![0.7, 0.9],
+    };
+    assert!(result.is_preferred_to(0.79));
+    assert!(!result.is_preferred_to(0.8));
+    result.scores.clear();
+    assert!(result.is_preferred_to(0.99));
 }

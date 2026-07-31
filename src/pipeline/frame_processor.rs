@@ -12,6 +12,7 @@ use crate::math::affine;
 use crate::models::manager::ModelManager;
 use crate::pipeline::dfm::DfmContract;
 use crate::pipeline::face_detector::FaceDetectorBackend;
+use crate::pipeline::face_landmark::LandmarkModel;
 use crate::pipeline::face_mask;
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::face_swapper::FaceSwapper;
@@ -71,6 +72,30 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     let pipeline_size = 512u32;
 
     for face in &faces {
+        let refined = if params.landmark_enabled {
+            LandmarkModel::from(params.landmark_mode).detect_gpu(
+                manager,
+                gpu,
+                ws,
+                frame_chw,
+                frame_h,
+                frame_w,
+                face.bbox,
+                &face.kps_5,
+                params.landmark_from_points,
+                params.landmark_score,
+            )?
+        } else {
+            None
+        };
+        let refined_is_better = refined
+            .as_ref()
+            .is_some_and(|landmarks| landmarks.is_preferred_to(face.score));
+        let effective_kps = refined
+            .as_ref()
+            .filter(|_| refined_is_better)
+            .map_or(face.kps_5, |landmarks| landmarks.five);
+
         // 2a. Match against sources
         let source = if params.swapper_model == SwapperModel::Inswapper128 {
             Some(if sources.len() == 1 && sources[0].threshold <= 0.0 {
@@ -82,7 +107,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                     frame_chw,
                     frame_h,
                     frame_w,
-                    &face.kps_5,
+                    &effective_kps,
                     ws,
                 )?;
                 match sources.iter().find(|src| {
@@ -103,10 +128,10 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         // a separate transform at every resolution creates sub-pixel drift
         // between the generated face and the paste-back transform.
         let face_template = scaled_arcface_template(pipeline_size);
-        let face_affine = affine::estimate_face_affine(&face.kps_5, &face_template);
+        let face_affine = affine::estimate_face_affine(&effective_kps, &face_template);
         let aligned_landmarks = std::array::from_fn(|index| {
-            let x = face.kps_5[index][0] as f64;
-            let y = face.kps_5[index][1] as f64;
+            let x = effective_kps[index][0] as f64;
+            let y = effective_kps[index][1] as f64;
             [
                 face_affine[0][0] * x + face_affine[0][1] * y + face_affine[0][2],
                 face_affine[1][0] * x + face_affine[1][1] * y + face_affine[1][2],
@@ -318,26 +343,21 @@ fn restorer_contract(size: RestorerSize) -> anyhow::Result<(&'static str, usize)
 
 /// Compute face alignment template at target size.
 /// Match Crosswap's actual `get_arcface_template(..., mode="arcface128")`
-/// output, including its `(1, 5, 2)` NumPy indexing behavior. `template[:, 0]`
-/// selects both coordinates of the first landmark, so the offset is applied to
-/// the first eye's X and Y rather than every landmark's X.
+/// output: scale both coordinates, then shift the X coordinate of all points.
 fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
     use crate::math::constants::ARCFACE_DST;
     let factor = target_size as f32 / 128.0;
     let mut dst = ARCFACE_DST;
     for pt in dst.iter_mut() {
-        pt[0] *= factor;
+        pt[0] = pt[0] * factor + factor * 8.0;
         pt[1] *= factor;
     }
-    let offset = factor * 8.0;
-    dst[0][0] += offset;
-    dst[0][1] += offset;
     dst
 }
 
 #[cfg(test)]
 mod tests {
-    use super::restorer_contract;
+    use super::{restorer_contract, scaled_arcface_template};
     use crate::config::parameters::RestorerSize;
 
     #[test]
@@ -351,5 +371,13 @@ mod tests {
             ("GPENBFR512", 512)
         );
         assert!(restorer_contract(RestorerSize::Gpen1024).is_err());
+    }
+
+    #[test]
+    fn arcface128_template_offsets_every_x_coordinate() {
+        let template = scaled_arcface_template(128);
+        assert_eq!(template[0], [46.2946, 51.6963]);
+        assert_eq!(template[1], [81.5318, 51.5014]);
+        assert_eq!(template[4], [78.7299, 92.2041]);
     }
 }

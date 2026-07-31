@@ -80,6 +80,8 @@ pub enum EngineSpecError {
     InvalidEnhancerBlend(String),
     #[error("enhancer selection {selected} does not match artifact {artifact}")]
     EnhancerModelMismatch { selected: String, artifact: String },
+    #[error("landmark selection {selected} does not match artifact {artifact}")]
+    LandmarkModelMismatch { selected: String, artifact: String },
     #[error("DFM selection {selected} does not match artifact {artifact}")]
     DfmModelMismatch { selected: String, artifact: String },
     #[error("mask control {control} is outside {min}..={max}: {value}")]
@@ -122,6 +124,17 @@ impl EngineSpec {
                 self.require(ModelRole::Dfm)?;
             }
         }
+        if self.params.landmark_enabled {
+            self.require(ModelRole::Landmark)?;
+            let artifact = &self.models[&ModelRole::Landmark];
+            let selected = self.params.landmark_mode.registry_name();
+            if artifact.logical_name != selected {
+                return Err(EngineSpecError::LandmarkModelMismatch {
+                    selected: selected.to_owned(),
+                    artifact: artifact.logical_name.clone(),
+                });
+            }
+        }
 
         validate_sha256("identity_sha256", &self.identity_sha256)?;
 
@@ -136,6 +149,7 @@ impl EngineSpec {
             ));
         }
         validate_float_range("dfm_morph", self.params.dfm_morph, 0.01, 1.0)?;
+        validate_float_range("landmark_score", self.params.landmark_score, 0.01, 1.0)?;
         validate_range("occluder_size", self.params.occluder_size as i64, -100, 100)?;
         validate_range("xseg_size", self.params.xseg_size as i64, -100, 100)?;
         validate_range(

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use noperson::config::parameters::{EnhancerModel, FaceSwapParams, SwapperModel};
+use noperson::config::parameters::{EnhancerModel, FaceSwapParams, LandmarkMode, SwapperModel};
 use noperson::config::settings::{DetectorModel, ExecutionProvider};
 use noperson::engine::ModelRole;
 use noperson::live::build_live_spec;
@@ -130,6 +130,43 @@ fn live_spec_addresses_local_dfm_without_inswapper_artifacts() {
     assert!(!spec.models.contains_key(&ModelRole::Recognizer));
     assert!(!spec.models.contains_key(&ModelRole::Swapper));
     assert!(!spec.models.contains_key(&ModelRole::Emap));
+    spec.validate().unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn live_spec_addresses_selected_landmark_generation() {
+    let root = fixture_dir();
+    let models = root.join("models");
+    fs::create_dir_all(&models).unwrap();
+    for (name, content) in [
+        ("yoloface_8n.onnx", b"detector".as_slice()),
+        ("w600k_r50.onnx", b"recognizer".as_slice()),
+        ("inswapper_128.fp16.onnx", b"swapper".as_slice()),
+        ("emap.bin", b"emap".as_slice()),
+        ("landmark.onnx", b"landmark-203".as_slice()),
+    ] {
+        fs::write(models.join(name), content).unwrap();
+    }
+    let identity = root.join("identity.jpg");
+    fs::write(&identity, b"identity").unwrap();
+    let params = FaceSwapParams {
+        landmark_enabled: true,
+        landmark_mode: LandmarkMode::Points203,
+        ..FaceSwapParams::default()
+    };
+
+    let spec = build_live_spec(
+        &models,
+        &identity,
+        params,
+        ExecutionProvider::Cuda,
+        DetectorModel::YoloFace8n,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(spec.models[&ModelRole::Landmark].filename, "landmark.onnx");
     spec.validate().unwrap();
     fs::remove_dir_all(root).unwrap();
 }
