@@ -476,6 +476,11 @@ pub struct FaceSwapParams {
     // Strength
     pub strength: f32,
 
+    #[serde(default)]
+    pub face_likeness_enabled: bool,
+    #[serde(default)]
+    pub face_likeness_factor: f32,
+
     // Similarity threshold for face matching
     pub similarity_threshold: f32,
 }
@@ -542,6 +547,8 @@ impl Default for FaceSwapParams {
             final_blur: default_final_blur(),
             overall_mask_blur: 0,
             strength: 1.0,
+            face_likeness_enabled: false,
+            face_likeness_factor: 0.0,
             similarity_threshold: 0.6,
         }
     }

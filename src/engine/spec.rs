@@ -217,6 +217,23 @@ impl EngineSpec {
         }
         validate_float_range("landmark_score", self.params.landmark_score, 0.01, 1.0)?;
         validate_float_range("strength", self.params.strength, 0.0, 5.0)?;
+        validate_float_range(
+            "face_likeness_factor",
+            self.params.face_likeness_factor,
+            -1.0,
+            1.0,
+        )?;
+        if self.params.face_likeness_enabled
+            && (self.assignments.is_empty()
+                || self
+                    .assignments
+                    .iter()
+                    .any(|assignment| assignment.target_identity_sha256.is_none()))
+        {
+            return Err(EngineSpecError::InvalidAssignments(
+                "face likeness requires a target identity for every assignment".to_owned(),
+            ));
+        }
         validate_float_range("auto_color.blend", self.params.auto_color.blend, 0.0, 1.0)?;
         validate_float_range("restorer_alpha", self.params.restorer_alpha, 0.0, 1.0)?;
         validate_float_range("restorer2_alpha", self.params.restorer2_alpha, 0.0, 1.0)?;

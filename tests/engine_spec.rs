@@ -361,6 +361,13 @@ fn strength_and_similarity_are_generation_validated() {
         spec.validate(),
         Err(EngineSpecError::InvalidFloatControl { control, .. }) if control == "similarity_threshold"
     ));
+
+    spec.params.similarity_threshold = 0.6;
+    spec.params.face_likeness_enabled = true;
+    assert!(matches!(
+        spec.validate(),
+        Err(EngineSpecError::InvalidAssignments(_))
+    ));
 }
 
 #[test]

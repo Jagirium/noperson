@@ -372,6 +372,13 @@ fn identity_embedding_gpu(
     FaceRecognizer::recognize_gpu(manager, gpu, &chw, height, width, &keypoints, workspace)
 }
 
+fn apply_face_likeness(source_latent: &mut [f32], target_latent: &[f32], factor: f32) {
+    debug_assert_eq!(source_latent.len(), target_latent.len());
+    for (value, target_value) in source_latent.iter_mut().zip(target_latent) {
+        *value -= factor * target_value;
+    }
+}
+
 impl LiveEngine {
     pub fn new(
         gpu: Arc<GpuOps>,
@@ -631,9 +638,21 @@ impl LiveEngine {
                     .emap
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Inswapper emap is not loaded"))?;
+                let mut latent = FaceRecognizer::calc_latent(&source_embedding, emap);
+                if spec.params.face_likeness_enabled {
+                    let target = target_embedding.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("face likeness requires a target identity")
+                    })?;
+                    let target_latent = FaceRecognizer::calc_latent(target, emap);
+                    apply_face_likeness(
+                        &mut latent,
+                        &target_latent,
+                        spec.params.face_likeness_factor,
+                    );
+                }
                 sources.push(SourceFace {
                     target_embedding,
-                    latent: FaceRecognizer::calc_latent(&source_embedding, emap),
+                    latent,
                     threshold: assignment.similarity_threshold,
                 });
                 ensure_build_active(cancellation)?;
@@ -766,5 +785,17 @@ impl LiveEngine {
             faces_detected: result.faces_detected,
             faces_swapped: result.faces_swapped,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_face_likeness;
+
+    #[test]
+    fn face_likeness_matches_crossswap_latent_subtraction() {
+        let mut source = [0.5, -0.25, 1.0];
+        apply_face_likeness(&mut source, &[0.2, 0.4, -0.5], 0.75);
+        assert_eq!(source, [0.35, -0.55, 1.375]);
     }
 }
