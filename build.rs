@@ -1,7 +1,8 @@
-//! Build script — compiles CUDA kernels (.cu → .ptx) and links NPP.
+//! Build script — compiles CUDA kernels (.cu → .ptx).
 //!
 //! PTX files are loaded at runtime by gpu::ops and gpu::kernels.
-//! NPP libraries provide optimized image geometry (warp, resize, blur).
+//! NPP is loaded after the runtime bootstrap so the executable can start on a
+//! machine that only has an NVIDIA driver installed.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -83,24 +84,6 @@ fn main() {
             }
         }
     }
-
-    // Link NPP libraries
-    let npp_lib_dir = if target_os == "windows" {
-        PathBuf::from(&cuda_path).join("lib/x64")
-    } else {
-        PathBuf::from(&cuda_path).join("lib64")
-    };
-    println!("cargo:rustc-link-search=native={}", npp_lib_dir.display());
-    println!("cargo:rustc-link-lib=dylib=nppc"); // NPP core
-    println!("cargo:rustc-link-lib=dylib=nppig"); // NPP image geometry (warp, resize)
-    println!("cargo:rustc-link-lib=dylib=nppif"); // NPP image filtering (gaussian blur)
-    println!("cargo:rustc-link-lib=dylib=nppim"); // NPP image morphology (dilate/erode)
-    println!("cargo:rustc-link-lib=dylib=nppicc"); // NPP image color conversion
-    println!("cargo:rustc-link-lib=dylib=nppial"); // NPP arithmetic and logical (dilate)
-    println!("cargo:rustc-link-lib=dylib=nppidei"); // NPP data exchange and initialization
-
-    // Also link CUDA runtime for NPP stream management
-    println!("cargo:rustc-link-lib=dylib=cudart");
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=gpu_kernels/");

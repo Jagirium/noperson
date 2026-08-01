@@ -10,6 +10,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod app;
+pub mod artifacts;
 pub mod config;
 pub mod engine;
 pub mod gpu;
@@ -19,6 +20,7 @@ pub mod math;
 pub mod models;
 pub mod pipeline;
 pub mod quality;
+pub mod runtime;
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

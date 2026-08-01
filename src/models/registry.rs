@@ -2,20 +2,7 @@
 //!
 //! Port of crosswap/app/processors/models_data.py
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ModelMirror {
-    pub name: &'static str,
-    pub url: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ModelEntry {
-    pub name: &'static str,
-    pub filename: &'static str,
-    pub size: u64,
-    pub blake3: &'static str,
-    pub mirrors: [ModelMirror; 2],
-}
+pub use crate::artifacts::{ArtifactEntry as ModelEntry, ArtifactMirror as ModelMirror};
 
 macro_rules! model {
     ($name:literal, $filename:literal, $size:literal, $blake3:literal) => {

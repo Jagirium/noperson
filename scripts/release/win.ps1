@@ -49,8 +49,6 @@ $Archive = Join-Path $Dist "$ArtifactName.zip"
 $Checksum = "$Archive.sha256"
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 Copy-Item -LiteralPath 'target\release\noperson.exe', 'LICENSE', 'README.md' -Destination $Stage
-Get-ChildItem -LiteralPath 'target\release' -Filter 'onnxruntime*.dll' -File -Recurse |
-    Copy-Item -Destination $Stage
 @(
     "commit=$Commit"
     "source_date_epoch=$($env:SOURCE_DATE_EPOCH)"

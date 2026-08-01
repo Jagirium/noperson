@@ -98,10 +98,12 @@ impl ModelManager {
                     .with_device_id(self.device_id)
                     .with_compute_stream(ptr as *mut ())
                     .build()
+                    .error_on_failure()
             },
             None => ort::ep::CUDA::default()
                 .with_device_id(self.device_id)
-                .build(),
+                .build()
+                .error_on_failure(),
         };
 
         let mut providers = Vec::new();
@@ -128,7 +130,7 @@ impl ModelManager {
             if let Some(ptr) = self.compute_stream {
                 trt = unsafe { trt.with_compute_stream(ptr as *mut ()) };
             }
-            providers.push(trt.build());
+            providers.push(trt.build().error_on_failure());
         }
         providers.push(cuda_ep);
 

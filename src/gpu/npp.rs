@@ -5,9 +5,14 @@
 //! affine warp, bilinear resize, gaussian blur, morphological dilate.
 //!
 //! All functions operate on raw CUDA device pointers — zero-copy with cudarc and ort.
-//! NPP is part of CUDA toolkit, linked via build.rs.
+//! NPP is downloaded by the runtime bootstrap and resolved once with `dlopen`.
 
 #![allow(non_camel_case_types, non_snake_case, dead_code)]
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use libloading::Library;
 
 // ── NPP Type Definitions ─────────────────────────────────────────────────
 
@@ -54,157 +59,184 @@ pub const NPP_MASK_SIZE_9_X_9: i32 = 3;
 pub const NPP_MASK_SIZE_11_X_11: i32 = 4;
 pub const NPP_MASK_SIZE_13_X_13: i32 = 5;
 
-// ── NPP Stream Context ───────────────────────────────────────────────────
+type NppSetStream = unsafe extern "C" fn(*mut std::ffi::c_void) -> NppStatus;
+type ResizeC3 = unsafe extern "C" fn(
+    *const f32,
+    i32,
+    NppiSize,
+    NppiRect,
+    *mut f32,
+    i32,
+    NppiSize,
+    NppiRect,
+    i32,
+) -> NppStatus;
+type WarpAffineC3 = unsafe extern "C" fn(
+    *const f32,
+    NppiSize,
+    i32,
+    NppiRect,
+    *mut f32,
+    i32,
+    NppiRect,
+    *const [[f64; 3]; 2],
+    i32,
+) -> NppStatus;
+type WarpAffineP3 = unsafe extern "C" fn(
+    *const *const f32,
+    NppiSize,
+    i32,
+    NppiRect,
+    *const *mut f32,
+    i32,
+    NppiRect,
+    *const [[f64; 3]; 2],
+    i32,
+) -> NppStatus;
+type ResizeP3 = unsafe extern "C" fn(
+    *const *const f32,
+    i32,
+    NppiSize,
+    NppiRect,
+    *const *mut f32,
+    i32,
+    NppiSize,
+    NppiRect,
+    i32,
+) -> NppStatus;
+type FilterGaussC1 =
+    unsafe extern "C" fn(*const f32, i32, *mut f32, i32, NppiSize, i32) -> NppStatus;
+type MorphologyC1 = unsafe extern "C" fn(*const f32, i32, *mut f32, i32, NppiSize) -> NppStatus;
 
-unsafe extern "C" {
-    /// Set the CUDA stream used by NPP.
-    pub fn nppSetStream(hStream: *mut std::ffi::c_void) -> NppStatus;
-
-    /// Get the current NPP CUDA stream.
-    pub fn nppGetStream() -> *mut std::ffi::c_void;
+struct NppApi {
+    _libraries: Vec<Library>,
+    set_stream: NppSetStream,
+    resize_c3: ResizeC3,
+    warp_affine_c3: WarpAffineC3,
+    warp_affine_p3: WarpAffineP3,
+    resize_p3: ResizeP3,
+    filter_gauss_c1: FilterGaussC1,
+    dilate_c1: MorphologyC1,
+    erode_c1: MorphologyC1,
 }
 
-// ── NPP Image Geometry Transforms (libnppig) ────────────────────────────
+static NPP: OnceLock<NppApi> = OnceLock::new();
 
-unsafe extern "C" {
-    /// Affine warp for 32-bit float, 3-channel interleaved image (HWC).
-    pub fn nppiWarpAffine_32f_C3R(
-        pSrc: *const f32,
-        oSrcSize: NppiSize,
-        nSrcStep: i32,
-        oSrcROI: NppiRect,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oDstROI: NppiRect,
-        aCoeffs: *const [[f64; 3]; 2],
-        eInterpolation: i32,
-    ) -> NppStatus;
-
-    /// Affine warp for 32-bit float, 3-plane image (CHW layout).
-    /// `aSrc`/`aDst` are arrays of 3 pointers (one per plane).
-    pub fn nppiWarpAffine_32f_P3R(
-        aSrc: *const *const f32,
-        oSrcSize: NppiSize,
-        nSrcStep: i32,
-        oSrcROI: NppiRect,
-        aDst: *const *mut f32,
-        nDstStep: i32,
-        oDstROI: NppiRect,
-        aCoeffs: *const [[f64; 3]; 2],
-        eInterpolation: i32,
-    ) -> NppStatus;
-
-    /// Bilinear resize for 32-bit float, 3-plane image (CHW).
-    pub fn nppiResize_32f_P3R(
-        aSrc: *const *const f32,
-        nSrcStep: i32,
-        oSrcSize: NppiSize,
-        oSrcROI: NppiRect,
-        aDst: *const *mut f32,
-        nDstStep: i32,
-        oDstSize: NppiSize,
-        oDstROI: NppiRect,
-        eInterpolation: i32,
-    ) -> NppStatus;
-
-    /// Affine warp for 32-bit float, 1-channel image (masks).
-    pub fn nppiWarpAffine_32f_C1R(
-        pSrc: *const f32,
-        oSrcSize: NppiSize,
-        nSrcStep: i32,
-        oSrcROI: NppiRect,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oDstROI: NppiRect,
-        aCoeffs: *const [[f64; 3]; 2],
-        eInterpolation: i32,
-    ) -> NppStatus;
-
-    /// Bilinear resize for 32-bit float, 3-channel image.
-    pub fn nppiResize_32f_C3R(
-        pSrc: *const f32,
-        nSrcStep: i32,
-        oSrcSize: NppiSize,
-        oSrcROI: NppiRect,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oDstSize: NppiSize,
-        oDstROI: NppiRect,
-        eInterpolation: i32,
-    ) -> NppStatus;
-
-    /// Bilinear resize for 32-bit float, 1-channel image (masks).
-    pub fn nppiResize_32f_C1R(
-        pSrc: *const f32,
-        nSrcStep: i32,
-        oSrcSize: NppiSize,
-        oSrcROI: NppiRect,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oDstSize: NppiSize,
-        oDstROI: NppiRect,
-        eInterpolation: i32,
-    ) -> NppStatus;
+#[derive(Debug, thiserror::Error)]
+pub enum NppLoadError {
+    #[error("NPP library is missing: {0}")]
+    MissingLibrary(PathBuf),
+    #[error("failed to load NPP library {path}: {source}")]
+    Library {
+        path: PathBuf,
+        #[source]
+        source: libloading::Error,
+    },
+    #[error("NPP symbol is missing: {0}")]
+    MissingSymbol(&'static str),
+    #[error("NPP was already initialized from another runtime generation")]
+    AlreadyInitialized,
 }
 
-// ── NPP Image Filtering (libnppif) ──────────────────────────────────────
-
-unsafe extern "C" {
-    /// Gaussian filter for 32-bit float, 1-channel image.
-    pub fn nppiFilterGauss_32f_C1R(
-        pSrc: *const f32,
-        nSrcStep: i32,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oSizeROI: NppiSize,
-        eMaskSize: i32,
-    ) -> NppStatus;
-
-    /// Gaussian filter for 32-bit float, 3-channel image.
-    pub fn nppiFilterGauss_32f_C3R(
-        pSrc: *const f32,
-        nSrcStep: i32,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oSizeROI: NppiSize,
-        eMaskSize: i32,
-    ) -> NppStatus;
+pub fn initialize_runtime(root: &Path) -> Result<(), NppLoadError> {
+    let api = unsafe { NppApi::load(root)? };
+    NPP.set(api).map_err(|_| NppLoadError::AlreadyInitialized)
 }
 
-// ── NPP Morphological Operations ────────────────────────────────────────
+impl NppApi {
+    unsafe fn load(root: &Path) -> Result<Self, NppLoadError> {
+        #[cfg(target_os = "windows")]
+        const LIBRARIES: &[&str] = &[
+            "nppc64_12.dll",
+            "nppig64_12.dll",
+            "nppif64_12.dll",
+            "nppim64_12.dll",
+        ];
+        #[cfg(not(target_os = "windows"))]
+        const LIBRARIES: &[&str] = &[
+            "libnppc.so.12",
+            "libnppig.so.12",
+            "libnppif.so.12",
+            "libnppim.so.12",
+        ];
 
-unsafe extern "C" {
-    /// 3x3 dilate for 32-bit float, 1-channel (replaces max_pool2d for masks).
-    pub fn nppiDilate3x3_32f_C1R(
-        pSrc: *const f32,
-        nSrcStep: i32,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oSizeROI: NppiSize,
-    ) -> NppStatus;
+        let mut libraries = Vec::with_capacity(LIBRARIES.len());
+        for name in LIBRARIES {
+            let path = root.join(name);
+            if !path.exists() {
+                return Err(NppLoadError::MissingLibrary(path));
+            }
+            libraries.push(unsafe { Library::new(&path) }.map_err(|source| {
+                NppLoadError::Library {
+                    path: path.clone(),
+                    source,
+                }
+            })?);
+        }
 
-    /// 3x3 erode for 32-bit float, 1-channel.
-    pub fn nppiErode3x3_32f_C1R(
-        pSrc: *const f32,
-        nSrcStep: i32,
-        pDst: *mut f32,
-        nDstStep: i32,
-        oSizeROI: NppiSize,
-    ) -> NppStatus;
+        unsafe fn resolve<T: Copy>(
+            libraries: &[Library],
+            name: &'static [u8],
+            printable: &'static str,
+        ) -> Result<T, NppLoadError> {
+            for library in libraries {
+                if let Ok(symbol) = unsafe { library.get::<T>(name) } {
+                    return Ok(*symbol);
+                }
+            }
+            Err(NppLoadError::MissingSymbol(printable))
+        }
+
+        Ok(Self {
+            set_stream: unsafe { resolve(&libraries, b"nppSetStream\0", "nppSetStream")? },
+            resize_c3: unsafe {
+                resolve(&libraries, b"nppiResize_32f_C3R\0", "nppiResize_32f_C3R")?
+            },
+            warp_affine_c3: unsafe {
+                resolve(
+                    &libraries,
+                    b"nppiWarpAffine_32f_C3R\0",
+                    "nppiWarpAffine_32f_C3R",
+                )?
+            },
+            warp_affine_p3: unsafe {
+                resolve(
+                    &libraries,
+                    b"nppiWarpAffine_32f_P3R\0",
+                    "nppiWarpAffine_32f_P3R",
+                )?
+            },
+            resize_p3: unsafe {
+                resolve(&libraries, b"nppiResize_32f_P3R\0", "nppiResize_32f_P3R")?
+            },
+            filter_gauss_c1: unsafe {
+                resolve(
+                    &libraries,
+                    b"nppiFilterGauss_32f_C1R\0",
+                    "nppiFilterGauss_32f_C1R",
+                )?
+            },
+            dilate_c1: unsafe {
+                resolve(
+                    &libraries,
+                    b"nppiDilate3x3_32f_C1R\0",
+                    "nppiDilate3x3_32f_C1R",
+                )?
+            },
+            erode_c1: unsafe {
+                resolve(
+                    &libraries,
+                    b"nppiErode3x3_32f_C1R\0",
+                    "nppiErode3x3_32f_C1R",
+                )?
+            },
+            _libraries: libraries,
+        })
+    }
 }
 
-// ── NPP Color Conversion (libnppicc) ────────────────────────────────────
-
-unsafe extern "C" {
-    /// Swap channels for 8-bit unsigned, 3-channel (RGB↔BGR).
-    pub fn nppiSwapChannels_8u_C3R(
-        pSrc: *const u8,
-        nSrcStep: i32,
-        pDst: *mut u8,
-        nDstStep: i32,
-        oSizeROI: NppiSize,
-        aDstOrder: *const i32,
-    ) -> NppStatus;
+fn api() -> Result<&'static NppApi, NppError> {
+    NPP.get().ok_or(NppError::NotInitialized)
 }
 
 // ── Safe Rust Wrappers ──────────────────────────────────────────────────
@@ -215,7 +247,7 @@ pub fn check_npp(status: NppStatus, op: &str) -> Result<(), NppError> {
     if status == NPP_SUCCESS {
         Ok(())
     } else {
-        Err(NppError {
+        Err(NppError::Status {
             status,
             op: op.to_string(),
         })
@@ -223,10 +255,11 @@ pub fn check_npp(status: NppStatus, op: &str) -> Result<(), NppError> {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("NPP error {status} in {op}")]
-pub struct NppError {
-    pub status: NppStatus,
-    pub op: String,
+pub enum NppError {
+    #[error("NPP error {status} in {op}")]
+    Status { status: NppStatus, op: String },
+    #[error("NPP runtime is not initialized")]
+    NotInitialized,
 }
 
 /// Set NPP to use our cudarc CUDA stream.
@@ -234,7 +267,7 @@ pub struct NppError {
 /// # Safety
 /// The stream must be a valid CUDA stream pointer and remain alive.
 pub unsafe fn set_npp_stream(stream_ptr: *mut std::ffi::c_void) -> Result<(), NppError> {
-    check_npp(unsafe { nppSetStream(stream_ptr) }, "nppSetStream")
+    check_npp(unsafe { (api()?.set_stream)(stream_ptr) }, "nppSetStream")
 }
 
 /// Resize a 3-channel f32 image using bilinear interpolation.
@@ -274,7 +307,7 @@ pub unsafe fn resize_f32_c3(
 
     check_npp(
         unsafe {
-            nppiResize_32f_C3R(
+            (api()?.resize_c3)(
                 src,
                 src_step,
                 src_size,
@@ -324,7 +357,7 @@ pub unsafe fn warp_affine_f32_c3(
 
     check_npp(
         unsafe {
-            nppiWarpAffine_32f_C3R(
+            (api()?.warp_affine_c3)(
                 src,
                 src_size,
                 src_step,
@@ -396,7 +429,7 @@ pub unsafe fn warp_affine_f32_p3(
 
     check_npp(
         unsafe {
-            nppiWarpAffine_32f_P3R(
+            (api()?.warp_affine_p3)(
                 src_ptrs.as_ptr(),
                 src_size,
                 src_step,
@@ -467,7 +500,7 @@ pub unsafe fn resize_f32_p3(
 
     check_npp(
         unsafe {
-            nppiResize_32f_P3R(
+            (api()?.resize_p3)(
                 src_ptrs.as_ptr(),
                 src_step,
                 src_size,
@@ -498,7 +531,7 @@ pub unsafe fn gaussian_blur_f32_c1(
     let step = width * 4;
 
     check_npp(
-        unsafe { nppiFilterGauss_32f_C1R(src, step, dst, step, roi, mask_size) },
+        unsafe { (api()?.filter_gauss_c1)(src, step, dst, step, roi, mask_size) },
         "nppiFilterGauss_32f_C1R",
     )
 }
@@ -517,7 +550,7 @@ pub unsafe fn dilate_3x3_f32_c1(
     let step = width * 4;
 
     check_npp(
-        unsafe { nppiDilate3x3_32f_C1R(src, step, dst, step, roi) },
+        unsafe { (api()?.dilate_c1)(src, step, dst, step, roi) },
         "nppiDilate3x3_32f_C1R",
     )
 }
@@ -536,7 +569,7 @@ pub unsafe fn erode_3x3_f32_c1(
     let step = width * 4;
 
     check_npp(
-        unsafe { nppiErode3x3_32f_C1R(src, step, dst, step, roi) },
+        unsafe { (api()?.erode_c1)(src, step, dst, step, roi) },
         "nppiErode3x3_32f_C1R",
     )
 }

@@ -4,6 +4,7 @@ use cudarc::driver::CudaContext;
 use noperson::gpu::ops::GpuOps;
 
 #[test]
+#[ignore = "requires CUDA"]
 fn converts_and_scales_solid_green_to_nv12_on_gpu() -> anyhow::Result<()> {
     let ctx = Arc::new(CudaContext::new(0)?);
     let stream = ctx.default_stream();

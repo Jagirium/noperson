@@ -82,18 +82,9 @@ if test "$mode" = --native; then
     verify_ort_cuda12
 
     stage="$work_dir/$artifact"
-    mkdir -p "$stage/lib"
+    mkdir -p "$stage"
     install -m 0755 target/release/noperson "$stage/noperson"
     install -m 0644 LICENSE README.md "$stage/"
-    find -L target/release -maxdepth 1 -type f -name 'libonnxruntime*.so*' \
-        -exec install -m 0755 {} "$stage/lib/" \;
-    # These expressions belong in the generated launcher.
-    # shellcheck disable=SC2016
-    printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
-        'root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' \
-        'export LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
-        'exec "$root/noperson" "$@"' >"$stage/run.sh"
-    chmod 0755 "$stage/run.sh"
     {
         printf 'commit=%s\n' "$commit"
         printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"
@@ -187,19 +178,9 @@ case "$needed" in *'libcudart.so.12'*) ;; *) echo 'release: ORT provider does no
 case "$needed" in *'.so.13'*) echo 'release: CUDA 13 dependency leaked into CUDA 12 release' >&2; exit 1 ;; esac
 
 stage="/build/stage/${RELEASE_ARTIFACT}"
-mkdir -p "$stage/lib"
+mkdir -p "$stage"
 install -m 0755 target/release/noperson "$stage/noperson"
 install -m 0644 LICENSE README.md "$stage/"
-find -L target/release -maxdepth 1 -type f -name 'libonnxruntime*.so*' \
-    -exec install -m 0755 {} "$stage/lib/" \;
-cat >"$stage/run.sh" <<'RUNNER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-export LD_LIBRARY_PATH="$root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$root/noperson" "$@"
-RUNNER
-chmod 0755 "$stage/run.sh"
 {
     printf 'commit=%s\n' "$RELEASE_COMMIT"
     printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"

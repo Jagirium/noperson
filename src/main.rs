@@ -4,7 +4,7 @@
 //! UI: egui (immediate mode, native)
 //! I/O: nokhwa (webcam), v4l2loopback (virtual camera)
 
-fn main() -> eframe::Result {
+fn main() -> anyhow::Result<()> {
     // Init logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -15,8 +15,39 @@ fn main() -> eframe::Result {
 
     tracing::info!("noperson v{} starting up", env!("CARGO_PKG_VERSION"));
 
-    // Check models directory
+    let runtime = match noperson::runtime::prepare()? {
+        noperson::runtime::BootstrapOutcome::Ready(layout) => layout,
+        noperson::runtime::BootstrapOutcome::Reexec(layout) => {
+            return Err(noperson::runtime::reexec(&layout).into());
+        }
+    };
+    tracing::info!("GPU runtime ready: {}", runtime.root().display());
+
     let models_dir = std::path::PathBuf::from("models");
+    if std::env::args_os().any(|argument| argument == "--runtime-check") {
+        let probe_model = models_dir.join("yoloface_8n.onnx");
+        if probe_model.is_file() {
+            let mut manager = noperson::models::manager::ModelManager::new(&models_dir);
+            manager.load("RuntimeCheck", "yoloface_8n.onnx")?;
+            tracing::info!("CUDA execution provider session check passed");
+
+            let mut manager = noperson::models::manager::ModelManager::with_provider(
+                &models_dir,
+                noperson::config::settings::ExecutionProvider::TensorRT,
+            );
+            manager.load("RuntimeCheck", "yoloface_8n.onnx")?;
+            tracing::info!("TensorRT execution provider session check passed");
+        } else {
+            tracing::warn!(
+                "CUDA session check skipped because {} is missing",
+                probe_model.display()
+            );
+        }
+        tracing::info!("GPU runtime bootstrap check passed");
+        return Ok(());
+    }
+
+    // Check models directory
     if !models_dir.exists() {
         std::fs::create_dir_all(&models_dir).ok();
         tracing::warn!("Created models/ directory — place .onnx files here");
@@ -53,5 +84,6 @@ fn main() -> eframe::Result {
         "noperson",
         options,
         Box::new(move |_cc| Ok(Box::new(noperson::app::App::new(models_dir)))),
-    )
+    )?;
+    Ok(())
 }
