@@ -311,6 +311,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "local visual baseline is stored in ignored tests/snapshots"]
     fn warmup_visual_snapshot() {
         let snapshot = RealtimePreviewSnapshot {
             texture: None,
@@ -328,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "local visual baseline is stored in ignored tests/snapshots"]
     fn frame_visual_snapshot() {
         let image = image::open("face.jpg")
             .expect("face.jpg test fixture")
