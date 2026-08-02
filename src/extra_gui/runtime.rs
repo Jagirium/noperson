@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,13 +9,20 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cudarc::driver::CudaContext;
+#[cfg(target_os = "linux")]
+use cudarc::driver::{CudaEvent, DevicePtr};
 use thiserror::Error;
 
 use crate::engine::BuildPhase;
 use crate::gpu::ops::GpuOps;
-use crate::io::video::{
-    FfmpegVideoSink, FfmpegVideoSource, Frame, FrameSink, FrameSource, remux_original_audio,
+#[cfg(target_os = "linux")]
+use crate::io::native_video::{
+    MappedVideoSurface, NativeDemuxer, NativeMuxer, NvDecoder, NvEncoder, NvEncoderConfig,
+    PixelFormat, VideoCodec, remux_audio,
 };
+#[cfg(not(target_os = "linux"))]
+use crate::io::video::{FfmpegVideoSink, FrameSink, remux_original_audio};
+use crate::io::video::{FfmpegVideoSource, Frame, FrameSource};
 use crate::live::{
     AnalyzedIdentity, AtomicLiveEngine, IdentityAnalyzer, LiveShadowBuilder, ProcessedRgb,
     output_dimensions,
@@ -116,6 +125,42 @@ pub struct EditorPreviewImage {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+#[cfg(target_os = "linux")]
+struct DeferredVideoSurface {
+    completion: CudaEvent,
+    surface: Option<MappedVideoSurface>,
+}
+
+#[cfg(target_os = "linux")]
+impl DeferredVideoSurface {
+    fn new(completion: CudaEvent, surface: MappedVideoSurface) -> Self {
+        Self {
+            completion,
+            surface: Some(surface),
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.completion.is_complete()
+    }
+
+    fn release(mut self) -> anyhow::Result<()> {
+        self.completion.synchronize()?;
+        self.surface.take();
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DeferredVideoSurface {
+    fn drop(&mut self) {
+        if self.surface.is_some() {
+            let _ = self.completion.synchronize();
+            self.surface.take();
+        }
+    }
 }
 
 impl From<&Frame> for EditorPreviewImage {
@@ -517,6 +562,33 @@ fn record_job(
     input: PathBuf,
     output: PathBuf,
     initial: EditorEngineRequest,
+    markers: BTreeMap<u64, EditorEngineRequest>,
+    events: &Sender<EditorRuntimeEvent>,
+    cancel: &CancellationToken<'_>,
+    gpu: &mut Option<Arc<GpuOps>>,
+    engine: &mut Option<AtomicLiveEngine>,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        record_job_native(
+            models_dir, input, output, initial, markers, events, cancel, gpu, engine,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        record_job_pipe(
+            models_dir, input, output, initial, markers, events, cancel, gpu, engine,
+        )
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+fn record_job_pipe(
+    models_dir: &std::path::Path,
+    input: PathBuf,
+    output: PathBuf,
+    initial: EditorEngineRequest,
     mut markers: BTreeMap<u64, EditorEngineRequest>,
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
@@ -568,6 +640,193 @@ fn record_job(
         }
         sink.finish()?;
         remux_original_audio(&temporary, &input, &output)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result?;
+    events.send(EditorRuntimeEvent::Completed(output))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn record_job_native(
+    models_dir: &std::path::Path,
+    input: PathBuf,
+    output: PathBuf,
+    initial: EditorEngineRequest,
+    mut markers: BTreeMap<u64, EditorEngineRequest>,
+    events: &Sender<EditorRuntimeEvent>,
+    cancel: &CancellationToken<'_>,
+    gpu: &mut Option<Arc<GpuOps>>,
+    engine: &mut Option<AtomicLiveEngine>,
+) -> anyhow::Result<()> {
+    cancel.ensure_active("recording")?;
+    events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Building))?;
+    let gpu_ops = ensure_gpu(gpu)?;
+    let output_params = initial.spec.params.clone();
+    let initial = take_effective_request(initial, &mut markers, 0);
+    configure_engine(models_dir, Arc::clone(&gpu_ops), engine, initial, cancel)?;
+    events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Recording))?;
+
+    let mut source = NativeDemuxer::open(&input)?;
+    let source_info = source.video_stream().clone();
+    let (output_width, output_height) =
+        output_dimensions(&output_params, source_info.width, source_info.height)?;
+    anyhow::ensure!(
+        output_width.is_multiple_of(2) && output_height.is_multiple_of(2),
+        "NVENC output dimensions must be even: {output_width}x{output_height}"
+    );
+    let frame_rate_num = source_info.frame_rate_num.max(1);
+    let frame_rate_den = source_info.frame_rate_den.max(1);
+    let frame_duration = ((i128::from(source_info.time_base_den) * i128::from(frame_rate_den)
+        + i128::from(source_info.time_base_num) * i128::from(frame_rate_num) / 2)
+        / (i128::from(source_info.time_base_num) * i128::from(frame_rate_num)))
+    .max(1) as i64;
+
+    let context = gpu_ops.stream.context();
+    let mut decoder = unsafe {
+        NvDecoder::open(
+            context.cu_ctx() as *mut std::ffi::c_void,
+            gpu_ops.stream.cu_stream() as *mut std::ffi::c_void,
+            source_info.codec,
+        )?
+    };
+    let output_pixel_format = if source_info.bit_depth > 8 {
+        PixelFormat::P010
+    } else {
+        PixelFormat::Nv12
+    };
+    let mut config = NvEncoderConfig::h264_quality(
+        output_width,
+        output_height,
+        frame_rate_num,
+        frame_rate_den,
+        source_info.time_base_num,
+        source_info.time_base_den,
+    )
+    .with_color(source_info.color);
+    if output_pixel_format == PixelFormat::P010 {
+        config.codec = VideoCodec::Hevc;
+        config.pixel_format = PixelFormat::P010;
+    }
+    let mut encoder = unsafe {
+        NvEncoder::open(
+            context.cu_ctx() as *mut std::ffi::c_void,
+            gpu_ops.stream.cu_stream() as *mut std::ffi::c_void,
+            config,
+        )?
+    };
+    let temporary = PathBuf::from(format!("{}.video-only.mp4", output.display()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut muxer = NativeMuxer::create(&temporary, encoder.video_stream())?;
+        let mut chw = gpu_ops
+            .alloc_zeros(3usize * source_info.width as usize * source_info.height as usize)?;
+        let bytes_per_sample = if output_pixel_format == PixelFormat::P010 {
+            2
+        } else {
+            1
+        };
+        let output_bytes =
+            output_width as usize * output_height as usize * 3 / 2 * bytes_per_sample;
+        let mut encode_surfaces = (0..5)
+            .map(|_| gpu_ops.alloc_zeros_u8(output_bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut index = 0_u64;
+        let mut next_pts = 0_i64;
+        let mut pending_surfaces: VecDeque<DeferredVideoSurface> = VecDeque::new();
+
+        let mut drain = |decoder: &mut NvDecoder| -> anyhow::Result<()> {
+            while let Some(surface) = decoder.next_frame()? {
+                while pending_surfaces
+                    .front()
+                    .is_some_and(DeferredVideoSurface::is_complete)
+                {
+                    pending_surfaces.pop_front();
+                }
+                if pending_surfaces.len() >= 6 {
+                    pending_surfaces
+                        .pop_front()
+                        .expect("deferred NVDEC surface queue is not empty")
+                        .release()?;
+                }
+                cancel.ensure_active("recording")?;
+                if let Some(request) = markers.remove(&index) {
+                    configure_engine(models_dir, ensure_gpu(gpu)?, engine, request, cancel)?;
+                }
+                let timestamp_100ns = surface.timestamp_100ns();
+                unsafe {
+                    gpu_ops.nv12_device_to_chw_f32(
+                        surface.device_ptr(),
+                        surface.pitch(),
+                        &mut chw,
+                        surface.height(),
+                        surface.width(),
+                        surface.pixel_format(),
+                        source_info.color.matrix,
+                        source_info.color.range,
+                    )?;
+                }
+                let conversion_done = gpu_ops.stream.record_event(None)?;
+                pending_surfaces.push_back(DeferredVideoSurface::new(conversion_done, surface));
+                engine
+                    .as_mut()
+                    .expect("engine was configured")
+                    .process_chw_to_nv12(
+                        &mut chw,
+                        source_info.height,
+                        source_info.width,
+                        &mut encode_surfaces[index as usize % 5],
+                        source_info.color.matrix,
+                        source_info.color.range,
+                        output_pixel_format,
+                    )?;
+                let timestamp_pts = (i128::from(timestamp_100ns)
+                    * i128::from(source_info.time_base_den)
+                    / (10_000_000_i128 * i128::from(source_info.time_base_num)))
+                    as i64;
+                let pts = timestamp_pts.max(next_pts);
+                next_pts = pts.saturating_add(frame_duration);
+                let (device_ptr, _guard) =
+                    encode_surfaces[index as usize % 5].device_ptr(&gpu_ops.stream);
+                if let Some(packet) = unsafe {
+                    encoder.encode_device_frame(
+                        device_ptr,
+                        output_width * bytes_per_sample as u32,
+                        pts,
+                        frame_duration,
+                    )?
+                } {
+                    muxer.write_video_packet(&packet)?;
+                }
+                index = index.saturating_add(1);
+                events.send(EditorRuntimeEvent::Progress {
+                    processed: index,
+                    total: source_info.frame_count,
+                })?;
+            }
+            Ok(())
+        };
+
+        while let Some(packet) = source.next_decode_packet()? {
+            cancel.ensure_active("recording")?;
+            decoder.send_packet(
+                &packet,
+                source_info.time_base_num,
+                source_info.time_base_den,
+            )?;
+            drain(&mut decoder)?;
+        }
+        decoder.flush()?;
+        drain(&mut decoder)?;
+        while let Some(surface) = pending_surfaces.pop_front() {
+            surface.release()?;
+        }
+        for packet in encoder.finish()? {
+            muxer.write_video_packet(&packet)?;
+        }
+        muxer.finish()?;
+        remux_audio(&temporary, &input, &output)?;
         Ok(())
     })();
     let _ = std::fs::remove_file(&temporary);

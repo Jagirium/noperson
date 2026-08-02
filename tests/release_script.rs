@@ -60,6 +60,39 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
 }
 
 #[test]
+fn linux_release_bundles_a_pinned_minimal_lgpl_ffmpeg_runtime() {
+    let script = fs::read_to_string("scripts/release/linux.sh").expect("release builder exists");
+    for required in [
+        "FFMPEG_VERSION=8.1.2",
+        "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
+        "NV_CODEC_HEADERS_VERSION=n13.0.19.0",
+        "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116",
+        "--disable-gpl",
+        "--disable-nonfree",
+        "--disable-programs",
+        "--enable-shared",
+        "NOPERSON_REQUIRE_NV_CODEC_HEADERS=1",
+        "NOPERSON_NV_CODEC_HEADERS",
+        "libavformat.so",
+        "libavcodec.so",
+        "libavutil.so",
+        "patchelf --force-rpath --set-rpath '$ORIGIN/lib'",
+        "patchelf --print-rpath",
+        "bundled FFmpeg loader closure is incomplete",
+        "FFMPEG-SOURCE-OFFER",
+    ] {
+        assert!(
+            script.contains(required),
+            "missing native video release control: {required}"
+        );
+    }
+    assert!(
+        script.matches("CARGO_BUILD_JOBS=2").count() >= 2,
+        "native and container builds must cap linker concurrency"
+    );
+}
+
+#[test]
 fn windows_release_builder_is_native_and_locked() {
     let script =
         fs::read_to_string("scripts/release/win.ps1").expect("native Windows builder exists");
@@ -180,6 +213,10 @@ fn native_kernel_build_has_explicit_arch_and_no_downloadable_runtime_links() {
     let bootstrap = fs::read_to_string("src/runtime/bootstrap.rs").unwrap();
     assert!(bootstrap.contains("stage_launch_directory"));
     assert!(bootstrap.contains("materialize_atomically"));
+    assert!(
+        bootstrap.contains("parent.join(\"lib\")") && bootstrap.contains("bundled.is_dir()"),
+        "re-exec must retain access to the bundled FFmpeg runtime"
+    );
     assert!(
         !bootstrap.contains("preload_ort_providers"),
         "ORT must load providers itself after its host is initialized"

@@ -1062,6 +1062,63 @@ impl LiveEngine {
         Ok(result)
     }
 
+    /// Process an already device-resident CHW frame and convert the final
+    /// (optionally enhanced) image directly into a tightly packed NV12 buffer.
+    pub fn process_chw_to_nv12(
+        &mut self,
+        frame: &mut CudaSlice<f32>,
+        height: u32,
+        width: u32,
+        output: &mut CudaSlice<u8>,
+        matrix: crate::io::native_video::ColorMatrix,
+        range: crate::io::native_video::ColorRange,
+        pixel_format: crate::io::native_video::PixelFormat,
+    ) -> anyhow::Result<FrameResult> {
+        let result = self.process_chw(frame, height, width)?;
+        let (output_width, output_height) = output_dimensions(&self.params, width, height)?;
+        let required = output_width as usize * output_height as usize * 3 / 2;
+        anyhow::ensure!(
+            output.len() >= required,
+            "NV12 output buffer is too small: need {required}, got {}",
+            output.len()
+        );
+
+        let mut enhanced = if let Some(enhancer) = &mut self.enhancer {
+            let output_elements = 3usize
+                .checked_mul(output_width as usize)
+                .and_then(|elements| elements.checked_mul(output_height as usize))
+                .ok_or_else(|| anyhow::anyhow!("enhanced output allocation overflows"))?;
+            let mut scratch = match self.enhanced_scratch.take() {
+                Some(buffer) if buffer.len() == output_elements => buffer,
+                _ => self.gpu.alloc_zeros(output_elements)?,
+            };
+            enhancer.enhance_into(
+                frame,
+                &mut scratch,
+                width,
+                height,
+                self.params.enhancer_blend,
+            )?;
+            Some(scratch)
+        } else {
+            None
+        };
+        let output_chw = enhanced.as_ref().unwrap_or(frame);
+        self.gpu.chw_f32_to_nv12_scaled_color(
+            output_chw,
+            output,
+            output_height,
+            output_width,
+            output_height,
+            output_width,
+            matrix,
+            range,
+            pixel_format,
+        )?;
+        self.enhanced_scratch = enhanced.take();
+        Ok(result)
+    }
+
     pub fn process_rgb(
         &mut self,
         data: &[u8],

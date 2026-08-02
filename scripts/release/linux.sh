@@ -3,6 +3,10 @@ set -Eeuo pipefail
 
 RUST_TOOLCHAIN=1.97.1
 APT_SNAPSHOT=20250701T000000Z
+FFMPEG_VERSION=8.1.2
+FFMPEG_SHA256=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
+NV_CODEC_HEADERS_VERSION=n13.0.19.0
+NV_CODEC_HEADERS_SHA256=86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116
 
 die() {
     printf 'release: %s\n' "$*" >&2
@@ -23,6 +27,84 @@ verify_ort_cuda12() {
     case "$needed" in *'libcublasLt.so.12'*) ;; *) die 'ORT provider does not target cuBLAS 12' ;; esac
     case "$needed" in *'libcudart.so.12'*) ;; *) die 'ORT provider does not target CUDA runtime 12' ;; esac
     case "$needed" in *'.so.13'*) die 'CUDA 13 dependency leaked into CUDA 12 release' ;; esac
+}
+
+build_native_video_dependencies() {
+    local root=$1
+    local ffmpeg_archive="$root/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+    local headers_archive="$root/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz"
+    curl -fL --retry 3 "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+        -o "$ffmpeg_archive"
+    printf '%s  %s\n' "$FFMPEG_SHA256" "$ffmpeg_archive" | sha256sum -c -
+    tar -xf "$ffmpeg_archive" -C "$root"
+    curl -fL --retry 3 \
+        "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/${NV_CODEC_HEADERS_VERSION}.tar.gz" \
+        -o "$headers_archive"
+    printf '%s  %s\n' "$NV_CODEC_HEADERS_SHA256" "$headers_archive" | sha256sum -c -
+    tar -xf "$headers_archive" -C "$root"
+    ffmpeg_source="$root/ffmpeg-${FFMPEG_VERSION}"
+    ffmpeg_prefix="$root/ffmpeg-runtime"
+    nv_codec_headers="$root/nv-codec-headers-${NV_CODEC_HEADERS_VERSION#n}/include"
+    (
+        cd "$ffmpeg_source"
+        ./configure \
+            --prefix="$ffmpeg_prefix" \
+            --disable-static \
+            --enable-shared \
+            --disable-gpl \
+            --disable-nonfree \
+            --disable-programs \
+            --disable-doc \
+            --disable-debug \
+            --disable-x86asm \
+            --disable-network \
+            --disable-avdevice \
+            --disable-avfilter \
+            --disable-swscale \
+            --disable-swresample \
+            --disable-encoders \
+            --disable-decoders \
+            --disable-hwaccels \
+            --disable-filters \
+            --disable-devices
+        make -j2
+        make install
+    )
+}
+
+stage_native_video_dependencies() {
+    local stage=$1
+    mkdir -p "$stage/lib"
+    cp -a "$ffmpeg_prefix/lib/libavformat.so"* "$stage/lib/"
+    cp -a "$ffmpeg_prefix/lib/libavcodec.so"* "$stage/lib/"
+    cp -a "$ffmpeg_prefix/lib/libavutil.so"* "$stage/lib/"
+    # Preserve loader-relative ELF paths literally.
+    # shellcheck disable=SC2016
+    find "$stage/lib" -type f -name 'libav*.so*' -exec \
+        patchelf --force-rpath --set-rpath '$ORIGIN' {} +
+    # shellcheck disable=SC2016
+    patchelf --force-rpath --set-rpath '$ORIGIN/lib' "$stage/noperson"
+    install -m 0644 "$ffmpeg_source/LICENSE.md" "$stage/FFMPEG-LICENSE.md"
+    {
+        printf 'source=https://ffmpeg.org/releases/ffmpeg-%s.tar.xz\n' "$FFMPEG_VERSION"
+        printf 'sha256=%s\n' "$FFMPEG_SHA256"
+        printf 'configuration=%s\n' "$(sed -n 's/^FFMPEG_CONFIGURATION=//p' "$ffmpeg_source/ffbuild/config.mak")"
+    } >"$stage/FFMPEG-SOURCE-OFFER"
+}
+
+verify_native_video_bundle() {
+    local stage=$1
+    local closure
+    # shellcheck disable=SC2016
+    test "$(patchelf --print-rpath "$stage/noperson")" = '$ORIGIN/lib' \
+        || die 'binary FFmpeg RPATH is not loader-relative'
+    closure=$(ldd "$stage/noperson")
+    case "$closure" in *'not found'*) die 'bundled FFmpeg loader closure is incomplete' ;; esac
+    for library in libavformat libavcodec libavutil; do
+        case "$closure" in *"$stage/lib/${library}.so"*) ;;
+            *) die "binary did not resolve bundled ${library}" ;;
+        esac
+    done
 }
 
 mode=${1:---docker}
@@ -65,6 +147,8 @@ artifact="noperson-v${version}-linux-${artifact_arch}"
 if test "$mode" = --native; then
     command -v rustup >/dev/null || die 'rustup is required for native build'
     command -v cargo >/dev/null || die 'cargo is required for native build'
+    command -v curl >/dev/null || die 'curl is required for native build'
+    command -v patchelf >/dev/null || die 'patchelf is required for native build'
     cuda_root=${CUDA_HOME:-${CUDA_PATH:-/usr/local/cuda}}
     nvcc="$cuda_root/bin/nvcc"
     test -x "$nvcc" || die "nvcc is missing: $nvcc"
@@ -77,6 +161,11 @@ if test "$mode" = --native; then
     export ORT_CUDA_VERSION=12
     export CARGO_INCREMENTAL=0
     export NOPERSON_CUDA_ARCH=compute_75
+    export CARGO_BUILD_JOBS=2
+    build_native_video_dependencies "$work_dir"
+    export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig"
+    export NOPERSON_NV_CODEC_HEADERS="$nv_codec_headers"
+    export NOPERSON_REQUIRE_NV_CODEC_HEADERS=1
     export RUSTFLAGS="--remap-path-prefix=${repo_root}=. -C link-arg=-Wl,--build-id=none"
     cargo "+$RUST_TOOLCHAIN" build --locked --release
     verify_ort_cuda12
@@ -84,6 +173,8 @@ if test "$mode" = --native; then
     stage="$work_dir/$artifact"
     mkdir -p "$stage"
     install -m 0755 target/release/noperson "$stage/noperson"
+    stage_native_video_dependencies "$stage"
+    verify_native_video_bundle "$stage"
     install -m 0644 LICENSE README.md "$stage/"
     {
         printf 'commit=%s\n' "$commit"
@@ -134,6 +225,10 @@ fi
     -e "RELEASE_ARTIFACT=$artifact" \
     -e "OUTPUT_UID=$output_uid" \
     -e "OUTPUT_GID=$output_gid" \
+    -e "FFMPEG_VERSION=$FFMPEG_VERSION" \
+    -e "FFMPEG_SHA256=$FFMPEG_SHA256" \
+    -e "NV_CODEC_HEADERS_VERSION=$NV_CODEC_HEADERS_VERSION" \
+    -e "NV_CODEC_HEADERS_SHA256=$NV_CODEC_HEADERS_SHA256" \
     -v "$source_dir:/input:ro" \
     -v "$repo_root/dist:/dist" \
     "$cuda_image" bash -Eeuo pipefail -s <<'BUILD'
@@ -151,7 +246,7 @@ apt-get -o Acquire::Check-Valid-Until=false update
 apt-get -o Acquire::Check-Valid-Until=false install -y --no-install-recommends \
     build-essential ca-certificates curl git libclang-dev libgtk-3-dev libjpeg-dev \
     libssl-dev libudev-dev libv4l-dev libwayland-dev libx11-dev libxkbcommon-dev \
-    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config xz-utils
+    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev nasm patchelf pkg-config xz-utils
 rm -rf /var/lib/apt/lists/*
 
 export CARGO_HOME=/opt/rust/cargo
@@ -163,11 +258,40 @@ export CUDA_HOME=/usr/local/cuda
 export ORT_CUDA_VERSION=12
 export CARGO_INCREMENTAL=0
 export NOPERSON_CUDA_ARCH=compute_75
+export CARGO_BUILD_JOBS=2
 export RUSTFLAGS="--remap-path-prefix=/build/source=. -C link-arg=-Wl,--build-id=none"
 
-mkdir -p /build/source /build/stage
+mkdir -p /build/source /build/stage /build/dependencies
 cp -a /input/. /build/source/
+curl -fL --retry 3 "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+    -o "/build/dependencies/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+printf '%s  %s\n' "$FFMPEG_SHA256" "/build/dependencies/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+    | sha256sum -c -
+tar -xf "/build/dependencies/ffmpeg-${FFMPEG_VERSION}.tar.xz" -C /build/dependencies
+curl -fL --retry 3 \
+    "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/${NV_CODEC_HEADERS_VERSION}.tar.gz" \
+    -o "/build/dependencies/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz"
+printf '%s  %s\n' "$NV_CODEC_HEADERS_SHA256" \
+    "/build/dependencies/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz" | sha256sum -c -
+tar -xf "/build/dependencies/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz" \
+    -C /build/dependencies
+ffmpeg_source="/build/dependencies/ffmpeg-${FFMPEG_VERSION}"
+ffmpeg_prefix=/build/dependencies/ffmpeg-runtime
+cd "$ffmpeg_source"
+./configure \
+    --prefix="$ffmpeg_prefix" \
+    --disable-static --enable-shared --disable-gpl --disable-nonfree \
+    --disable-programs --disable-doc --disable-debug --disable-x86asm --disable-network \
+    --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
+    --disable-encoders --disable-decoders --disable-hwaccels \
+    --disable-filters --disable-devices
+make -j2
+make install
+
 cd /build/source
+export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig"
+export NOPERSON_NV_CODEC_HEADERS="/build/dependencies/nv-codec-headers-${NV_CODEC_HEADERS_VERSION#n}/include"
+export NOPERSON_REQUIRE_NV_CODEC_HEADERS=1
 cargo build --locked --release
 
 provider=$(find -L target/release -maxdepth 1 -type f \
@@ -179,8 +303,32 @@ case "$needed" in *'libcudart.so.12'*) ;; *) echo 'release: ORT provider does no
 case "$needed" in *'.so.13'*) echo 'release: CUDA 13 dependency leaked into CUDA 12 release' >&2; exit 1 ;; esac
 
 stage="/build/stage/${RELEASE_ARTIFACT}"
-mkdir -p "$stage"
+mkdir -p "$stage/lib"
 install -m 0755 target/release/noperson "$stage/noperson"
+cp -a "$ffmpeg_prefix/lib/libavformat.so"* "$stage/lib/"
+cp -a "$ffmpeg_prefix/lib/libavcodec.so"* "$stage/lib/"
+cp -a "$ffmpeg_prefix/lib/libavutil.so"* "$stage/lib/"
+# Preserve loader-relative ELF paths literally.
+# shellcheck disable=SC2016
+find "$stage/lib" -type f -name 'libav*.so*' -exec \
+    patchelf --force-rpath --set-rpath '$ORIGIN' {} +
+# shellcheck disable=SC2016
+patchelf --force-rpath --set-rpath '$ORIGIN/lib' "$stage/noperson"
+install -m 0644 "$ffmpeg_source/LICENSE.md" "$stage/FFMPEG-LICENSE.md"
+{
+    printf 'source=https://ffmpeg.org/releases/ffmpeg-%s.tar.xz\n' "$FFMPEG_VERSION"
+    printf 'sha256=%s\n' "$FFMPEG_SHA256"
+    printf 'configuration=%s\n' "$(sed -n 's/^FFMPEG_CONFIGURATION=//p' "$ffmpeg_source/ffbuild/config.mak")"
+} >"$stage/FFMPEG-SOURCE-OFFER"
+test "$(patchelf --print-rpath "$stage/noperson")" = '$ORIGIN/lib' \
+    || { echo 'release: binary FFmpeg RPATH is not loader-relative' >&2; exit 1; }
+closure=$(ldd "$stage/noperson")
+case "$closure" in *'not found'*) echo 'release: bundled FFmpeg loader closure is incomplete' >&2; exit 1 ;; esac
+for library in libavformat libavcodec libavutil; do
+    case "$closure" in *"$stage/lib/${library}.so"*) ;;
+        *) echo "release: binary did not resolve bundled ${library}" >&2; exit 1 ;;
+    esac
+done
 install -m 0644 LICENSE README.md "$stage/"
 {
     printf 'commit=%s\n' "$RELEASE_COMMIT"

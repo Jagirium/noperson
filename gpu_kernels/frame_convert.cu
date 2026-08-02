@@ -93,6 +93,61 @@ unsigned char round_clamp_u8(float value) {
     return (unsigned char)__float2int_rn(fminf(fmaxf(value, 0.0f), 255.0f));
 }
 
+// Pitch-aware NV12/P010 surface -> CHW f32 RGB [0,255]. The source pointer
+// may be owned by NVDEC; no wrapper allocation or device copy is required.
+extern "C" __global__
+void nv12_to_chw_f32_kernel(
+    const unsigned char* __restrict__ source,
+    const unsigned int pitch,
+    float* __restrict__ chw,
+    const unsigned int H,
+    const unsigned int W,
+    const unsigned int p010,
+    const float y_offset,
+    const float y_scale,
+    const float rv,
+    const float gu,
+    const float gv,
+    const float bu
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int total = H * W;
+    if (idx >= total) return;
+
+    unsigned int y = idx / W;
+    unsigned int x = idx % W;
+    float y_code;
+    float u_code;
+    float v_code;
+    if (p010 != 0) {
+        const unsigned short* y_plane = (const unsigned short*)source;
+        const unsigned short* uv_plane =
+            (const unsigned short*)(source + (unsigned long long)pitch * H);
+        unsigned int pitch_samples = pitch / 2;
+        y_code = (float)(y_plane[y * pitch_samples + x] >> 6) * 0.25f;
+        unsigned int uv = (y / 2) * pitch_samples + (x & ~1u);
+        u_code = (float)(uv_plane[uv] >> 6) * 0.25f;
+        v_code = (float)(uv_plane[uv + 1] >> 6) * 0.25f;
+    } else {
+        const unsigned char* uv_plane = source + (unsigned long long)pitch * H;
+        y_code = (float)source[y * pitch + x];
+        unsigned int uv = (y / 2) * pitch + (x & ~1u);
+        u_code = (float)uv_plane[uv];
+        v_code = (float)uv_plane[uv + 1];
+    }
+
+    float luma = (y_code - y_offset) * y_scale;
+    float cb = u_code - 128.0f;
+    float cr = v_code - 128.0f;
+    float r = luma + rv * cr;
+    float g = luma + gu * cb + gv * cr;
+    float b = luma + bu * cb;
+    unsigned int plane = H * W;
+    chw[idx] = fminf(fmaxf(r, 0.0f), 255.0f);
+    chw[plane + idx] = fminf(fmaxf(g, 0.0f), 255.0f);
+    chw[2 * plane + idx] = fminf(fmaxf(b, 0.0f), 255.0f);
+}
+
 // CHW f32 RGB [3, src_h, src_w] in [0, 255] -> scaled NV12.
 // One thread writes one Y sample. Threads on even coordinates additionally
 // write the corresponding interleaved UV sample, so no atomics are needed.
@@ -103,7 +158,19 @@ void chw_f32_to_nv12_scaled_kernel(
     const unsigned int src_h,
     const unsigned int src_w,
     const unsigned int dst_h,
-    const unsigned int dst_w
+    const unsigned int dst_w,
+    const unsigned int p010,
+    const float yr,
+    const float yg,
+    const float yb,
+    const float y_offset,
+    const float ur,
+    const float ug,
+    const float ub,
+    const float vr,
+    const float vg,
+    const float vb,
+    const float uv_offset
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int total = dst_h * dst_w;
@@ -114,12 +181,19 @@ void chw_f32_to_nv12_scaled_kernel(
     float r = sample_chw_bilinear(chw, 0, src_h, src_w, y, x, dst_h, dst_w);
     float g = sample_chw_bilinear(chw, 1, src_h, src_w, y, x, dst_h, dst_w);
     float b = sample_chw_bilinear(chw, 2, src_h, src_w, y, x, dst_h, dst_w);
-    nv12[idx] = round_clamp_u8(0.257f * r + 0.504f * g + 0.098f * b + 16.0f);
+    float y_code = yr * r + yg * g + yb * b + y_offset;
+    if (p010 != 0) {
+        unsigned short* p010_output = (unsigned short*)nv12;
+        float code = fminf(fmaxf(y_code * 4.0f, 0.0f), 1023.0f);
+        p010_output[idx] = ((unsigned short)(code + 0.5f)) << 6;
+    } else {
+        nv12[idx] = round_clamp_u8(y_code);
+    }
 
     if ((x & 1u) != 0u || (y & 1u) != 0u) return;
 
     // NV12 chroma represents a 2x2 luma block. Average the four resampled RGB
-    // pixels before applying the BT.601 limited-range transform.
+    // pixels before applying the selected YUV matrix and range transform.
     float sum_r = 0.0f;
     float sum_g = 0.0f;
     float sum_b = 0.0f;
@@ -136,8 +210,18 @@ void chw_f32_to_nv12_scaled_kernel(
     g = sum_g * 0.25f;
     b = sum_b * 0.25f;
     unsigned int uv = total + (y / 2) * dst_w + x;
-    nv12[uv] = round_clamp_u8(-0.148f * r - 0.291f * g + 0.439f * b + 128.0f);
-    nv12[uv + 1] = round_clamp_u8(0.439f * r - 0.368f * g - 0.071f * b + 128.0f);
+    float u_code = ur * r + ug * g + ub * b + uv_offset;
+    float v_code = vr * r + vg * g + vb * b + uv_offset;
+    if (p010 != 0) {
+        unsigned short* p010_output = (unsigned short*)nv12;
+        float u10 = fminf(fmaxf(u_code * 4.0f, 0.0f), 1023.0f);
+        float v10 = fminf(fmaxf(v_code * 4.0f, 0.0f), 1023.0f);
+        p010_output[uv] = ((unsigned short)(u10 + 0.5f)) << 6;
+        p010_output[uv + 1] = ((unsigned short)(v10 + 0.5f)) << 6;
+    } else {
+        nv12[uv] = round_clamp_u8(u_code);
+        nv12[uv + 1] = round_clamp_u8(v_code);
+    }
 }
 
 // Letterbox resize + normalize: src [3, src_h, src_w] f32 in [0, 255] →

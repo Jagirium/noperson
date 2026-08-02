@@ -31,6 +31,58 @@ fn main() {
     let cuda_arch = env::var("NOPERSON_CUDA_ARCH").unwrap_or_else(|_| "compute_75".to_owned());
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        let avformat = pkg_config::Config::new()
+            .cargo_metadata(true)
+            .probe("libavformat")
+            .expect("libavformat development files are required for native video support");
+        let avcodec = pkg_config::Config::new()
+            .cargo_metadata(true)
+            .probe("libavcodec")
+            .expect("libavcodec development files are required for native video support");
+        let avutil = pkg_config::Config::new()
+            .cargo_metadata(true)
+            .probe("libavutil")
+            .expect("libavutil development files are required for native video support");
+        let mut video_bridge = cc::Build::new();
+        video_bridge
+            .cpp(true)
+            .std("c++20")
+            .warnings(true)
+            .flag_if_supported("-fvisibility=hidden")
+            .files([
+                "native/video/av_demuxer.cpp",
+                "native/video/av_muxer.cpp",
+                "native/video/nvcodec_shim.cpp",
+                "native/video/nvcodec_encoder.cpp",
+            ]);
+        for include in avformat
+            .include_paths
+            .iter()
+            .chain(&avcodec.include_paths)
+            .chain(&avutil.include_paths)
+        {
+            video_bridge.include(include);
+        }
+        if let Some(include) = nvcodec_include_path() {
+            video_bridge
+                .include(include)
+                .define("NP_VIDEO_HAS_NV_CODEC_HEADERS", None);
+        } else if env::var_os("NOPERSON_REQUIRE_NV_CODEC_HEADERS").is_some() {
+            panic!("nv-codec-headers were required but not found; set NOPERSON_NV_CODEC_HEADERS");
+        } else {
+            println!(
+                "cargo:warning=nv-codec-headers not found; NVCodec capability probe is disabled"
+            );
+        }
+        video_bridge.compile("noperson_video");
+        println!("cargo:rerun-if-changed=native/video/video_ffi.h");
+        println!("cargo:rerun-if-changed=native/video/av_demuxer.cpp");
+        println!("cargo:rerun-if-changed=native/video/av_muxer.cpp");
+        println!("cargo:rerun-if-changed=native/video/nvcodec_shim.cpp");
+        println!("cargo:rerun-if-changed=native/video/nvcodec_encoder.cpp");
+        println!("cargo:rerun-if-env-changed=NOPERSON_NV_CODEC_HEADERS");
+        println!("cargo:rerun-if-env-changed=NOPERSON_REQUIRE_NV_CODEC_HEADERS");
+
         let object = format!("{out_dir}/jpeg_roundtrip.o");
         let archive = format!("{out_dir}/libnoperson_jpeg_roundtrip.a");
         let cc_status = Command::new("cc")
@@ -123,4 +175,22 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=NOPERSON_CUDA_ARCH");
+}
+
+fn nvcodec_include_path() -> Option<PathBuf> {
+    let configured = env::var_os("NOPERSON_NV_CODEC_HEADERS").map(PathBuf::from);
+    let candidates = configured.into_iter().chain([
+        PathBuf::from("/usr/include"),
+        PathBuf::from("/usr/local/include"),
+    ]);
+    for candidate in candidates {
+        if candidate.join("ffnvcodec/nvEncodeAPI.h").is_file() {
+            return Some(candidate);
+        }
+        let include = candidate.join("include");
+        if include.join("ffnvcodec/nvEncodeAPI.h").is_file() {
+            return Some(include);
+        }
+    }
+    None
 }

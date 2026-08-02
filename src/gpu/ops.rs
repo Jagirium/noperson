@@ -61,6 +61,7 @@ pub struct GpuOps {
     // Frame conversion kernels
     hwc_u8_to_chw_f32_fn: CudaFunction,
     chw_f32_to_hwc_u8_fn: CudaFunction,
+    nv12_to_chw_f32_fn: CudaFunction,
     chw_f32_to_nv12_scaled_fn: CudaFunction,
     letterbox_fn: CudaFunction,
     rotate_quadrants_fn: CudaFunction,
@@ -174,6 +175,7 @@ impl GpuOps {
             scalar_blend_inplace_fn: load("alpha_blend", "scalar_blend_inplace_kernel"),
             hwc_u8_to_chw_f32_fn: load("frame_convert", "hwc_u8_to_chw_f32_kernel"),
             chw_f32_to_hwc_u8_fn: load("frame_convert", "chw_f32_to_hwc_u8_kernel"),
+            nv12_to_chw_f32_fn: load("frame_convert", "nv12_to_chw_f32_kernel"),
             chw_f32_to_nv12_scaled_fn: load("frame_convert", "chw_f32_to_nv12_scaled_kernel"),
             letterbox_fn: load("frame_convert", "letterbox_resize_kernel"),
             rotate_quadrants_fn: load("rotate", "rotate_quadrants_chw_kernel"),
@@ -449,6 +451,69 @@ impl GpuOps {
         Ok(())
     }
 
+    /// Convert a pitch-linear NVDEC NV12/P010 surface directly into CHW f32.
+    ///
+    /// # Safety
+    /// `source_device_ptr` must remain mapped and readable on this CUDA context
+    /// until work submitted to this stream has completed.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn nv12_device_to_chw_f32(
+        &self,
+        source_device_ptr: u64,
+        pitch: u32,
+        destination: &mut CudaSlice<f32>,
+        height: u32,
+        width: u32,
+        pixel_format: crate::io::native_video::PixelFormat,
+        matrix: crate::io::native_video::ColorMatrix,
+        range: crate::io::native_video::ColorRange,
+    ) -> Result<(), DriverError> {
+        use crate::io::native_video::{ColorMatrix, ColorRange, PixelFormat};
+
+        assert!(source_device_ptr != 0 && pitch >= width);
+        assert!(height > 0 && width > 0);
+        assert!(destination.len() >= 3 * height as usize * width as usize);
+        let matrix = match matrix {
+            ColorMatrix::Unspecified if width < 1280 => ColorMatrix::Bt601,
+            ColorMatrix::Unspecified => ColorMatrix::Bt709,
+            matrix => matrix,
+        };
+        let limited = !matches!(range, ColorRange::Full);
+        let (y_offset, y_scale) = if limited {
+            (16.0_f32, 255.0 / 219.0)
+        } else {
+            (0.0_f32, 1.0_f32)
+        };
+        let (rv, gu, gv, bu) = match (matrix, limited) {
+            (ColorMatrix::Bt601, true) => (1.596, -0.392, -0.813, 2.017),
+            (ColorMatrix::Bt709, true) => (1.793, -0.213, -0.533, 2.112),
+            (ColorMatrix::Bt2020NonConstantLuminance, true) => (1.679, -0.187, -0.650, 2.142),
+            (ColorMatrix::Bt601, false) => (1.402, -0.344_136, -0.714_136, 1.772),
+            (ColorMatrix::Bt709, false) => (1.574_8, -0.187_324, -0.468_124, 1.855_6),
+            (ColorMatrix::Bt2020NonConstantLuminance, false) => {
+                (1.474_6, -0.164_553, -0.571_353, 1.881_4)
+            }
+            (ColorMatrix::Unspecified, _) => unreachable!(),
+        };
+        let p010 = u32::from(matches!(pixel_format, PixelFormat::P010));
+        let total = height * width;
+        let mut launch = self.stream.launch_builder(&self.nv12_to_chw_f32_fn);
+        launch.arg(&source_device_ptr);
+        launch.arg(&pitch);
+        launch.arg(destination);
+        launch.arg(&height);
+        launch.arg(&width);
+        launch.arg(&p010);
+        launch.arg(&y_offset);
+        launch.arg(&y_scale);
+        launch.arg(&rv);
+        launch.arg(&gu);
+        launch.arg(&gv);
+        launch.arg(&bu);
+        unsafe { launch.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
     /// Scale CHW f32 RGB directly into a tightly packed NV12 device buffer.
     pub fn chw_f32_to_nv12_scaled(
         &self,
@@ -459,10 +524,69 @@ impl GpuOps {
         dst_h: u32,
         dst_w: u32,
     ) -> Result<(), DriverError> {
+        self.chw_f32_to_nv12_scaled_color(
+            src,
+            dst,
+            src_h,
+            src_w,
+            dst_h,
+            dst_w,
+            crate::io::native_video::ColorMatrix::Bt601,
+            crate::io::native_video::ColorRange::Limited,
+            crate::io::native_video::PixelFormat::Nv12,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn chw_f32_to_nv12_scaled_color(
+        &self,
+        src: &CudaSlice<f32>,
+        dst: &mut CudaSlice<u8>,
+        src_h: u32,
+        src_w: u32,
+        dst_h: u32,
+        dst_w: u32,
+        matrix: crate::io::native_video::ColorMatrix,
+        range: crate::io::native_video::ColorRange,
+        pixel_format: crate::io::native_video::PixelFormat,
+    ) -> Result<(), DriverError> {
+        use crate::io::native_video::{ColorMatrix, ColorRange, PixelFormat};
+
         assert!(src_h > 0 && src_w > 0);
         assert!(dst_h > 0 && dst_w > 0 && dst_h.is_multiple_of(2) && dst_w.is_multiple_of(2));
         assert!(src.len() >= 3 * src_h as usize * src_w as usize);
         assert!(dst.len() >= dst_h as usize * dst_w as usize * 3 / 2);
+        let matrix = match matrix {
+            ColorMatrix::Unspecified if dst_w < 1280 => ColorMatrix::Bt601,
+            ColorMatrix::Unspecified => ColorMatrix::Bt709,
+            matrix => matrix,
+        };
+        let full = matches!(range, ColorRange::Full);
+        let coefficients: [f32; 11] = match (matrix, full) {
+            (ColorMatrix::Bt601, false) => [
+                0.257, 0.504, 0.098, 16.0, -0.148, -0.291, 0.439, 0.439, -0.368, -0.071, 128.0,
+            ],
+            (ColorMatrix::Bt709, false) => [
+                0.183, 0.614, 0.062, 16.0, -0.101, -0.339, 0.439, 0.439, -0.399, -0.040, 128.0,
+            ],
+            (ColorMatrix::Bt2020NonConstantLuminance, false) => [
+                0.2256, 0.5823, 0.0509, 16.0, -0.1227, -0.3166, 0.4392, 0.4392, -0.4039, -0.0353,
+                128.0,
+            ],
+            (ColorMatrix::Bt601, true) => [
+                0.299, 0.587, 0.114, 0.0, -0.168_736, -0.331_264, 0.5, 0.5, -0.418_688, -0.081_312,
+                128.0,
+            ],
+            (ColorMatrix::Bt709, true) => [
+                0.2126, 0.7152, 0.0722, 0.0, -0.114_572, -0.385_428, 0.5, 0.5, -0.454_153,
+                -0.045_847, 128.0,
+            ],
+            (ColorMatrix::Bt2020NonConstantLuminance, true) => [
+                0.2627, 0.678, 0.0593, 0.0, -0.139_63, -0.360_37, 0.5, 0.5, -0.459_786, -0.040_214,
+                128.0,
+            ],
+            (ColorMatrix::Unspecified, _) => unreachable!(),
+        };
         let total = dst_h * dst_w;
         let mut b = self.stream.launch_builder(&self.chw_f32_to_nv12_scaled_fn);
         b.arg(src);
@@ -471,6 +595,11 @@ impl GpuOps {
         b.arg(&src_w);
         b.arg(&dst_h);
         b.arg(&dst_w);
+        let p010 = u32::from(matches!(pixel_format, PixelFormat::P010));
+        b.arg(&p010);
+        for coefficient in &coefficients {
+            b.arg(coefficient);
+        }
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())
     }

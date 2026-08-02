@@ -1,5 +1,6 @@
 //! I/O — video file, webcam, virtual camera output.
 
+pub mod native_video;
 pub mod video;
 pub mod webcam;
 

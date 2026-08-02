@@ -64,6 +64,12 @@ pub fn reexec(layout: &RuntimeLayout) -> io::Error {
     const LIBRARY_ENV: &str = "LD_LIBRARY_PATH";
 
     let mut paths = layout.library_paths();
+    if let Some(parent) = source_executable.parent() {
+        let bundled = parent.join("lib");
+        if bundled.is_dir() {
+            paths.push(bundled);
+        }
+    }
     if let Some(existing) = env::var_os(LIBRARY_ENV) {
         paths.extend(env::split_paths(&existing));
     }
