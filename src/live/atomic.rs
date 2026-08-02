@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use cudarc::driver::{CudaSlice, CudaStream};
 
-use super::{LiveEngine, ProcessedRgb, ResolvedFaceAssignment, blake3_file};
+use super::{LiveEngine, ProcessedRgb, ResolvedFaceAssignment, ResolvedIdentity, blake3_file};
 use crate::config::parameters::FaceSwapParams;
 use crate::engine::{
     ActivationError, ActivationOutcome, BuildCancellation, BuildRequestOutcome, BuildSnapshot,
@@ -25,23 +26,86 @@ pub struct FaceAssignmentPaths {
     pub models: std::collections::BTreeMap<crate::engine::ModelRole, crate::engine::ModelArtifact>,
 }
 
+#[derive(Debug, Clone)]
+pub enum FaceIdentityInput {
+    Image(PathBuf),
+    Embedding(Vec<f32>),
+}
+
+#[derive(Debug, Clone)]
+pub struct FaceAssignmentInputs {
+    pub source: FaceIdentityInput,
+    pub target: Option<FaceIdentityInput>,
+    pub similarity_threshold: f32,
+    pub params: Option<FaceSwapParams>,
+    pub models: std::collections::BTreeMap<crate::engine::ModelRole, crate::engine::ModelArtifact>,
+}
+
+impl From<&FaceAssignmentPaths> for FaceAssignmentInputs {
+    fn from(paths: &FaceAssignmentPaths) -> Self {
+        Self {
+            source: FaceIdentityInput::Image(paths.source_path.clone()),
+            target: paths.target_path.clone().map(FaceIdentityInput::Image),
+            similarity_threshold: paths.similarity_threshold,
+            params: paths.params.clone(),
+            models: paths.models.clone(),
+        }
+    }
+}
+
+pub fn embedding_blake3(embedding: &[f32]) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        embedding.len() == crate::math::constants::EMBEDDING_SIZE,
+        "ArcFace embedding must contain {} values, got {}",
+        crate::math::constants::EMBEDDING_SIZE,
+        embedding.len()
+    );
+    anyhow::ensure!(
+        embedding.iter().all(|value| value.is_finite()),
+        "ArcFace embedding contains a non-finite value"
+    );
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"noperson-arcface-embedding-v1\0");
+    for value in embedding {
+        hasher.update(&value.to_bits().to_le_bytes());
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 #[derive(Default)]
 struct IdentityCatalog {
-    paths: RwLock<HashMap<String, PathBuf>>,
+    identities: RwLock<HashMap<String, ResolvedIdentity>>,
 }
 
 impl IdentityCatalog {
-    fn register(&self, path: &Path) -> anyhow::Result<String> {
+    fn register_path(&self, path: &Path) -> anyhow::Result<String> {
         let digest = blake3_file(path)?;
-        self.paths
+        self.identities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(digest.clone(), path.to_path_buf());
+            .insert(digest.clone(), ResolvedIdentity::Image(path.to_path_buf()));
         Ok(digest)
     }
 
-    fn resolve(&self, digest: &str) -> Option<PathBuf> {
-        self.paths
+    fn register(&self, identity: &FaceIdentityInput) -> anyhow::Result<String> {
+        match identity {
+            FaceIdentityInput::Image(path) => self.register_path(path),
+            FaceIdentityInput::Embedding(embedding) => {
+                let digest = embedding_blake3(embedding)?;
+                self.identities
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        digest.clone(),
+                        ResolvedIdentity::Embedding(embedding.clone()),
+                    );
+                Ok(digest)
+            }
+        }
+    }
+
+    fn resolve(&self, digest: &str) -> Option<ResolvedIdentity> {
+        self.identities
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(digest)
@@ -68,7 +132,7 @@ impl LiveShadowBuilder {
     }
 
     pub fn register_identity(&self, path: &Path) -> anyhow::Result<String> {
-        self.identities.register(path)
+        self.identities.register_path(path)
     }
 }
 
@@ -81,7 +145,7 @@ impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
         cancellation: &BuildCancellation,
     ) -> Result<LiveEngine, Self::Error> {
         anyhow::ensure!(!cancellation.is_cancelled(), "shadow build cancelled");
-        let identity_path = self
+        let identity = self
             .identities
             .resolve(&spec.identity_blake3)
             .ok_or_else(|| anyhow::anyhow!("identity content is not registered"))?;
@@ -90,13 +154,13 @@ impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
             .iter()
             .map(|assignment| {
                 Ok(ResolvedFaceAssignment {
-                    source_path: self
+                    source: self
                         .identities
                         .resolve(&assignment.source_identity_blake3)
                         .ok_or_else(|| {
                             anyhow::anyhow!("source identity content is not registered")
                         })?,
-                    target_path: assignment
+                    target: assignment
                         .target_identity_blake3
                         .as_deref()
                         .map(|digest| {
@@ -113,7 +177,7 @@ impl ShadowBuild<LiveEngine> for LiveShadowBuilder {
         let engine = LiveEngine::new_from_spec_assignments_cancellable(
             Arc::clone(&self.gpu),
             &self.models_dir,
-            &identity_path,
+            &identity,
             &assignments,
             spec,
             &self.stream,
@@ -135,17 +199,17 @@ impl AtomicLiveEngine {
     fn register_assignments(
         identities: &IdentityCatalog,
         spec: &mut EngineSpec,
-        assignments: &[FaceAssignmentPaths],
+        assignments: &[FaceAssignmentInputs],
     ) -> anyhow::Result<()> {
         spec.assignments = assignments
             .iter()
             .map(|assignment| {
                 Ok(FaceAssignmentSpec {
-                    source_identity_blake3: identities.register(&assignment.source_path)?,
+                    source_identity_blake3: identities.register(&assignment.source)?,
                     target_identity_blake3: assignment
-                        .target_path
-                        .as_deref()
-                        .map(|path| identities.register(path))
+                        .target
+                        .as_ref()
+                        .map(|identity| identities.register(identity))
                         .transpose()?,
                     similarity_threshold: assignment.similarity_threshold,
                     params: assignment.params.clone(),
@@ -178,8 +242,21 @@ impl AtomicLiveEngine {
     }
 
     pub fn bootstrap_assignments(
-        mut builder: LiveShadowBuilder,
+        builder: LiveShadowBuilder,
         assignments: &[FaceAssignmentPaths],
+        initial_spec: EngineSpec,
+        probation_frames: u32,
+    ) -> anyhow::Result<Self> {
+        let assignments = assignments
+            .iter()
+            .map(FaceAssignmentInputs::from)
+            .collect::<Vec<_>>();
+        Self::bootstrap_inputs(builder, &assignments, initial_spec, probation_frames)
+    }
+
+    pub fn bootstrap_inputs(
+        mut builder: LiveShadowBuilder,
+        assignments: &[FaceAssignmentInputs],
         mut initial_spec: EngineSpec,
         probation_frames: u32,
     ) -> anyhow::Result<Self> {
@@ -204,7 +281,7 @@ impl AtomicLiveEngine {
         mut spec: EngineSpec,
         identity_path: &Path,
     ) -> anyhow::Result<BuildRequestOutcome> {
-        spec.identity_blake3 = self.identities.register(identity_path)?;
+        spec.identity_blake3 = self.identities.register_path(identity_path)?;
         let generation = spec.generation_digest()?;
         if self.supervisor.snapshot().active_generation == generation {
             self.builds.cancel_pending();
@@ -215,8 +292,20 @@ impl AtomicLiveEngine {
 
     pub fn request_assignments(
         &self,
-        mut spec: EngineSpec,
+        spec: EngineSpec,
         assignments: &[FaceAssignmentPaths],
+    ) -> anyhow::Result<BuildRequestOutcome> {
+        let assignments = assignments
+            .iter()
+            .map(FaceAssignmentInputs::from)
+            .collect::<Vec<_>>();
+        self.request_inputs(spec, &assignments)
+    }
+
+    pub fn request_inputs(
+        &self,
+        mut spec: EngineSpec,
+        assignments: &[FaceAssignmentInputs],
     ) -> anyhow::Result<BuildRequestOutcome> {
         anyhow::ensure!(
             !assignments.is_empty(),
@@ -286,5 +375,13 @@ impl AtomicLiveEngine {
 
     pub fn build_snapshot(&self) -> BuildSnapshot {
         self.builds.snapshot()
+    }
+
+    pub fn wait_for_build(&self, timeout: Duration) -> BuildSnapshot {
+        self.builds.wait_until_settled(timeout)
+    }
+
+    pub fn cancel_pending_build(&self) {
+        self.builds.cancel_pending();
     }
 }

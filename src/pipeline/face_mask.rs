@@ -726,6 +726,15 @@ pub fn gpu_apply_fake_diff(
         return Ok(());
     }
     let pixels = 512 * 512;
+    if params.differencing_blur == 0 {
+        gpu.fake_diff_composite_direct(
+            &mut ws.face_512,
+            &ws.face_512_original,
+            pixels,
+            params.differencing_amount,
+        )?;
+        return Ok(());
+    }
     gpu.fake_diff_mask(
         &ws.face_512,
         &ws.face_512_original,
@@ -733,19 +742,17 @@ pub fn gpu_apply_fake_diff(
         pixels,
         params.differencing_amount,
     )?;
-    if params.differencing_blur > 0 {
-        let kernel_size = params.differencing_blur * 2 + 1;
-        let sigma = (params.differencing_blur as f32 + 1.0) * 0.2;
-        let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
-        gpu.gaussian_blur_mask(
-            &mut ws.parser_mask_512,
-            &mut ws.parser_tmp_512,
-            512,
-            512,
-            &ws.blur_kernel,
-            ks,
-        )?;
-    }
+    let kernel_size = params.differencing_blur * 2 + 1;
+    let sigma = (params.differencing_blur as f32 + 1.0) * 0.2;
+    let ks = prepare_blur_kernel(gpu, ws, kernel_size, sigma)?;
+    gpu.gaussian_blur_mask(
+        &mut ws.parser_mask_512,
+        &mut ws.parser_tmp_512,
+        512,
+        512,
+        &ws.blur_kernel,
+        ks,
+    )?;
     gpu.fake_diff_composite(
         &mut ws.face_512,
         &ws.face_512_original,

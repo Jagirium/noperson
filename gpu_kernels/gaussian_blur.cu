@@ -30,19 +30,21 @@ void gaussian_blur_h_kernel(
     const unsigned int ks,
     const unsigned int border_mode
 ) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int total = H * W;
-    if (idx >= total) return;
-
-    unsigned int y = idx / W;
-    unsigned int x = idx % W;
-    int half = (int)ks / 2;
-
+    extern __shared__ float tile[];
+    const unsigned int tile_width = blockDim.x + ks - 1;
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int origin_x = (int)(blockIdx.x * blockDim.x) - (int)ks / 2;
+    for (unsigned int local_x = threadIdx.x; local_x < tile_width; local_x += blockDim.x) {
+        const int sx = gaussian_border_index(origin_x + (int)local_x, (int)W, border_mode);
+        tile[threadIdx.y * tile_width + local_x] =
+            y < H && sx >= 0 ? src[y * W + (unsigned int)sx] : 0.0f;
+    }
+    __syncthreads();
+    if (x >= W || y >= H) return;
     float val = 0.0f;
     for (int k = 0; k < (int)ks; ++k) {
-        int sx = (int)x + k - half;
-        sx = gaussian_border_index(sx, (int)W, border_mode);
-        if (sx >= 0) val += src[y * W + sx] * kernel[k];
+        val += tile[threadIdx.y * tile_width + threadIdx.x + k] * kernel[k];
     }
     dst[y * W + x] = val;
 }
@@ -57,19 +59,25 @@ void gaussian_blur_v_kernel(
     const unsigned int ks,
     const unsigned int border_mode
 ) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int total = H * W;
-    if (idx >= total) return;
-
-    unsigned int y = idx / W;
-    unsigned int x = idx % W;
-    int half = (int)ks / 2;
-
+    extern __shared__ float tile[];
+    const unsigned int tile_height = blockDim.y + ks - 1;
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int origin_y = (int)(blockIdx.y * blockDim.y) - (int)ks / 2;
+    const unsigned int threads = blockDim.x * blockDim.y;
+    const unsigned int lane = threadIdx.y * blockDim.x + threadIdx.x;
+    for (unsigned int local = lane; local < tile_height * blockDim.x; local += threads) {
+        const unsigned int local_y = local / blockDim.x;
+        const unsigned int local_x = local % blockDim.x;
+        const unsigned int load_x = blockIdx.x * blockDim.x + local_x;
+        const int sy = gaussian_border_index(origin_y + (int)local_y, (int)H, border_mode);
+        tile[local] = load_x < W && sy >= 0 ? src[(unsigned int)sy * W + load_x] : 0.0f;
+    }
+    __syncthreads();
+    if (x >= W || y >= H) return;
     float val = 0.0f;
     for (int k = 0; k < (int)ks; ++k) {
-        int sy = (int)y + k - half;
-        sy = gaussian_border_index(sy, (int)H, border_mode);
-        if (sy >= 0) val += src[sy * W + x] * kernel[k];
+        val += tile[(threadIdx.y + k) * blockDim.x + threadIdx.x] * kernel[k];
     }
     dst[y * W + x] = val;
 }
@@ -83,21 +91,26 @@ void gaussian_blur_chw_h_kernel(
     const unsigned int W,
     const unsigned int ks
 ) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int pixels = H * W;
-    unsigned int total = 3 * pixels;
-    if (idx >= total) return;
-    unsigned int channel = idx / pixels;
-    unsigned int pixel = idx % pixels;
-    unsigned int y = pixel / W;
-    unsigned int x = pixel % W;
-    int half = (int)ks / 2;
+    extern __shared__ float tile[];
+    const unsigned int tile_width = blockDim.x + ks - 1;
+    const unsigned int channel = blockIdx.z;
+    const unsigned int pixels = H * W;
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int origin_x = (int)(blockIdx.x * blockDim.x) - (int)ks / 2;
+    for (unsigned int local_x = threadIdx.x; local_x < tile_width; local_x += blockDim.x) {
+        const int sx = gaussian_border_index(origin_x + (int)local_x, (int)W, 0);
+        tile[threadIdx.y * tile_width + local_x] = y < H
+            ? src[channel * pixels + y * W + (unsigned int)sx]
+            : 0.0f;
+    }
+    __syncthreads();
+    if (x >= W || y >= H) return;
     float value = 0.0f;
     for (int k = 0; k < (int)ks; ++k) {
-        int sx = gaussian_border_index((int)x + k - half, (int)W, 0);
-        value += src[channel * pixels + y * W + sx] * kernel[k];
+        value += tile[threadIdx.y * tile_width + threadIdx.x + k] * kernel[k];
     }
-    dst[idx] = value;
+    dst[channel * pixels + y * W + x] = value;
 }
 
 extern "C" __global__
@@ -109,21 +122,31 @@ void gaussian_blur_chw_v_kernel(
     const unsigned int W,
     const unsigned int ks
 ) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int pixels = H * W;
-    unsigned int total = 3 * pixels;
-    if (idx >= total) return;
-    unsigned int channel = idx / pixels;
-    unsigned int pixel = idx % pixels;
-    unsigned int y = pixel / W;
-    unsigned int x = pixel % W;
-    int half = (int)ks / 2;
+    extern __shared__ float tile[];
+    const unsigned int tile_height = blockDim.y + ks - 1;
+    const unsigned int channel = blockIdx.z;
+    const unsigned int pixels = H * W;
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int origin_y = (int)(blockIdx.y * blockDim.y) - (int)ks / 2;
+    const unsigned int threads = blockDim.x * blockDim.y;
+    const unsigned int lane = threadIdx.y * blockDim.x + threadIdx.x;
+    for (unsigned int local = lane; local < tile_height * blockDim.x; local += threads) {
+        const unsigned int local_y = local / blockDim.x;
+        const unsigned int local_x = local % blockDim.x;
+        const unsigned int load_x = blockIdx.x * blockDim.x + local_x;
+        const int sy = gaussian_border_index(origin_y + (int)local_y, (int)H, 0);
+        tile[local] = load_x < W
+            ? src[channel * pixels + (unsigned int)sy * W + load_x]
+            : 0.0f;
+    }
+    __syncthreads();
+    if (x >= W || y >= H) return;
     float value = 0.0f;
     for (int k = 0; k < (int)ks; ++k) {
-        int sy = gaussian_border_index((int)y + k - half, (int)H, 0);
-        value += src[channel * pixels + sy * W + x] * kernel[k];
+        value += tile[(threadIdx.y + k) * blockDim.x + threadIdx.x] * kernel[k];
     }
-    dst[idx] = value;
+    dst[channel * pixels + y * W + x] = value;
 }
 
 // Resize single-channel mask [src_h, src_w] → [dst_h, dst_w] via bilinear.

@@ -12,20 +12,52 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::Deserialize;
 
 pub fn ffmpeg_decode_args(path: &Path) -> Vec<String> {
-    ["-v", "error", "-i"]
-        .into_iter()
-        .map(str::to_owned)
-        .chain(std::iter::once(path.to_string_lossy().into_owned()))
-        .chain(
-            ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
-                .into_iter()
-                .map(str::to_owned),
-        )
-        .collect()
+    ffmpeg_decode_args_impl(path, None)
+}
+
+pub fn ffmpeg_decode_args_with_threads(path: &Path, worker_threads: usize) -> Vec<String> {
+    ffmpeg_decode_args_impl(path, Some(worker_threads.clamp(1, 32)))
+}
+
+fn ffmpeg_decode_args_impl(path: &Path, worker_threads: Option<usize>) -> Vec<String> {
+    let mut args = vec!["-v".to_owned(), "error".to_owned()];
+    if let Some(worker_threads) = worker_threads {
+        args.extend(["-threads".to_owned(), worker_threads.to_string()]);
+    }
+    args.extend([
+        "-i".to_owned(),
+        path.to_string_lossy().into_owned(),
+        "-f".to_owned(),
+        "rawvideo".to_owned(),
+        "-pix_fmt".to_owned(),
+        "rgb24".to_owned(),
+        "-".to_owned(),
+    ]);
+    args
 }
 
 pub fn ffmpeg_encode_args(path: &Path, width: u32, height: u32, fps: f32) -> Vec<String> {
-    vec![
+    ffmpeg_encode_args_impl(path, width, height, fps, None)
+}
+
+pub fn ffmpeg_encode_args_with_threads(
+    path: &Path,
+    width: u32,
+    height: u32,
+    fps: f32,
+    worker_threads: usize,
+) -> Vec<String> {
+    ffmpeg_encode_args_impl(path, width, height, fps, Some(worker_threads.clamp(1, 32)))
+}
+
+fn ffmpeg_encode_args_impl(
+    path: &Path,
+    width: u32,
+    height: u32,
+    fps: f32,
+    worker_threads: Option<usize>,
+) -> Vec<String> {
+    let mut args = vec![
         "-v".to_owned(),
         "error".to_owned(),
         "-f".to_owned(),
@@ -41,11 +73,17 @@ pub fn ffmpeg_encode_args(path: &Path, width: u32, height: u32, fps: f32) -> Vec
         "-an".to_owned(),
         "-c:v".to_owned(),
         "libx264".to_owned(),
+    ];
+    if let Some(worker_threads) = worker_threads {
+        args.extend(["-threads".to_owned(), worker_threads.to_string()]);
+    }
+    args.extend([
         "-pix_fmt".to_owned(),
         "yuv420p".to_owned(),
         "-y".to_owned(),
         path.to_string_lossy().into_owned(),
-    ]
+    ]);
+    args
 }
 
 pub fn ffmpeg_remux_args(video_only: &Path, original: &Path, output: &Path) -> Vec<String> {
@@ -448,6 +486,17 @@ pub struct FfmpegVideoSource {
 
 impl FfmpegVideoSource {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::open_impl(path.as_ref(), None)
+    }
+
+    pub fn open_with_threads(
+        path: impl AsRef<Path>,
+        worker_threads: usize,
+    ) -> anyhow::Result<Self> {
+        Self::open_impl(path.as_ref(), Some(worker_threads))
+    }
+
+    fn open_impl(path: &Path, worker_threads: Option<usize>) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let probe = Command::new("ffprobe")
             .args([
@@ -477,8 +526,12 @@ impl FfmpegVideoSource {
             .nb_frames
             .as_deref()
             .and_then(|value| value.parse().ok());
+        let decode_args = worker_threads.map_or_else(
+            || ffmpeg_decode_args(path),
+            |threads| ffmpeg_decode_args_with_threads(path, threads),
+        );
         let mut child = Command::new("ffmpeg")
-            .args(ffmpeg_decode_args(path))
+            .args(decode_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -597,8 +650,32 @@ impl FfmpegVideoSink {
         height: u32,
         fps: f32,
     ) -> anyhow::Result<Self> {
+        Self::create_impl(path.as_ref(), width, height, fps, None)
+    }
+
+    pub fn create_with_threads(
+        path: impl AsRef<Path>,
+        width: u32,
+        height: u32,
+        fps: f32,
+        worker_threads: usize,
+    ) -> anyhow::Result<Self> {
+        Self::create_impl(path.as_ref(), width, height, fps, Some(worker_threads))
+    }
+
+    fn create_impl(
+        path: &Path,
+        width: u32,
+        height: u32,
+        fps: f32,
+        worker_threads: Option<usize>,
+    ) -> anyhow::Result<Self> {
+        let encode_args = worker_threads.map_or_else(
+            || ffmpeg_encode_args(path, width, height, fps),
+            |threads| ffmpeg_encode_args_with_threads(path, width, height, fps, threads),
+        );
         let mut child = Command::new("ffmpeg")
-            .args(ffmpeg_encode_args(path.as_ref(), width, height, fps))
+            .args(encode_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

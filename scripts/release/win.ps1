@@ -36,7 +36,7 @@ $Commit = (& git rev-parse HEAD).Trim()
 $env:SOURCE_DATE_EPOCH = (& git show -s --format=%ct HEAD).Trim()
 $env:ORT_CUDA_VERSION = '12'
 $env:CARGO_INCREMENTAL = '0'
-$env:NOPERSON_CUDA_ARCH = 'sm_86'
+$env:NOPERSON_CUDA_ARCH = 'compute_75'
 $env:RUSTFLAGS = '--remap-path-prefix=' + $RepoRoot + '=. -C link-arg=/Brepro'
 
 & cargo "+$RustToolchain" build --locked --release

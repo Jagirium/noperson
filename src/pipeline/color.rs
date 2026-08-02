@@ -2,10 +2,60 @@
 
 use crate::pipeline::dfm::{lab_to_rgb, rgb_to_lab};
 use crate::{
-    config::parameters::{AutoColorMode, ColorAdjustParams, FaceSwapParams},
+    config::parameters::{AutoColorMode, ColorAdjustParams, FaceSwapParams, MakeupParams},
     gpu::ops::GpuOps,
     pipeline::workspace::GpuWorkspace,
 };
+
+pub fn apply_makeup_reference(
+    image: &[[f32; 3]],
+    classes: &[u8],
+    hair: &MakeupParams,
+    lips: &MakeupParams,
+) -> Vec<[f32; 3]> {
+    assert_eq!(image.len(), classes.len());
+    image
+        .iter()
+        .zip(classes)
+        .map(|(pixel, class)| {
+            let makeup = if *class == 17 && hair.enabled {
+                Some(hair)
+            } else if matches!(*class, 12 | 13) && lips.enabled {
+                Some(lips)
+            } else {
+                None
+            };
+            makeup.map_or(*pixel, |makeup| {
+                let blend = makeup.blend.clamp(0.0, 1.0);
+                std::array::from_fn(|channel| {
+                    pixel[channel] * (1.0 - blend) + makeup.color[channel] * blend
+                })
+            })
+        })
+        .collect()
+}
+
+pub fn apply_makeup_gpu(
+    gpu: &GpuOps,
+    workspace: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<()> {
+    let parser = &params.faceparser;
+    if !params.faceparser_enabled || (!parser.hair_makeup.enabled && !parser.lips_makeup.enabled) {
+        return Ok(());
+    }
+    gpu.parser_makeup(
+        &mut workspace.face_512,
+        &workspace.parser_classes,
+        parser.hair_makeup.enabled,
+        parser.hair_makeup.color,
+        parser.hair_makeup.blend,
+        parser.lips_makeup.enabled,
+        parser.lips_makeup.color,
+        parser.lips_makeup.blend,
+    )?;
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {

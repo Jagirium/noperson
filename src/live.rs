@@ -2,7 +2,10 @@
 
 mod atomic;
 
-pub use atomic::{AtomicLiveEngine, FaceAssignmentPaths, LiveShadowBuilder};
+pub use atomic::{
+    AtomicLiveEngine, FaceAssignmentInputs, FaceAssignmentPaths, FaceIdentityInput,
+    LiveShadowBuilder, embedding_blake3,
+};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,6 +63,212 @@ pub struct ProcessedRgb {
     pub height: u32,
     pub faces_detected: usize,
     pub faces_swapped: usize,
+    pub overlays: Vec<FaceOverlay>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceOverlay {
+    /// Normalized [x1, y1, x2, y2] in the displayed output orientation.
+    pub bbox: [f32; 4],
+    /// Normalized five-point landmarks in the displayed output orientation.
+    pub kps_5: [[f32; 2]; 5],
+}
+
+#[derive(Debug, Clone)]
+pub struct AnalyzedIdentity {
+    pub embedding: Vec<f32>,
+    pub bbox: [f32; 4],
+    pub crop_rgb: Vec<u8>,
+    pub crop_width: u32,
+    pub crop_height: u32,
+}
+
+pub struct IdentityAnalyzer {
+    gpu: Arc<GpuOps>,
+    manager: ModelManager,
+    detector: FaceDetector,
+    workspace: GpuWorkspace,
+    params: FaceSwapParams,
+}
+
+impl IdentityAnalyzer {
+    pub fn new(
+        gpu: Arc<GpuOps>,
+        models_dir: &Path,
+        params: FaceSwapParams,
+        provider: ExecutionProvider,
+        detector_model: DetectorModel,
+        device_id: i32,
+    ) -> anyhow::Result<Self> {
+        let mut manager = ModelManager::with_execution(models_dir, provider, device_id);
+        manager.set_compute_stream(gpu.stream.cu_stream() as *mut ());
+        let (detector_name, detector_filename) = match detector_model {
+            DetectorModel::YoloFace8n => ("YoloFace8n", "yoloface_8n.onnx"),
+            DetectorModel::RetinaFace => ("RetinaFace", "det_10g.onnx"),
+            DetectorModel::Scrfd2_5g => ("SCRFD2.5g", "scrfd_2.5g_bnkps.onnx"),
+        };
+        manager.load(detector_name, detector_filename)?;
+        manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
+        if params.landmark_enabled {
+            manager.load(
+                params.landmark_mode.registry_name(),
+                params.landmark_mode.filename(),
+            )?;
+        }
+        let detector =
+            FaceDetector::configured(detector_model, params.detector_score, params.max_faces);
+        let workspace = GpuWorkspace::new(&gpu.stream)?;
+        Ok(Self {
+            gpu,
+            manager,
+            detector,
+            workspace,
+            params,
+        })
+    }
+
+    pub fn analyze(&mut self, image_path: &Path) -> anyhow::Result<Vec<AnalyzedIdentity>> {
+        let image = image::open(image_path)?.to_rgb8();
+        self.analyze_rgb_image(image)
+    }
+
+    pub fn analyze_rgb(
+        &mut self,
+        rgb: &[u8],
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Vec<AnalyzedIdentity>> {
+        validate_rgb_frame(rgb, width, height)?;
+        let image = image::RgbImage::from_raw(width, height, rgb.to_vec())
+            .ok_or_else(|| anyhow::anyhow!("invalid RGB analysis frame"))?;
+        self.analyze_rgb_image(image)
+    }
+
+    fn analyze_rgb_image(
+        &mut self,
+        image: image::RgbImage,
+    ) -> anyhow::Result<Vec<AnalyzedIdentity>> {
+        let image = rotate_analysis_image(
+            image,
+            self.params.manual_rotation_enabled,
+            self.params.manual_rotation_angle,
+        );
+        let (width, height) = image.dimensions();
+        let input = self.gpu.upload_u8(image.as_raw())?;
+        let mut chw = self.gpu.alloc_zeros(3 * width as usize * height as usize)?;
+        self.gpu
+            .hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
+        let (faces, _) = if self.params.auto_rotation {
+            self.detector.detect_gpu_auto_rotation(
+                &mut self.manager,
+                &self.gpu,
+                &chw,
+                &mut self.workspace,
+                height,
+                width,
+            )?
+        } else {
+            self.detector.detect_gpu(
+                &mut self.manager,
+                &self.gpu,
+                &chw,
+                &mut self.workspace,
+                height,
+                width,
+            )?
+        };
+        let mut analyzed = Vec::with_capacity(faces.len());
+        for face in faces {
+            let refined = if self.params.landmark_enabled {
+                LandmarkModel::from(self.params.landmark_mode).detect_gpu(
+                    &mut self.manager,
+                    &self.gpu,
+                    &mut self.workspace,
+                    &chw,
+                    height,
+                    width,
+                    face.bbox,
+                    &face.kps_5,
+                    self.params.landmark_from_points,
+                    self.params.landmark_score,
+                )?
+            } else {
+                None
+            };
+            let keypoints = refined
+                .as_ref()
+                .filter(|landmarks| landmarks.is_preferred_to(face.score))
+                .map_or(face.kps_5, |landmarks| landmarks.five);
+            let embedding = FaceRecognizer::recognize_gpu_with_similarity(
+                &mut self.manager,
+                &self.gpu,
+                &chw,
+                height,
+                width,
+                &keypoints,
+                &mut self.workspace,
+                self.params.similarity_type,
+            )?
+            .to_vec();
+            let (crop_rgb, crop_width, crop_height) = crop_bbox(&image, face.bbox);
+            analyzed.push(AnalyzedIdentity {
+                embedding,
+                bbox: face.bbox,
+                crop_rgb,
+                crop_width,
+                crop_height,
+            });
+        }
+        Ok(analyzed)
+    }
+}
+
+fn rotate_analysis_image(image: image::RgbImage, enabled: bool, angle: u16) -> image::RgbImage {
+    if !enabled {
+        return image;
+    }
+    match (angle / 90) & 3 {
+        1 => image::imageops::rotate90(&image),
+        2 => image::imageops::rotate180(&image),
+        3 => image::imageops::rotate270(&image),
+        _ => image,
+    }
+}
+
+pub fn analyze_image_identities(
+    gpu: Arc<GpuOps>,
+    models_dir: &Path,
+    image_path: &Path,
+    params: &FaceSwapParams,
+    provider: ExecutionProvider,
+    detector_model: DetectorModel,
+    device_id: i32,
+) -> anyhow::Result<Vec<AnalyzedIdentity>> {
+    IdentityAnalyzer::new(
+        gpu,
+        models_dir,
+        params.clone(),
+        provider,
+        detector_model,
+        device_id,
+    )?
+    .analyze(image_path)
+}
+
+fn crop_bbox(image: &image::RgbImage, bbox: [f32; 4]) -> (Vec<u8>, u32, u32) {
+    let width = image.width();
+    let height = image.height();
+    let x1 = bbox[0].floor().max(0.0).min(width.saturating_sub(1) as f32) as u32;
+    let y1 = bbox[1]
+        .floor()
+        .max(0.0)
+        .min(height.saturating_sub(1) as f32) as u32;
+    let x2 = bbox[2].ceil().max(x1 as f32 + 1.0).min(width as f32) as u32;
+    let y2 = bbox[3].ceil().max(y1 as f32 + 1.0).min(height as f32) as u32;
+    let crop_width = x2.saturating_sub(x1).max(1);
+    let crop_height = y2.saturating_sub(y1).max(1);
+    let crop = image::imageops::crop_imm(image, x1, y1, crop_width, crop_height).to_image();
+    (crop.into_raw(), crop_width, crop_height)
 }
 
 pub struct LiveEngine {
@@ -78,10 +287,16 @@ pub struct LiveEngine {
 }
 
 pub(crate) struct ResolvedFaceAssignment {
-    pub source_path: PathBuf,
-    pub target_path: Option<PathBuf>,
+    pub source: ResolvedIdentity,
+    pub target: Option<ResolvedIdentity>,
     pub similarity_threshold: f32,
     pub params: Option<FaceSwapParams>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedIdentity {
+    Image(PathBuf),
+    Embedding(Vec<f32>),
 }
 
 pub fn output_dimensions(
@@ -106,6 +321,24 @@ pub fn output_dimensions(
 pub fn build_live_spec(
     models_dir: &Path,
     identity_path: &Path,
+    params: FaceSwapParams,
+    provider: ExecutionProvider,
+    detector: DetectorModel,
+    device_id: i32,
+) -> anyhow::Result<EngineSpec> {
+    build_live_spec_for_digest(
+        models_dir,
+        blake3_file(identity_path)?,
+        params,
+        provider,
+        detector,
+        device_id,
+    )
+}
+
+pub fn build_live_spec_for_digest(
+    models_dir: &Path,
+    identity_blake3: String,
     params: FaceSwapParams,
     provider: ExecutionProvider,
     detector: DetectorModel,
@@ -244,7 +477,7 @@ pub fn build_live_spec(
         provider,
         device_id,
         detector,
-        identity_blake3: blake3_file(identity_path)?,
+        identity_blake3,
         assignments: Vec::new(),
         models,
         params,
@@ -368,8 +601,48 @@ fn identity_embedding_gpu(
         .as_ref()
         .filter(|landmarks| landmarks.is_preferred_to(face.score))
         .map_or(face.kps_5, |landmarks| landmarks.five);
-    FaceRecognizer::recognize_gpu(manager, gpu, &chw, height, width, &keypoints, workspace)
-        .map(Vec::from)
+    FaceRecognizer::recognize_gpu_with_similarity(
+        manager,
+        gpu,
+        &chw,
+        height,
+        width,
+        &keypoints,
+        workspace,
+        params.similarity_type,
+    )
+    .map(Vec::from)
+}
+
+fn resolved_identity_embedding(
+    identity: &ResolvedIdentity,
+    detector: &FaceDetector,
+    manager: &mut ModelManager,
+    gpu: &GpuOps,
+    workspace: &mut GpuWorkspace,
+    params: &FaceSwapParams,
+) -> anyhow::Result<Vec<f32>> {
+    match identity {
+        ResolvedIdentity::Image(path) => {
+            identity_embedding_gpu(path, detector, manager, gpu, workspace, params)
+        }
+        ResolvedIdentity::Embedding(embedding) => {
+            atomic::embedding_blake3(embedding)?;
+            Ok(embedding.clone())
+        }
+    }
+}
+
+fn validate_resolved_identity(identity: &ResolvedIdentity, expected: &str) -> anyhow::Result<()> {
+    let actual = match identity {
+        ResolvedIdentity::Image(path) => blake3_file(path)?,
+        ResolvedIdentity::Embedding(embedding) => atomic::embedding_blake3(embedding)?,
+    };
+    anyhow::ensure!(
+        actual == expected,
+        "identity BLAKE3 mismatch: expected {expected}, got {actual}"
+    );
+    Ok(())
 }
 
 fn apply_face_likeness(source_latent: &mut [f32], target_latent: &[f32], factor: f32) {
@@ -435,16 +708,8 @@ impl LiveEngine {
             detector_model,
             device_id,
         )?;
-        Self::new_from_spec_inner(
-            gpu,
-            models_dir,
-            identity_path,
-            &[],
-            &spec,
-            stream,
-            false,
-            None,
-        )
+        let identity = ResolvedIdentity::Image(identity_path.to_path_buf());
+        Self::new_from_spec_inner(gpu, models_dir, &identity, &[], &spec, stream, false, None)
     }
 
     /// Build a fully content-verified generation before it becomes eligible for activation.
@@ -459,22 +724,14 @@ impl LiveEngine {
             spec.assignments.is_empty(),
             "multi-face generations require the atomic identity catalog"
         );
-        Self::new_from_spec_inner(
-            gpu,
-            models_dir,
-            identity_path,
-            &[],
-            spec,
-            stream,
-            true,
-            None,
-        )
+        let identity = ResolvedIdentity::Image(identity_path.to_path_buf());
+        Self::new_from_spec_inner(gpu, models_dir, &identity, &[], spec, stream, true, None)
     }
 
     pub(crate) fn new_from_spec_assignments_cancellable(
         gpu: Arc<GpuOps>,
         models_dir: &Path,
-        identity_path: &Path,
+        identity: &ResolvedIdentity,
         assignments: &[ResolvedFaceAssignment],
         spec: &EngineSpec,
         stream: &Arc<CudaStream>,
@@ -483,7 +740,7 @@ impl LiveEngine {
         Self::new_from_spec_inner(
             gpu,
             models_dir,
-            identity_path,
+            identity,
             assignments,
             spec,
             stream,
@@ -495,7 +752,7 @@ impl LiveEngine {
     fn new_from_spec_inner(
         gpu: Arc<GpuOps>,
         models_dir: &Path,
-        identity_path: &Path,
+        identity: &ResolvedIdentity,
         assignments: &[ResolvedFaceAssignment],
         spec: &EngineSpec,
         stream: &Arc<CudaStream>,
@@ -505,15 +762,15 @@ impl LiveEngine {
         ensure_build_active(cancellation)?;
         spec.validate()?;
         if verify_files {
-            validate_model_file(identity_path, &spec.identity_blake3)?;
+            validate_resolved_identity(identity, &spec.identity_blake3)?;
             anyhow::ensure!(
                 assignments.len() == spec.assignments.len(),
                 "resolved face assignments do not match the generation spec"
             );
             for (resolved, assignment) in assignments.iter().zip(&spec.assignments) {
-                validate_model_file(&resolved.source_path, &assignment.source_identity_blake3)?;
-                match (&resolved.target_path, &assignment.target_identity_blake3) {
-                    (Some(path), Some(digest)) => validate_model_file(path, digest)?,
+                validate_resolved_identity(&resolved.source, &assignment.source_identity_blake3)?;
+                match (&resolved.target, &assignment.target_identity_blake3) {
+                    (Some(identity), Some(digest)) => validate_resolved_identity(identity, digest)?,
                     (None, None) => {}
                     _ => anyhow::bail!("resolved target identity does not match generation spec"),
                 }
@@ -571,7 +828,7 @@ impl LiveEngine {
         let needs_recognizer = needs_inswapper
             || assignments
                 .iter()
-                .any(|assignment| assignment.target_path.is_some());
+                .any(|assignment| assignment.target.is_some());
         if needs_recognizer {
             let artifact = effective_models
                 .iter()
@@ -640,8 +897,8 @@ impl LiveEngine {
         let legacy;
         let resolved = if assignments.is_empty() {
             legacy = [ResolvedFaceAssignment {
-                source_path: identity_path.to_path_buf(),
-                target_path: None,
+                source: identity.clone(),
+                target: None,
                 similarity_threshold: spec.params.similarity_threshold,
                 params: None,
             }];
@@ -652,9 +909,9 @@ impl LiveEngine {
         let mut source_faces = Vec::with_capacity(resolved.len());
         for (index, assignment) in resolved.iter().enumerate() {
             let face_params = assignment.params.as_ref().unwrap_or(&spec.params);
-            let target_embedding = match &assignment.target_path {
-                Some(path) => Some(identity_embedding_gpu(
-                    path,
+            let target_embedding = match &assignment.target {
+                Some(identity) => Some(resolved_identity_embedding(
+                    identity,
                     &detector,
                     &mut manager,
                     &gpu,
@@ -665,8 +922,8 @@ impl LiveEngine {
             };
             let backend = match face_params.swapper_model {
                 SwapperModel::Inswapper128 => {
-                    let source_embedding = identity_embedding_gpu(
-                        &assignment.source_path,
+                    let source_embedding = resolved_identity_embedding(
+                        &assignment.source,
                         &detector,
                         &mut manager,
                         &gpu,
@@ -826,6 +1083,12 @@ impl LiveEngine {
         self.gpu
             .hwc_u8_to_chw_f32(&input, &mut chw, height, width)?;
         let result = self.process_chw(&mut chw, height, width)?;
+        let turns = if self.params.manual_rotation_enabled {
+            u32::from(self.params.manual_rotation_angle / 90) & 3
+        } else {
+            0
+        };
+        let overlays = normalize_face_overlays(&result.faces, width, height, turns);
         let (output_width, output_height) = output_dimensions(&self.params, width, height)?;
         let mut enhanced = if let Some(enhancer) = &mut self.enhancer {
             let output_elements = 3usize
@@ -863,18 +1126,85 @@ impl LiveEngine {
             height: output_height,
             faces_detected: result.faces_detected,
             faces_swapped: result.faces_swapped,
+            overlays,
         })
     }
 }
 
+fn normalize_face_overlays(
+    faces: &[crate::pipeline::face_detector::DetectedFace],
+    width: u32,
+    height: u32,
+    turns: u32,
+) -> Vec<FaceOverlay> {
+    let (detected_width, detected_height) = if turns.is_multiple_of(2) {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    let normalize = |point: [f32; 2]| {
+        let u = point[0] / detected_width.max(1) as f32;
+        let v = point[1] / detected_height.max(1) as f32;
+        match turns & 3 {
+            1 => [v, 1.0 - u],
+            2 => [1.0 - u, 1.0 - v],
+            3 => [1.0 - v, u],
+            _ => [u, v],
+        }
+    };
+    faces
+        .iter()
+        .map(|face| {
+            let corners = [
+                normalize([face.bbox[0], face.bbox[1]]),
+                normalize([face.bbox[2], face.bbox[3]]),
+            ];
+            let mut kps_5 = [[0.0; 2]; 5];
+            for (output, point) in kps_5.iter_mut().zip(face.kps_5) {
+                *output = normalize(point);
+            }
+            FaceOverlay {
+                bbox: [
+                    corners[0][0].min(corners[1][0]),
+                    corners[0][1].min(corners[1][1]),
+                    corners[0][0].max(corners[1][0]),
+                    corners[0][1].max(corners[1][1]),
+                ],
+                kps_5,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::apply_face_likeness;
+    use super::{apply_face_likeness, normalize_face_overlays, rotate_analysis_image};
+    use crate::pipeline::face_detector::DetectedFace;
 
     #[test]
     fn face_likeness_matches_crossswap_latent_subtraction() {
         let mut source = [0.5, -0.25, 1.0];
         apply_face_likeness(&mut source, &[0.2, 0.4, -0.5], 0.75);
         assert_eq!(source, [0.35, -0.55, 1.375]);
+    }
+
+    #[test]
+    fn manual_analysis_rotation_preserves_pixels_and_rotates_dimensions() {
+        let image = image::RgbImage::from_raw(2, 1, vec![1, 2, 3, 4, 5, 6]).unwrap();
+        let rotated = rotate_analysis_image(image, true, 90);
+        assert_eq!(rotated.dimensions(), (1, 2));
+        assert_eq!(rotated.into_raw(), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn diagnostic_geometry_is_normalized_back_to_display_orientation() {
+        let face = DetectedFace {
+            bbox: [10.0, 20.0, 30.0, 60.0],
+            kps_5: [[10.0, 20.0]; 5],
+            score: 1.0,
+        };
+        let overlays = normalize_face_overlays(&[face], 100, 200, 0);
+        assert_eq!(overlays[0].bbox, [0.1, 0.1, 0.3, 0.3]);
+        assert_eq!(overlays[0].kps_5[0], [0.1, 0.1]);
     }
 }

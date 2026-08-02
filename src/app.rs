@@ -36,6 +36,21 @@ use crate::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
 use crate::pipeline::workspace::FrameRing;
 use realtime_preview::{RealtimePreviewSnapshot, RealtimePreviewState};
 
+pub fn launch(models_dir: PathBuf) -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([666.0, 839.0])
+            .with_min_inner_size([620.0, 700.0])
+            .with_title("noperson"),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "noperson",
+        options,
+        Box::new(move |_cc| Ok(Box::new(App::new(models_dir)))),
+    )
+}
+
 // ─── Deep-Live-Cam-inspired palette ──────────────────────────────────────
 const BG: Color32 = Color32::from_rgb(0x0d, 0x0d, 0x11);
 const CARD: Color32 = Color32::from_rgb(0x1c, 0x1e, 0x22);
@@ -1016,7 +1031,7 @@ impl App {
     }
 }
 
-fn install_product_theme(ctx: &egui::Context) {
+pub(crate) fn install_product_theme(ctx: &egui::Context) {
     ctx.add_font(FontInsert::new(
         "Inter",
         FontData::from_static(include_bytes!("../assets/fonts/InterVariable.ttf")),

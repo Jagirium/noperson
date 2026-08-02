@@ -5,6 +5,8 @@
 //! I/O: nokhwa (webcam), v4l2loopback (virtual camera)
 
 fn main() -> anyhow::Result<()> {
+    let launch_mode = noperson::launch::LaunchMode::parse(std::env::args_os().skip(1))?;
+
     // Init logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -24,7 +26,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("GPU runtime ready: {}", runtime.root().display());
 
     let models_dir = std::path::PathBuf::from("models");
-    if std::env::args_os().any(|argument| argument == "--runtime-check") {
+    if launch_mode == noperson::launch::LaunchMode::RuntimeCheck {
         let probe_model = models_dir.join("yoloface_8n.onnx");
         if probe_model.is_file() {
             let mut manager = noperson::models::manager::ModelManager::new(&models_dir);
@@ -71,19 +73,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Launch egui app
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([666.0, 839.0])
-            .with_min_inner_size([620.0, 700.0])
-            .with_title("noperson"),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "noperson",
-        options,
-        Box::new(move |_cc| Ok(Box::new(noperson::app::App::new(models_dir)))),
-    )?;
+    match launch_mode {
+        noperson::launch::LaunchMode::Realtime => noperson::app::launch(models_dir)?,
+        noperson::launch::LaunchMode::ExtraGui => noperson::extra_gui::launch(models_dir)?,
+        noperson::launch::LaunchMode::RuntimeCheck => unreachable!("handled above"),
+    }
     Ok(())
 }

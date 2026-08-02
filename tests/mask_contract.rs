@@ -5,6 +5,19 @@ use noperson::pipeline::face_mask::{
     generate_border_mask, mouth_restore_ellipse, postprocess_occluder_mask, postprocess_xseg_mask,
     semantic_region_mask,
 };
+use std::fs;
+
+#[test]
+fn unblurred_fake_diff_uses_one_direct_composite_pass() {
+    let pipeline = fs::read_to_string("src/pipeline/face_mask.rs").unwrap();
+    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let kernel = fs::read_to_string("gpu_kernels/mask_postprocess.cu").unwrap();
+
+    assert!(pipeline.contains("if params.differencing_blur == 0"));
+    assert!(pipeline.contains("fake_diff_composite_direct"));
+    assert!(ops.contains("fake_diff_composite_direct_fn"));
+    assert!(kernel.contains("void fake_diff_composite_direct_kernel"));
+}
 
 #[test]
 fn gaussian_boundaries_match_torchvision_and_semantic_conv2d() {

@@ -34,6 +34,7 @@ pub struct GpuWorkspace {
 
     // Per-face buffers (reused)
     pub face_112: CudaSlice<f32>,          // ArcFace input [3, 112, 112]
+    pub face_128: CudaSlice<f32>,          // Pearl ArcFace intermediate [3, 128, 128]
     pub face_256: CudaSlice<f32>,          // swap face [3, dim*128, dim*128] (max 512)
     pub face_512: CudaSlice<f32>,          // Pipeline face [3, 512, 512]
     pub face_512_original: CudaSlice<f32>, // Original aligned crop for learned masks
@@ -105,6 +106,7 @@ impl GpuWorkspace {
     pub fn new(stream: &Arc<CudaStream>) -> Result<Self, DriverError> {
         let detect_size = 3 * 640 * 640;
         let face_112_size = 3 * 112 * 112;
+        let face_128_size = 3 * 128 * 128;
         let max_swap_size = MAX_SWAP_DIM * 128;
         let face_256_size = 3 * max_swap_size * max_swap_size;
         let face_512_size = 3 * 512 * 512;
@@ -129,6 +131,7 @@ impl GpuWorkspace {
             host_landmark_c: vec![0.0; 278_528],
 
             face_112: stream.alloc_zeros::<f32>(face_112_size)?,
+            face_128: stream.alloc_zeros::<f32>(face_128_size)?,
             face_256: stream.alloc_zeros::<f32>(face_256_size)?,
             face_512: stream.alloc_zeros::<f32>(face_512_size)?,
             face_512_original: stream.alloc_zeros::<f32>(face_512_size)?,

@@ -1,5 +1,12 @@
 use std::fs;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Command, Output};
+
 #[test]
 fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
     let script = fs::read_to_string("scripts/release/linux.sh").expect("release builder exists");
@@ -107,12 +114,13 @@ fn cargo_and_runtime_logging_pin_the_compatible_ort_contract() {
     );
 
     let main = fs::read_to_string("src/main.rs").expect("binary entrypoint exists");
+    let launch = fs::read_to_string("src/launch.rs").expect("launch mode parser exists");
     assert!(
         main.contains("info,ort=warn"),
         "default tracing must suppress ORT info/debug noise"
     );
     assert!(
-        main.contains("--runtime-check"),
+        launch.contains("--runtime-check") && main.contains("LaunchMode::RuntimeCheck"),
         "release validation needs a non-GUI bootstrap smoke path"
     );
 
@@ -146,8 +154,17 @@ fn release_entrypoint_is_only_an_interactive_three_variant_router() {
 fn native_kernel_build_has_explicit_arch_and_no_downloadable_runtime_links() {
     let build = fs::read_to_string("build.rs").unwrap();
     assert!(build.contains("NOPERSON_CUDA_ARCH"));
+    assert!(
+        build.contains("compute_75"),
+        "embedded PTX must use the oldest supported virtual architecture"
+    );
     assert!(build.contains("nvcc.exe"));
     assert!(!build.contains("--use_fast_math"));
+    assert!(
+        build.contains("rustc-link-lib=static=jpeg")
+            && !build.contains("rustc-link-lib=dylib=jpeg"),
+        "the bootstrap executable must not need host libjpeg before main"
+    );
     assert!(
         !build.contains("rustc-link-lib=dylib=npp")
             && !build.contains("rustc-link-lib=dylib=cudart"),
@@ -167,6 +184,23 @@ fn native_kernel_build_has_explicit_arch_and_no_downloadable_runtime_links() {
         !bootstrap.contains("preload_ort_providers"),
         "ORT must load providers itself after its host is initialized"
     );
+}
+
+#[test]
+fn every_release_builder_emits_portable_ptx_instead_of_an_sm86_only_floor() {
+    for path in ["scripts/release/linux.sh", "scripts/release/win.ps1"] {
+        let script = fs::read_to_string(path).unwrap();
+        assert!(
+            script.contains("NOPERSON_CUDA_ARCH=compute_75")
+                || script.contains("NOPERSON_CUDA_ARCH = 'compute_75'"),
+            "{path} must JIT portable PTX on every supported GPU"
+        );
+        assert!(
+            !script.contains("NOPERSON_CUDA_ARCH=sm_86")
+                && !script.contains("NOPERSON_CUDA_ARCH = 'sm_86'"),
+            "{path} must not make Ampere 8.6 the minimum GPU"
+        );
+    }
 }
 
 #[test]
@@ -231,6 +265,330 @@ fn linux_runtime_verifier_checks_hashes_links_and_loader_closure() {
 }
 
 #[test]
+fn windows_runtime_collector_keeps_only_the_verified_cuda_and_trt_closure() {
+    let script = fs::read_to_string("scripts/runtime/collect-windows-libs.sh")
+        .expect("Windows runtime collector exists");
+    for required in [
+        "x86_64-pc-windows-msvc",
+        "8a54165e2dfc85e9f6afbdaf154e7c1c74582e6269a2d0ec93b11e1459309555",
+        "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_tensorrt.dll",
+        "cublasLt64_12.dll",
+        "cudnn_engines_precompiled64_9.dll",
+        "nvrtc64_120_0.dll",
+        "nppif64_12.dll",
+        "nvinfer_10.dll",
+        "nvonnxparser_10.dll",
+        "nvinfer_builder_resource_10.dll",
+        "WINDOWS-UNIVERSAL-TRT",
+        "TRT_MAJOR_ENTERPRISE 10\\r?$",
+        "CUDNN_PATCHLEVEL 0$",
+        "TRT_PATCH_ENTERPRISE 0\\r?$",
+        "TRT_BUILD_ENTERPRISE 35\\r?$",
+        "e635c9af06c64e599a781098466e91b51e19fd0f25f9ac12a23ab511aee3dacf",
+        "0c2ff93897203d0115b88a010a76d268ed89ff2a2f628fbed30662310394c122",
+        "2197a3aa79c23179ad5203e6b594a50d5c00e3afcd22a688727a38bd03a8a06e",
+        "0c93a034083746bc0a2ca4e1fca8f9ba014b22ba2ff4f523f0a82fb3058e6f90",
+        "5dfd44d256f3c87d7f173d3d5fc7e648a7476545d0e592dfe8b38c0f0fbd6f35",
+        "d4716bdcb38a7c86e5da1d3bbfdd77ce759bfb43ef86fb2454a35aa9b3c9f170",
+        "9af12af62cb9eddc8abc7566aa75ac1762bc03b5497de2e6149807e1bccaad75",
+        "0fa44c9406bf2da0430df3c223d11bec36467e5e801a9eb59be28afc004bbb41",
+        "d56bc3423265bc1f8499edb6a6fe19f300ac1861bf0cecf767fbaf060c007318",
+        "df0860579a695aea3a6bd0b4213acbd51dc85dff41d715379c15520849268932",
+        "4475cee39d6119a17cdd13450f4e9b4370ebb293dc09b713cd608c3112c812bf",
+        "platform=windows-x86_64",
+        "cuda=12.8.57",
+        "cudnn=9.11.0.98",
+        "tensorrt=10.13.0.35",
+        "BLAKE3SUMS",
+        "BLAKE3_PYTHON",
+        "objdump",
+    ] {
+        assert!(
+            script.contains(required),
+            "missing Windows runtime contract: {required}"
+        );
+    }
+    assert!(!script.contains("zlibwapi.dll"));
+    assert!(!script.contains("curand64_10.dll"));
+    assert!(!script.contains("nvinfer_plugin_10.dll"));
+    assert!(!script.contains("nvcuda.dll\" \"$stage"));
+}
+
+#[test]
+fn windows_runtime_packer_emits_three_archives_and_a_blake3_manifest() {
+    let script = fs::read_to_string("scripts/runtime/pack-windows-libs.sh")
+        .expect("Windows runtime packer exists");
+    for required in [
+        "noperson-runtime-base-windows-x86_64-v1.tar.zst",
+        "noperson-runtime-trt-base-windows-x86_64-v1.tar.zst",
+        "noperson-runtime-trt-universal-windows-x86_64-v1.tar.zst",
+        "nvinfer_builder_resource_10.dll",
+        "MANIFEST_BLAKE3.txt",
+        "BLAKE3_PYTHON",
+        "--sort=name",
+        "--owner=0",
+        "--group=0",
+        "zstd -q -T2 -3",
+    ] {
+        assert!(
+            script.contains(required),
+            "missing Windows pack contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn windows_runtime_verifier_checks_blake3_pe_closure_and_universal_markers() {
+    let script = fs::read_to_string("scripts/runtime/verify-windows-libs.sh")
+        .expect("Windows runtime verifier exists");
+    for required in [
+        "BLAKE3SUMS",
+        "BLAKE3_PYTHON",
+        "objdump -p",
+        "WINDOWS-UNIVERSAL-TRT",
+        "nvinfer_builder_resource_10.dll",
+        "msvcp140.dll",
+        "vcruntime140_1.dll",
+        "nvcuda.dll",
+        "unexpected file count",
+    ] {
+        assert!(
+            script.contains(required),
+            "missing Windows verification: {required}"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn write_executable(path: &Path, source: &str) {
+    fs::write(path, source).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+fn write_windows_runtime_fixture(root: &Path) -> Vec<PathBuf> {
+    fs::create_dir_all(root.join("base")).unwrap();
+    fs::create_dir_all(root.join("trt/base")).unwrap();
+    fs::write(root.join("base/provider.dll"), b"provider").unwrap();
+    fs::write(
+        root.join("trt/base/nvinfer_builder_resource_10.dll"),
+        b"builder",
+    )
+    .unwrap();
+    for architecture in [
+        "sm75", "sm80", "sm86", "sm89", "sm90", "sm100", "sm120", "ptx",
+    ] {
+        let directory = root.join("trt").join(architecture);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("WINDOWS-UNIVERSAL-TRT"),
+            b"nvinfer_builder_resource_10.dll\n",
+        )
+        .unwrap();
+    }
+    let mut files = vec![
+        PathBuf::from("base/provider.dll"),
+        PathBuf::from("trt/base/nvinfer_builder_resource_10.dll"),
+    ];
+    files.extend(
+        [
+            "sm75", "sm80", "sm86", "sm89", "sm90", "sm100", "sm120", "ptx",
+        ]
+        .into_iter()
+        .map(|architecture| PathBuf::from(format!("trt/{architecture}/WINDOWS-UNIVERSAL-TRT"))),
+    );
+    files
+}
+
+#[cfg(unix)]
+fn fake_runtime_tools(directory: &Path, objdump_source: &str) {
+    fs::create_dir_all(directory).unwrap();
+    write_executable(&directory.join("objdump"), objdump_source);
+    write_executable(
+        &directory.join("b3sum"),
+        "#!/usr/bin/env bash\nprintf '%064d\\n' 0\n",
+    );
+}
+
+#[cfg(unix)]
+fn write_fake_inventory(root: &Path, files: &[PathBuf]) {
+    let mut inventory = String::new();
+    for relative in files {
+        inventory.push_str(&format!("{}  {}\n", "0".repeat(64), relative.display()));
+    }
+    fs::write(root.join("BLAKE3SUMS"), inventory).unwrap();
+}
+
+#[cfg(unix)]
+fn run_windows_verifier(root: &Path, tools: &Path) -> Output {
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    Command::new("bash")
+        .arg("scripts/runtime/verify-windows-libs.sh")
+        .arg(root)
+        .env("PATH", path)
+        .output()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_runtime_verifier_propagates_objdump_failures() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("runtime");
+    let tools = fixture.path().join("tools");
+    let files = write_windows_runtime_fixture(&root);
+    write_fake_inventory(&root, &files);
+    fake_runtime_tools(&tools, "#!/usr/bin/env bash\nexit 42\n");
+
+    let output = run_windows_verifier(&root, &tools);
+    assert!(!output.status.success(), "objdump failure was swallowed");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("could not inspect PE dependencies"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_runtime_verifier_rejects_duplicate_and_untracked_inventory_paths() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("runtime");
+    let tools = fixture.path().join("tools");
+    let mut files = write_windows_runtime_fixture(&root);
+    files.pop();
+    files.push(files[0].clone());
+    write_fake_inventory(&root, &files);
+    fake_runtime_tools(&tools, "#!/usr/bin/env bash\nexit 0\n");
+
+    let output = run_windows_verifier(&root, &tools);
+    assert!(
+        !output.status.success(),
+        "duplicate inventory path was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("duplicate BLAKE3SUMS path"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_runtime_verifier_accepts_a_trailing_root_separator() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("runtime");
+    let tools = fixture.path().join("tools");
+    let files = write_windows_runtime_fixture(&root);
+    write_fake_inventory(&root, &files);
+    fake_runtime_tools(&tools, "#!/usr/bin/env bash\nexit 0\n");
+
+    let root_with_separator = PathBuf::from(format!("{}/", root.display()));
+    let output = run_windows_verifier(&root_with_separator, &tools);
+    assert!(
+        output.status.success(),
+        "trailing separator broke verification: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+fn write_windows_pack_fixture(root: &Path, mode: u32) {
+    fs::create_dir_all(root.join("base")).unwrap();
+    fs::create_dir_all(root.join("trt/base")).unwrap();
+    for relative in [
+        "base/provider.dll",
+        "trt/base/onnxruntime_providers_tensorrt.dll",
+        "trt/base/nvinfer_10.dll",
+        "trt/base/nvonnxparser_10.dll",
+        "trt/base/nvinfer_builder_resource_10.dll",
+        "RUNTIME-MANIFEST",
+        "BLAKE3SUMS",
+    ] {
+        fs::write(root.join(relative), relative.as_bytes()).unwrap();
+    }
+    for architecture in [
+        "sm75", "sm80", "sm86", "sm89", "sm90", "sm100", "sm120", "ptx",
+    ] {
+        let directory = root.join("trt").join(architecture);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("WINDOWS-UNIVERSAL-TRT"), b"builder\n").unwrap();
+    }
+    for entry in walkdir(root) {
+        fs::set_permissions(&entry, fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+fn walkdir(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut entries = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path.clone());
+            }
+            entries.push(path);
+        }
+    }
+    entries
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_runtime_archives_ignore_source_umask_modes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let tools = fixture.path().join("tools");
+    fake_runtime_tools(&tools, "#!/usr/bin/env bash\nexit 0\n");
+    let first = fixture.path().join("first");
+    let second = fixture.path().join("second");
+    write_windows_pack_fixture(&first, 0o755);
+    write_windows_pack_fixture(&second, 0o700);
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for (input, output) in [
+        (&first, fixture.path().join("out-first")),
+        (&second, fixture.path().join("out-second")),
+    ] {
+        let result = Command::new("bash")
+            .arg("scripts/runtime/pack-windows-libs.sh")
+            .arg(input)
+            .arg(&output)
+            .env("PATH", &path)
+            .env("SOURCE_DATE_EPOCH", "1700000000")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "packer failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    for archive in [
+        "noperson-runtime-base-windows-x86_64-v1.tar.zst",
+        "noperson-runtime-trt-base-windows-x86_64-v1.tar.zst",
+        "noperson-runtime-trt-universal-windows-x86_64-v1.tar.zst",
+    ] {
+        let first_bytes = fs::read(fixture.path().join("out-first").join(archive)).unwrap();
+        let second_bytes = fs::read(fixture.path().join("out-second").join(archive)).unwrap();
+        assert_eq!(
+            blake3::hash(&first_bytes),
+            blake3::hash(&second_bytes),
+            "archive mode bits depend on source umask: {archive}"
+        );
+    }
+}
+
+#[test]
 fn linux_runtime_packer_emits_base_and_independent_sm_archives() {
     let script = fs::read_to_string("scripts/runtime/pack-linux-libs.sh")
         .expect("Linux runtime packer exists");
@@ -240,7 +598,7 @@ fn linux_runtime_packer_emits_base_and_independent_sm_archives() {
         "for shard in sm75 sm80 sm86 sm89 sm90 sm100 sm120 ptx",
         "zstd -q -T2",
         "--sort=name",
-        "ARCHIVES-BLAKE3",
+        "MANIFEST_BLAKE3.txt",
         "stream.read(8 * 1024 * 1024)",
     ] {
         assert!(

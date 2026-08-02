@@ -55,6 +55,7 @@ impl AssignmentBackend {
 pub struct FrameResult {
     pub faces_detected: usize,
     pub faces_swapped: usize,
+    pub faces: Vec<crate::pipeline::face_detector::DetectedFace>,
 }
 
 /// Process a single frame fully on the GPU.
@@ -76,6 +77,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         return Ok(FrameResult {
             faces_detected: 0,
             faces_swapped: 0,
+            faces: Vec::new(),
         });
     }
     let generation_params = params;
@@ -121,7 +123,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         let source = if sources.len() == 1 && sources[0].target_embedding.is_none() {
             &sources[0]
         } else {
-            let embedding = FaceRecognizer::recognize_gpu(
+            let embedding = FaceRecognizer::recognize_gpu_with_similarity(
                 manager,
                 gpu,
                 frame_chw,
@@ -129,6 +131,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                 frame_w,
                 &effective_kps,
                 ws,
+                params.similarity_type,
             )?;
             match sources
                 .iter()
@@ -366,6 +369,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
         let blur_ks = params.border_blur * 2 + 1;
         let blur_sigma = (params.border_blur as f32 + 1.0) * 0.2;
         let learned_mask = face_mask::gpu_generate_learned_mask_128(gpu, manager, ws, params)?;
+        crate::pipeline::color::apply_makeup_gpu(gpu, ws, params)?;
         face_mask::gpu_apply_landmark_restore_mask(gpu, ws, params, &aligned_landmarks)?;
         face_mask::gpu_restore_semantic_regions(gpu, ws, params)?;
         face_mask::gpu_apply_fake_diff(gpu, ws, params)?;
@@ -438,6 +442,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     Ok(FrameResult {
         faces_detected: faces.len(),
         faces_swapped,
+        faces,
     })
 }
 

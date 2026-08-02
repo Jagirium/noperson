@@ -290,6 +290,13 @@ impl EngineSpec {
         validate_float_range("auto_color.blend", self.params.auto_color.blend, 0.0, 1.0)?;
         validate_float_range("restorer_alpha", self.params.restorer_alpha, 0.0, 1.0)?;
         validate_float_range("restorer2_alpha", self.params.restorer2_alpha, 0.0, 1.0)?;
+        validate_float_range("restorer_fidelity", self.params.restorer_fidelity, 0.0, 1.0)?;
+        validate_float_range(
+            "restorer2_fidelity",
+            self.params.restorer2_fidelity,
+            0.0,
+            1.0,
+        )?;
         for (control, value, min, max) in [
             (
                 "color_adjust.red",
@@ -348,6 +355,21 @@ impl EngineSpec {
             ),
         ] {
             validate_float_range(control, value, min, max)?;
+        }
+        for (name, makeup) in [
+            (
+                "faceparser.hair_makeup",
+                &self.params.faceparser.hair_makeup,
+            ),
+            (
+                "faceparser.lips_makeup",
+                &self.params.faceparser.lips_makeup,
+            ),
+        ] {
+            for (channel, value) in ["red", "green", "blue"].into_iter().zip(makeup.color) {
+                validate_float_range(&format!("{name}.{channel}"), value, 0.0, 255.0)?;
+            }
+            validate_float_range(&format!("{name}.blend"), makeup.blend, 0.0, 1.0)?;
         }
         validate_range("jpeg_quality", self.params.jpeg_quality as i64, 1, 100)?;
         validate_range("final_blur", self.params.final_blur as i64, 1, 50)?;

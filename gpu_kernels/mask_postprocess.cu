@@ -95,6 +95,40 @@ void parser_class_mask_kernel(
 }
 
 extern "C" __global__
+void parser_makeup_kernel(
+    float* __restrict__ image,
+    const unsigned char* __restrict__ classes,
+    const unsigned int pixels,
+    const unsigned int hair_enabled,
+    const float hair_red,
+    const float hair_green,
+    const float hair_blue,
+    const float hair_blend,
+    const unsigned int lips_enabled,
+    const float lips_red,
+    const float lips_green,
+    const float lips_blue,
+    const float lips_blend
+) {
+    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels) return;
+    unsigned int actual = (unsigned int)classes[pixel];
+    bool hair = hair_enabled != 0 && actual == 17;
+    bool lips = lips_enabled != 0 && (actual == 12 || actual == 13);
+    if (!hair && !lips) return;
+    float blend = hair ? hair_blend : lips_blend;
+    float colors[3] = {
+        hair ? hair_red : lips_red,
+        hair ? hair_green : lips_green,
+        hair ? hair_blue : lips_blue
+    };
+    for (unsigned int channel = 0; channel < 3; ++channel) {
+        unsigned int idx = channel * pixels + pixel;
+        image[idx] = image[idx] * (1.0f - blend) + colors[channel] * blend;
+    }
+}
+
+extern "C" __global__
 void mask_invert_kernel(
     float* __restrict__ mask,
     const unsigned int total
@@ -163,6 +197,27 @@ void fake_diff_composite_kernel(
     if (idx >= total) return;
     float keep_swap = mask[idx % pixels];
     swapped[idx] = swapped[idx] * keep_swap + original[idx] * (1.0f - keep_swap);
+}
+
+extern "C" __global__
+void fake_diff_composite_direct_kernel(
+    float* __restrict__ swapped,
+    const float* __restrict__ original,
+    const unsigned int pixels,
+    const float threshold
+) {
+    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pixel >= pixels) return;
+    bool changed = false;
+    for (unsigned int channel = 0; channel < 3; ++channel) {
+        unsigned int idx = channel * pixels + pixel;
+        changed = changed || fabsf(swapped[idx] - original[idx]) >= threshold;
+    }
+    float keep_swap = changed ? 1.0f : 0.0f;
+    for (unsigned int channel = 0; channel < 3; ++channel) {
+        unsigned int idx = channel * pixels + pixel;
+        swapped[idx] = swapped[idx] * keep_swap + original[idx] * (1.0f - keep_swap);
+    }
 }
 
 extern "C" __global__

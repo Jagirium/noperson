@@ -76,7 +76,7 @@ if test "$mode" = --native; then
     export CUDA_HOME="$cuda_root"
     export ORT_CUDA_VERSION=12
     export CARGO_INCREMENTAL=0
-    export NOPERSON_CUDA_ARCH=sm_86
+    export NOPERSON_CUDA_ARCH=compute_75
     export RUSTFLAGS="--remap-path-prefix=${repo_root}=. -C link-arg=-Wl,--build-id=none"
     cargo "+$RUST_TOOLCHAIN" build --locked --release
     verify_ort_cuda12
@@ -162,6 +162,7 @@ export PATH="$CARGO_HOME/bin:$PATH"
 export CUDA_HOME=/usr/local/cuda
 export ORT_CUDA_VERSION=12
 export CARGO_INCREMENTAL=0
+export NOPERSON_CUDA_ARCH=compute_75
 export RUSTFLAGS="--remap-path-prefix=/build/source=. -C link-arg=-Wl,--build-id=none"
 
 mkdir -p /build/source /build/stage

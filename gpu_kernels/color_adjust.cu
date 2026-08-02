@@ -9,6 +9,7 @@ __device__ __forceinline__ float grayscale(float r, float g, float b) {
 extern "C" __global__
 void color_adjust_prep_kernel(
     float* image,
+    unsigned int* gray_sum,
     const unsigned int pixels,
     const float gamma,
     const float red,
@@ -19,24 +20,13 @@ void color_adjust_prep_kernel(
     unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
     if (pixel >= pixels) return;
     const float offsets[3] = {red, green, blue};
+    float rgb[3];
     for (int channel = 0; channel < 3; ++channel) {
         float value = clamp_u8(powf(image[channel * pixels + pixel], gamma) + offsets[channel]);
-        image[channel * pixels + pixel] = clamp_u8(value * brightness);
+        rgb[channel] = clamp_u8(value * brightness);
+        image[channel * pixels + pixel] = rgb[channel];
     }
-}
-
-extern "C" __global__
-void color_contrast_sum_kernel(
-    const float* image,
-    unsigned int* gray_sum,
-    const unsigned int pixels
-) {
-    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pixel >= pixels) return;
-    float r = image[pixel];
-    float g = image[pixels + pixel];
-    float b = image[2 * pixels + pixel];
-    atomicAdd(gray_sum, (unsigned int)floorf(grayscale(r, g, b)));
+    atomicAdd(gray_sum, (unsigned int)floorf(grayscale(rgb[0], rgb[1], rgb[2])));
 }
 
 extern "C" __global__

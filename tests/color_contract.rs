@@ -5,6 +5,24 @@ use noperson::{
         jpeg_roundtrip_reference,
     },
 };
+use std::fs;
+
+#[test]
+fn color_prep_accumulates_contrast_mean_without_a_second_full_image_pass() {
+    let kernel = fs::read_to_string("gpu_kernels/color_adjust.cu").unwrap();
+    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+
+    let prep = kernel
+        .split("void color_adjust_prep_kernel")
+        .nth(1)
+        .expect("prep kernel exists")
+        .split("extern \"C\" __global__")
+        .next()
+        .unwrap();
+    assert!(prep.contains("atomicAdd(gray_sum"));
+    assert!(!kernel.contains("void color_contrast_sum_kernel"));
+    assert!(!ops.contains("color_contrast_sum_fn"));
+}
 
 #[test]
 #[allow(clippy::excessive_precision)] // Values captured verbatim from CrossSwap's Kornia path.

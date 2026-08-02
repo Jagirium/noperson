@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use noperson::io::video::{
     Frame, FrameSink, FrameSource, Timeline, VideoLifecycle, VideoState, ffmpeg_decode_args,
-    ffmpeg_encode_args, ffmpeg_remux_args, process_video_frames,
+    ffmpeg_decode_args_with_threads, ffmpeg_encode_args, ffmpeg_encode_args_with_threads,
+    ffmpeg_remux_args, process_video_frames,
 };
 
 #[test]
@@ -22,6 +23,37 @@ fn ffmpeg_decode_contract_streams_exact_rgb_frames() {
             "rgb24",
             "-"
         ]
+    );
+}
+
+#[test]
+fn extra_gui_threads_bound_ffmpeg_decode_and_encode_without_gpu_workers() {
+    assert_eq!(
+        ffmpeg_decode_args_with_threads(Path::new("input.mp4"), 7),
+        [
+            "-v",
+            "error",
+            "-threads",
+            "7",
+            "-i",
+            "input.mp4",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-"
+        ]
+    );
+    let encode = ffmpeg_encode_args_with_threads(Path::new("output.mp4"), 1920, 1080, 30.0, 7);
+    assert_eq!(
+        encode.windows(2).find(|pair| pair[0] == "-threads"),
+        Some(&["-threads".to_owned(), "7".to_owned()][..])
+    );
+
+    let bounded = ffmpeg_decode_args_with_threads(Path::new("input.mp4"), usize::MAX);
+    assert_eq!(
+        bounded.windows(2).find(|pair| pair[0] == "-threads"),
+        Some(&["-threads".to_owned(), "32".to_owned()][..])
     );
 }
 

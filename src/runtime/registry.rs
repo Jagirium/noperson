@@ -22,7 +22,7 @@ macro_rules! runtime_artifact {
                 ArtifactMirror {
                     name: "hugging-face",
                     url: concat!(
-                        "https://huggingface.co/Jagirium/noperson-runtime/resolve/main/",
+                        "https://huggingface.co/Jagirium/noperson-runtime/resolve/main/linux/",
                         $filename
                     ),
                 },
@@ -130,7 +130,12 @@ mod tests {
                 assert_eq!(artifact.blake3.len(), 64);
                 assert!(artifact.filename.ends_with(".tar.zst"));
                 assert!(artifact.mirrors[0].url.contains("/runtime-v0.1.0/"));
-                assert!(artifact.mirrors[1].url.contains("/noperson-runtime/"));
+                assert!(
+                    artifact.mirrors[1]
+                        .url
+                        .contains("/noperson-runtime/resolve/main/linux/"),
+                    "new runtime artifacts must live below the Linux namespace"
+                );
                 filenames.insert(artifact.filename);
             }
         }

@@ -14,6 +14,8 @@ use std::cell::RefCell;
 
 use crate::gpu::npp;
 
+include!(concat!(env!("OUT_DIR"), "/embedded_ptx.rs"));
+
 /// Profiling stage labels — must stay in sync with process_frame_gpu marks.
 pub const PROFILE_STAGES: &[&str] = &[
     "start",
@@ -50,9 +52,7 @@ pub struct GpuOps {
     interlace_scatter_fn: CudaFunction,
     enhancer_pack_tiles_fn: CudaFunction,
     enhancer_scatter_tiles_fn: CudaFunction,
-    warp_affine_fn: CudaFunction,
-    matmul_512_fn: CudaFunction,
-    l2_normalize_fn: CudaFunction,
+    calc_latent_512_fn: CudaFunction,
     resize_fn: CudaFunction,
     paste_back_fn: CudaFunction,
     border_oval_mask_fn: CudaFunction,
@@ -75,7 +75,6 @@ pub struct GpuOps {
     auto_color_dfl_stats_fn: CudaFunction,
     auto_color_dfl_apply_fn: CudaFunction,
     color_adjust_prep_fn: CudaFunction,
-    color_contrast_sum_fn: CudaFunction,
     color_contrast_saturation_fn: CudaFunction,
     color_sharpness_hue_noise_fn: CudaFunction,
     // Mask kernels
@@ -91,10 +90,12 @@ pub struct GpuOps {
     landmark_normalize_fn: CudaFunction,
     parser_argmax_fn: CudaFunction,
     parser_class_mask_fn: CudaFunction,
+    parser_makeup_fn: CudaFunction,
     mask_invert_fn: CudaFunction,
     restore_ellipse_mask_fn: CudaFunction,
     fake_diff_mask_fn: CudaFunction,
     fake_diff_composite_fn: CudaFunction,
+    fake_diff_composite_direct_fn: CudaFunction,
     semantic_region_mask_fn: CudaFunction,
     semantic_temporal_mask_fn: CudaFunction,
     semantic_mark_valid_fn: CudaFunction,
@@ -116,8 +117,6 @@ unsafe impl Sync for GpuOps {}
 impl GpuOps {
     /// Load all PTX kernels. Panics if any kernel fails to load.
     pub fn new(ctx: &Arc<CudaContext>, stream: Arc<CudaStream>) -> Result<Self, DriverError> {
-        let out_dir = env!("OUT_DIR");
-
         unsafe {
             npp::set_npp_stream(stream.cu_stream() as *mut std::ffi::c_void).map_err(|e| {
                 tracing::error!("nppSetStream failed: {e}");
@@ -131,7 +130,9 @@ impl GpuOps {
         let mut modules = HashMap::new();
         let mut load = |name: &str, entry: &str| -> CudaFunction {
             let module = modules.entry(name.to_owned()).or_insert_with(|| {
-                let ptx = Ptx::from_file(format!("{out_dir}/{name}.ptx"));
+                let source = embedded_ptx(name)
+                    .unwrap_or_else(|| panic!("PTX module was not embedded: {name}"));
+                let ptx = Ptx::from_src(source);
                 ctx.load_module(ptx)
                     .unwrap_or_else(|e| panic!("Failed to load {name}.ptx: {e}"))
             });
@@ -166,7 +167,6 @@ impl GpuOps {
             interlace_scatter_fn: load("interlace", "interlace_scatter_denormalized_kernel"),
             enhancer_pack_tiles_fn: load("enhancer_tiles", "enhancer_pack_tiles_kernel"),
             enhancer_scatter_tiles_fn: load("enhancer_tiles", "enhancer_scatter_tiles_kernel"),
-            warp_affine_fn: load("warp_affine", "warp_affine_chw_kernel"),
             resize_fn: load("warp_affine", "resize_chw_kernel"),
             paste_back_fn: load("paste_back", "paste_back_kernel"),
             border_oval_mask_fn: load("border_mask", "border_oval_mask_kernel"),
@@ -188,11 +188,9 @@ impl GpuOps {
             auto_color_dfl_stats_fn: load("dfm_color", "auto_color_dfl_stats_kernel"),
             auto_color_dfl_apply_fn: load("dfm_color", "auto_color_dfl_apply_kernel"),
             color_adjust_prep_fn: load("color_adjust", "color_adjust_prep_kernel"),
-            color_contrast_sum_fn: load("color_adjust", "color_contrast_sum_kernel"),
             color_contrast_saturation_fn: load("color_adjust", "color_contrast_saturation_kernel"),
             color_sharpness_hue_noise_fn: load("color_adjust", "color_sharpness_hue_noise_kernel"),
-            matmul_512_fn: load("matmul_512", "matmul_512_kernel"),
-            l2_normalize_fn: load("matmul_512", "l2_normalize_kernel"),
+            calc_latent_512_fn: load("matmul_512", "calc_latent_512_kernel"),
             blur_h_fn: load("gaussian_blur", "gaussian_blur_h_kernel"),
             blur_v_fn: load("gaussian_blur", "gaussian_blur_v_kernel"),
             blur_chw_h_fn: load("gaussian_blur", "gaussian_blur_chw_h_kernel"),
@@ -205,10 +203,15 @@ impl GpuOps {
             landmark_normalize_fn: load("mask_postprocess", "landmark_normalize_kernel"),
             parser_argmax_fn: load("mask_postprocess", "parser_argmax_kernel"),
             parser_class_mask_fn: load("mask_postprocess", "parser_class_mask_kernel"),
+            parser_makeup_fn: load("mask_postprocess", "parser_makeup_kernel"),
             mask_invert_fn: load("mask_postprocess", "mask_invert_kernel"),
             restore_ellipse_mask_fn: load("mask_postprocess", "restore_ellipse_mask_kernel"),
             fake_diff_mask_fn: load("mask_postprocess", "fake_diff_mask_kernel"),
             fake_diff_composite_fn: load("mask_postprocess", "fake_diff_composite_kernel"),
+            fake_diff_composite_direct_fn: load(
+                "mask_postprocess",
+                "fake_diff_composite_direct_kernel",
+            ),
             semantic_region_mask_fn: load("mask_postprocess", "semantic_region_mask_kernel"),
             semantic_temporal_mask_fn: load("mask_postprocess", "semantic_temporal_mask_kernel"),
             semantic_mark_valid_fn: load("mask_postprocess", "semantic_mark_valid_kernel"),
@@ -355,7 +358,7 @@ impl GpuOps {
         unsafe {
             b.launch(LaunchConfig {
                 grid_dim: (1, 1, 1),
-                block_dim: (1, 1, 1),
+                block_dim: (256, 1, 1),
                 shared_mem_bytes: 0,
             })
         }?;
@@ -380,43 +383,32 @@ impl GpuOps {
         unsafe {
             b.launch(LaunchConfig {
                 grid_dim: (1, 1, 1),
-                block_dim: (1, 1, 1),
+                block_dim: (256, 1, 1),
                 shared_mem_bytes: 0,
             })
         }?;
         Ok(())
     }
 
-    /// Matrix-vector multiply: out[i] = sum_j(embedding[j] * emap[i][j]).
-    /// `embedding` [512], `emap` [512*512] row-major, `output` [512].
-    /// dim must be 512.
-    pub fn matmul_512(
+    /// Compute `L2norm(L2norm(embedding) @ emap)` in one CUDA block.
+    pub fn calc_latent_512(
         &self,
-        embedding: &CudaSlice<f32>,
+        embedding: &mut CudaSlice<f32>,
         emap: &CudaSlice<f32>,
         output: &mut CudaSlice<f32>,
-        dim: u32,
     ) -> Result<(), DriverError> {
-        let mut b = self.stream.launch_builder(&self.matmul_512_fn);
+        debug_assert!(embedding.len() >= 512);
+        debug_assert!(emap.len() >= 512 * 512);
+        debug_assert!(output.len() >= 512);
+        let mut b = self.stream.launch_builder(&self.calc_latent_512_fn);
         b.arg(embedding);
         b.arg(emap);
         b.arg(output);
-        b.arg(&dim);
-        unsafe { b.launch(LaunchConfig::for_num_elems(dim)) }?;
-        Ok(())
-    }
-
-    /// L2 normalize a [dim] vector in-place.
-    pub fn l2_normalize(&self, vec: &mut CudaSlice<f32>, dim: u32) -> Result<(), DriverError> {
-        let mut b = self.stream.launch_builder(&self.l2_normalize_fn);
-        b.arg(vec);
-        b.arg(&dim);
-        // l2_normalize uses shared memory with 512 threads max
         unsafe {
             b.launch(LaunchConfig {
                 grid_dim: (1, 1, 1),
                 block_dim: (512, 1, 1),
-                shared_mem_bytes: 2048,
+                shared_mem_bytes: 0,
             })
         }?;
         Ok(())
@@ -601,42 +593,6 @@ impl GpuOps {
         Ok(())
     }
 
-    /// Affine warp: src [3, src_h, src_w] → dst [3, dst_h, dst_w]
-    pub fn warp_affine(
-        &self,
-        src: &CudaSlice<f32>,
-        dst: &mut CudaSlice<f32>,
-        src_h: u32,
-        src_w: u32,
-        dst_h: u32,
-        dst_w: u32,
-        inv_affine: &[[f64; 3]; 2], // inverse affine (dst→src)
-    ) -> Result<(), DriverError> {
-        let total = dst_h * dst_w;
-        let inv00 = inv_affine[0][0] as f32;
-        let inv01 = inv_affine[0][1] as f32;
-        let inv02 = inv_affine[0][2] as f32;
-        let inv10 = inv_affine[1][0] as f32;
-        let inv11 = inv_affine[1][1] as f32;
-        let inv12 = inv_affine[1][2] as f32;
-
-        let mut b = self.stream.launch_builder(&self.warp_affine_fn);
-        b.arg(src);
-        b.arg(dst);
-        b.arg(&src_h);
-        b.arg(&src_w);
-        b.arg(&dst_h);
-        b.arg(&dst_w);
-        b.arg(&inv00);
-        b.arg(&inv01);
-        b.arg(&inv02);
-        b.arg(&inv10);
-        b.arg(&inv11);
-        b.arg(&inv12);
-        unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
-        Ok(())
-    }
-
     /// Bilinear resize: src [C, src_h, src_w] → dst [C, dst_h, dst_w]
     pub fn resize(
         &self,
@@ -771,8 +727,10 @@ impl GpuOps {
         seed: u32,
     ) -> Result<(), DriverError> {
         let pixels = width * height;
+        self.stream.memcpy_htod(&[0u32], gray_sum)?;
         let mut prep = self.stream.launch_builder(&self.color_adjust_prep_fn);
         prep.arg(&mut *image);
+        prep.arg(&mut *gray_sum);
         prep.arg(&pixels);
         prep.arg(&gamma);
         prep.arg(&offsets[0]);
@@ -780,13 +738,6 @@ impl GpuOps {
         prep.arg(&offsets[2]);
         prep.arg(&brightness);
         unsafe { prep.launch(LaunchConfig::for_num_elems(pixels)) }?;
-
-        self.stream.memcpy_htod(&[0u32], gray_sum)?;
-        let mut reduce = self.stream.launch_builder(&self.color_contrast_sum_fn);
-        reduce.arg(&*image);
-        reduce.arg(&mut *gray_sum);
-        reduce.arg(&pixels);
-        unsafe { reduce.launch(LaunchConfig::for_num_elems(pixels)) }?;
 
         let mut color = self
             .stream
@@ -1059,7 +1010,8 @@ impl GpuOps {
         if ks <= 1 {
             return Ok(());
         }
-        let total = h * w;
+        debug_assert!(ks <= 65);
+        let grid = (w.div_ceil(32), h.div_ceil(8), 1);
 
         // Horizontal pass: mask (read) → tmp (write)
         {
@@ -1071,7 +1023,13 @@ impl GpuOps {
             b.arg(&w);
             b.arg(&ks);
             b.arg(&border_mode);
-            unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+            unsafe {
+                b.launch(LaunchConfig {
+                    grid_dim: grid,
+                    block_dim: (32, 8, 1),
+                    shared_mem_bytes: (32 + ks - 1) * 8 * 4,
+                })
+            }?;
         }
         // Vertical pass: tmp (read) → mask (write)
         {
@@ -1083,7 +1041,13 @@ impl GpuOps {
             b.arg(&w);
             b.arg(&ks);
             b.arg(&border_mode);
-            unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+            unsafe {
+                b.launch(LaunchConfig {
+                    grid_dim: grid,
+                    block_dim: (32, 8, 1),
+                    shared_mem_bytes: 32 * (8 + ks - 1) * 4,
+                })
+            }?;
         }
         Ok(())
     }
@@ -1101,7 +1065,8 @@ impl GpuOps {
         if ks <= 1 {
             return Ok(());
         }
-        let total = 3 * h * w;
+        debug_assert!(ks <= 65);
+        let grid = (w.div_ceil(32), h.div_ceil(8), 3);
         let mut horizontal = self.stream.launch_builder(&self.blur_chw_h_fn);
         horizontal.arg(&*image);
         horizontal.arg(&mut *tmp);
@@ -1109,7 +1074,13 @@ impl GpuOps {
         horizontal.arg(&h);
         horizontal.arg(&w);
         horizontal.arg(&ks);
-        unsafe { horizontal.launch(LaunchConfig::for_num_elems(total)) }?;
+        unsafe {
+            horizontal.launch(LaunchConfig {
+                grid_dim: grid,
+                block_dim: (32, 8, 1),
+                shared_mem_bytes: (32 + ks - 1) * 8 * 4,
+            })
+        }?;
 
         let mut vertical = self.stream.launch_builder(&self.blur_chw_v_fn);
         vertical.arg(&*tmp);
@@ -1118,7 +1089,13 @@ impl GpuOps {
         vertical.arg(&h);
         vertical.arg(&w);
         vertical.arg(&ks);
-        unsafe { vertical.launch(LaunchConfig::for_num_elems(total)) }?;
+        unsafe {
+            vertical.launch(LaunchConfig {
+                grid_dim: grid,
+                block_dim: (32, 8, 1),
+                shared_mem_bytes: 32 * (8 + ks - 1) * 4,
+            })
+        }?;
         Ok(())
     }
 
@@ -1241,6 +1218,41 @@ impl GpuOps {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn parser_makeup(
+        &self,
+        image: &mut CudaSlice<f32>,
+        classes: &CudaSlice<u8>,
+        hair_enabled: bool,
+        hair_color: [f32; 3],
+        hair_blend: f32,
+        lips_enabled: bool,
+        lips_color: [f32; 3],
+        lips_blend: f32,
+    ) -> Result<(), DriverError> {
+        let pixels = 512 * 512u32;
+        let hair_enabled = u32::from(hair_enabled);
+        let lips_enabled = u32::from(lips_enabled);
+        let hair_blend = hair_blend.clamp(0.0, 1.0);
+        let lips_blend = lips_blend.clamp(0.0, 1.0);
+        let mut b = self.stream.launch_builder(&self.parser_makeup_fn);
+        b.arg(image);
+        b.arg(classes);
+        b.arg(&pixels);
+        b.arg(&hair_enabled);
+        b.arg(&hair_color[0]);
+        b.arg(&hair_color[1]);
+        b.arg(&hair_color[2]);
+        b.arg(&hair_blend);
+        b.arg(&lips_enabled);
+        b.arg(&lips_color[0]);
+        b.arg(&lips_color[1]);
+        b.arg(&lips_color[2]);
+        b.arg(&lips_blend);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        Ok(())
+    }
+
     pub fn mask_invert(&self, mask: &mut CudaSlice<f32>) -> Result<(), DriverError> {
         let total = mask.len() as u32;
         let mut b = self.stream.launch_builder(&self.mask_invert_fn);
@@ -1332,6 +1344,25 @@ impl GpuOps {
         b.arg(&pixels);
         b.arg(&total);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    pub fn fake_diff_composite_direct(
+        &self,
+        swapped: &mut CudaSlice<f32>,
+        original: &CudaSlice<f32>,
+        pixels: u32,
+        amount: u32,
+    ) -> Result<(), DriverError> {
+        let threshold = amount as f32 * 2.55;
+        let mut b = self
+            .stream
+            .launch_builder(&self.fake_diff_composite_direct_fn);
+        b.arg(swapped);
+        b.arg(original);
+        b.arg(&pixels);
+        b.arg(&threshold);
+        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
         Ok(())
     }
 

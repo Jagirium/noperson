@@ -10,6 +10,7 @@ use std::process::Command;
 
 fn main() {
     let kernels_dir = Path::new("gpu_kernels");
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR is not set");
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let cuda_path = env::var("CUDA_HOME")
         .or_else(|_| env::var("CUDA_PATH"))
@@ -25,10 +26,11 @@ fn main() {
     } else {
         PathBuf::from(&cuda_path).join("bin").join("nvcc")
     };
-    let cuda_arch = env::var("NOPERSON_CUDA_ARCH").unwrap_or_else(|_| "sm_86".to_owned());
+    // Keep embedded PTX portable across the complete supported NVIDIA floor.
+    // The driver JIT specializes compute_75 PTX for Turing and every newer SM.
+    let cuda_arch = env::var("NOPERSON_CUDA_ARCH").unwrap_or_else(|_| "compute_75".to_owned());
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        let out_dir = env::var("OUT_DIR").unwrap();
         let object = format!("{out_dir}/jpeg_roundtrip.o");
         let archive = format!("{out_dir}/libnoperson_jpeg_roundtrip.a");
         let cc_status = Command::new("cc")
@@ -48,13 +50,39 @@ fn main() {
             .status()
             .expect("failed to archive JPEG bridge");
         assert!(ar_status.success(), "archiver failed for JPEG bridge");
+        let jpeg_archive = Command::new("cc")
+            .args(["-print-file-name=libjpeg.a"])
+            .output()
+            .expect("failed to locate static libjpeg with the C compiler");
+        assert!(
+            jpeg_archive.status.success(),
+            "C compiler could not locate static libjpeg"
+        );
+        let jpeg_archive = PathBuf::from(
+            String::from_utf8(jpeg_archive.stdout)
+                .expect("C compiler returned a non-UTF-8 libjpeg path")
+                .trim(),
+        );
+        assert!(
+            jpeg_archive.is_absolute() && jpeg_archive.is_file(),
+            "static libjpeg archive was not found; install libjpeg development files"
+        );
         println!("cargo:rustc-link-search=native={out_dir}");
+        println!(
+            "cargo:rustc-link-search=native={}",
+            jpeg_archive.parent().unwrap().display()
+        );
         println!("cargo:rustc-link-lib=static=noperson_jpeg_roundtrip");
-        println!("cargo:rustc-link-lib=dylib=jpeg");
+        // Keep the bootstrap executable independent from the host JPEG ABI.
+        // Linux release images install libjpeg-dev, so only this small archive
+        // is copied into the final executable; no JPEG .so is redistributed.
+        println!("cargo:rustc-link-lib=static=jpeg");
         println!("cargo:rerun-if-changed=native/jpeg_roundtrip.c");
     }
 
     // Compile each .cu file to .ptx
+    let mut embedded_ptx =
+        String::from("fn embedded_ptx(name: &str) -> Option<&'static str> {\n    match name {\n");
     if kernels_dir.exists() {
         let mut paths = std::fs::read_dir(kernels_dir)
             .expect("Failed to read gpu_kernels/")
@@ -64,7 +92,6 @@ fn main() {
         for path in paths {
             if path.extension().is_some_and(|e| e == "cu") {
                 let stem = path.file_stem().unwrap().to_str().unwrap();
-                let out_dir = env::var("OUT_DIR").unwrap();
                 let ptx_out = format!("{out_dir}/{stem}.ptx");
 
                 let status = Command::new(&nvcc)
@@ -80,10 +107,16 @@ fn main() {
                     .unwrap_or_else(|e| panic!("Failed to run nvcc for {stem}.cu: {e}"));
 
                 assert!(status.success(), "nvcc failed for {stem}.cu");
+                embedded_ptx.push_str(&format!(
+                    "        \"{stem}\" => Some(include_str!(concat!(env!(\"OUT_DIR\"), \"/{stem}.ptx\"))),\n"
+                ));
                 println!("cargo:rerun-if-changed={}", path.display());
             }
         }
     }
+    embedded_ptx.push_str("        _ => None,\n    }\n}\n");
+    std::fs::write(format!("{out_dir}/embedded_ptx.rs"), embedded_ptx)
+        .expect("failed to generate embedded PTX registry");
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=gpu_kernels/");

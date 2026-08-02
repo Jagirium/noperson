@@ -4,6 +4,29 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SimilarityType {
+    #[default]
+    Opal,
+    Pearl,
+    Optimal,
+}
+
+impl SimilarityType {
+    pub fn from_crossswap_name(name: &str) -> Result<Self, SimilarityTypeParseError> {
+        match name {
+            "Opal" => Ok(Self::Opal),
+            "Pearl" => Ok(Self::Pearl),
+            "Optimal" => Ok(Self::Optimal),
+            _ => Err(SimilarityTypeParseError(name.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown CrossSwap similarity type {0}")]
+pub struct SimilarityTypeParseError(String);
+
 /// Full-frame enhancement model selected for photo/video output.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EnhancerModel {
@@ -73,6 +96,23 @@ pub struct EnhancerModelParseError(String);
 
 /// FaceParser class-mask controls, matching CrossSwap's parser sliders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MakeupParams {
+    pub enabled: bool,
+    pub color: [f32; 3],
+    pub blend: f32,
+}
+
+impl Default for MakeupParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            color: [0.0; 3],
+            blend: 0.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaceParserMaskParams {
     pub background: i32,
     pub face: u32,
@@ -89,6 +129,10 @@ pub struct FaceParserMaskParams {
     pub hair: u32,
     pub background_blur: u32,
     pub face_blur: u32,
+    #[serde(default)]
+    pub hair_makeup: MakeupParams,
+    #[serde(default)]
+    pub lips_makeup: MakeupParams,
 }
 
 impl Default for FaceParserMaskParams {
@@ -109,6 +153,8 @@ impl Default for FaceParserMaskParams {
             hair: 0,
             background_blur: 5,
             face_blur: 5,
+            hair_makeup: MakeupParams::default(),
+            lips_makeup: MakeupParams::default(),
         }
     }
 }
@@ -392,6 +438,8 @@ pub struct FaceSwapParams {
     pub restorer_enabled: bool,
     pub restorer_size: RestorerSize,
     pub restorer_alpha: f32,
+    #[serde(default = "default_restorer_fidelity")]
+    pub restorer_fidelity: f32,
     #[serde(default)]
     pub restorer_mode: RestorerMode,
     #[serde(default)]
@@ -402,6 +450,8 @@ pub struct FaceSwapParams {
     pub restorer2_size: RestorerSize,
     #[serde(default = "default_restorer_alpha")]
     pub restorer2_alpha: f32,
+    #[serde(default = "default_restorer_fidelity")]
+    pub restorer2_fidelity: f32,
     #[serde(default)]
     pub restorer2_mode: RestorerMode,
     #[serde(default)]
@@ -483,6 +533,8 @@ pub struct FaceSwapParams {
 
     // Similarity threshold for face matching
     pub similarity_threshold: f32,
+    #[serde(default)]
+    pub similarity_type: SimilarityType,
 }
 
 impl Default for FaceSwapParams {
@@ -506,11 +558,13 @@ impl Default for FaceSwapParams {
             restorer_enabled: false,
             restorer_size: RestorerSize::Gpen256,
             restorer_alpha: 1.0,
+            restorer_fidelity: default_restorer_fidelity(),
             restorer_mode: RestorerMode::Quality,
             restorer_alignment: RestorerAlignment::Original,
             restorer2_enabled: false,
             restorer2_size: default_restorer_size(),
             restorer2_alpha: default_restorer_alpha(),
+            restorer2_fidelity: default_restorer_fidelity(),
             restorer2_mode: RestorerMode::Quality,
             restorer2_alignment: RestorerAlignment::Original,
             enhancer_enabled: false,
@@ -550,6 +604,7 @@ impl Default for FaceSwapParams {
             face_likeness_enabled: false,
             face_likeness_factor: 0.0,
             similarity_threshold: 0.6,
+            similarity_type: SimilarityType::default(),
         }
     }
 }
@@ -564,6 +619,10 @@ const fn default_restorer_size() -> RestorerSize {
 
 const fn default_restorer_alpha() -> f32 {
     1.0
+}
+
+const fn default_restorer_fidelity() -> f32 {
+    0.9
 }
 
 const fn default_jpeg_quality() -> u8 {
