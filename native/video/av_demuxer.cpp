@@ -163,7 +163,26 @@ extern "C" NP_VIDEO_EXPORT int32_t np_video_demux_open(
     const AVRational frame_rate = av_guess_frame_rate(demuxer->format, stream, nullptr);
     out_video->frame_rate_num = frame_rate.num > 0 ? static_cast<uint32_t>(frame_rate.num) : 0;
     out_video->frame_rate_den = frame_rate.den > 0 ? static_cast<uint32_t>(frame_rate.den) : 0;
+    int64_t duration_ts = stream->duration;
+    if (duration_ts == AV_NOPTS_VALUE && demuxer->format->duration > 0) {
+        duration_ts = av_rescale_q(
+            demuxer->format->duration, AV_TIME_BASE_Q, stream->time_base);
+    }
+    out_video->duration_ts = duration_ts != AV_NOPTS_VALUE && duration_ts > 0
+                                 ? duration_ts
+                                 : 0;
     out_video->frame_count = stream->nb_frames > 0 ? stream->nb_frames : 0;
+    if (out_video->frame_count == 0 && out_video->duration_ts > 0 &&
+        out_video->frame_rate_num > 0 && out_video->frame_rate_den > 0) {
+        const AVRational frame_time = {
+            static_cast<int>(out_video->frame_rate_den),
+            static_cast<int>(out_video->frame_rate_num)};
+        out_video->frame_count = av_rescale_q_rnd(
+            out_video->duration_ts,
+            stream->time_base,
+            frame_time,
+            static_cast<AVRounding>(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+    }
     out_video->color_range = codec->color_range;
     out_video->color_matrix = codec->color_space;
     out_video->color_primaries = codec->color_primaries;

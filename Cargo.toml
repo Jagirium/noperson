@@ -103,6 +103,13 @@ incremental = true
 strip = true
 panic = "abort"
 
+[profile.release-debug]
+inherits = "release"
+debug = 2
+strip = false
+panic = "unwind"
+incremental = false
+
 # Keep local builds small. Full debug symbols and incremental caches multiply
 # the size of every GUI/test binary and previously grew target/debug past 100 GiB.
 [profile.dev]

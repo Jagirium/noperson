@@ -3,7 +3,7 @@
 //! This test requires:
 //!   - CUDA device
 //!   - models/yoloface_8n.onnx
-//!   - face.jpg in project root
+//!   - assets/photos/face.jpg
 //!
 //! Run: cargo test --test pipeline_smoke -- --nocapture --ignored
 
@@ -31,16 +31,16 @@ fn test_models_present() {
     }
 }
 
-/// Verify that face.jpg test image exists.
+/// Verify that the face test image exists.
 #[test]
 fn test_face_image_present() {
-    let face = PathBuf::from("face.jpg");
-    assert!(face.exists(), "face.jpg not found in project root");
+    let face = PathBuf::from("assets/photos/face.jpg");
+    assert!(face.exists(), "assets/photos/face.jpg not found");
 }
 
-/// Smoke test: load YoloFace8n model and run detection on face.jpg.
+/// Smoke test: load YoloFace8n model and run detection on the face fixture.
 ///
-/// Requires CUDA + models/yoloface_8n.onnx + face.jpg.
+/// Requires CUDA + models/yoloface_8n.onnx + assets/photos/face.jpg.
 /// Marked `#[ignore]` — run with `cargo test -- --ignored`.
 #[test]
 #[ignore = "requires CUDA + ONNX models"]
@@ -48,7 +48,7 @@ fn test_detect_faces_smoke() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     // Load test image
-    let img = image::open("face.jpg")?;
+    let img = image::open("assets/photos/face.jpg")?;
     let (width, height) = img.dimensions();
     let rgb = img.to_rgb8();
     eprintln!("Loaded face.jpg: {width}x{height}");

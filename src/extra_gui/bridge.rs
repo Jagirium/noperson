@@ -9,6 +9,7 @@ use crate::config::parameters::{
 };
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 use crate::engine::{EngineSpec, ModelRole};
+use crate::launch::PredecodeMode;
 use crate::live::{
     FaceAssignmentInputs, FaceIdentityInput, build_live_spec_for_digest, embedding_blake3,
 };
@@ -41,6 +42,7 @@ pub struct EditorEngineRequest {
     /// CPU threads granted to FFmpeg decode/encode. The GPU pipeline remains
     /// a single ordered worker so models and VRAM are never duplicated.
     pub worker_threads: usize,
+    pub predecode: PredecodeMode,
 }
 
 impl EditorRuntimeConfig {
@@ -412,6 +414,7 @@ impl EditorRuntimeConfig {
             spec,
             assignments,
             worker_threads: self.worker_threads.clamp(1, 32),
+            predecode: PredecodeMode::Auto,
         })
     }
 }

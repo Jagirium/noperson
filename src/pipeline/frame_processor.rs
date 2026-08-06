@@ -15,6 +15,7 @@ use crate::pipeline::face_landmark::LandmarkModel;
 use crate::pipeline::face_mask;
 use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::face_swapper::FaceSwapper;
+use crate::pipeline::face_tracker::{TemporalFaceTracker, detect_or_track};
 use crate::pipeline::ort_binding::run_bound_f32;
 use crate::pipeline::workspace::GpuWorkspace;
 
@@ -72,6 +73,7 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     ws: &mut GpuWorkspace,
     sources: &[SourceFace],
     params: &FaceSwapParams,
+    tracker: &mut TemporalFaceTracker,
 ) -> anyhow::Result<FrameResult> {
     if sources.is_empty() || !pipeline_has_enabled_assignment(sources, params) {
         return Ok(FrameResult {
@@ -86,11 +88,17 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     let _ = gpu.profile_mark(0);
 
     // 1. Detect faces (letterbox on GPU, ort inference, decode on CPU)
-    let (faces, _det_scale) = if params.auto_rotation {
-        detector.detect_gpu_auto_rotation(manager, gpu, frame_chw, ws, frame_h, frame_w)?
-    } else {
-        detector.detect_gpu(manager, gpu, frame_chw, ws, frame_h, frame_w)?
-    };
+    let faces = detect_or_track(tracker, frame_w, frame_h, || {
+        if params.auto_rotation {
+            detector
+                .detect_gpu_auto_rotation(manager, gpu, frame_chw, ws, frame_h, frame_w)
+                .map(|(faces, _)| faces)
+        } else {
+            detector
+                .detect_gpu(manager, gpu, frame_chw, ws, frame_h, frame_w)
+                .map(|(faces, _)| faces)
+        }
+    })?;
     let _ = gpu.profile_mark(1); // after_detect
 
     let mut faces_swapped = 0;

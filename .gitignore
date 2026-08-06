@@ -49,6 +49,11 @@ swapped_output.png
 # Repository-local plans, reports, and release notes
 /TODO/
 /.codex-run
+/.codex-cache/
 /dist
 /libs/
 /win
+/videobench
+/tmp
+/.jobs
+/test

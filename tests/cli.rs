@@ -52,3 +52,15 @@ fn headless_help_prints_without_bootstrapping_the_gpu_runtime() {
     assert!(!stderr.contains("starting up"));
     assert!(!stderr.contains("GPU runtime"));
 }
+
+#[test]
+fn startup_log_is_after_the_runtime_reexec_branch() {
+    let main = std::fs::read_to_string("src/main.rs").unwrap();
+    let reexec = main.find("BootstrapOutcome::Reexec").unwrap();
+    let startup = main.find("starting up").unwrap();
+
+    assert!(
+        startup > reexec,
+        "the bootstrap parent must not announce a full application startup"
+    );
+}

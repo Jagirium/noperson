@@ -9,7 +9,7 @@ use noperson::quality::compare_rgb;
 fn main() -> anyhow::Result<()> {
     let reference_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "face.jpg".to_owned());
+        .unwrap_or_else(|| "assets/photos/face.jpg".to_owned());
     let candidate_path = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "swapped_output.png".to_owned());

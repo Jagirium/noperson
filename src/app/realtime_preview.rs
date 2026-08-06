@@ -331,7 +331,7 @@ mod tests {
     #[test]
     #[ignore = "local visual baseline is stored in ignored tests/snapshots"]
     fn frame_visual_snapshot() {
-        let image = image::open("face.jpg")
+        let image = image::open("assets/photos/face.jpg")
             .expect("face.jpg test fixture")
             .thumbnail(640, 360)
             .to_rgb8();

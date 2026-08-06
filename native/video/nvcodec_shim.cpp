@@ -16,13 +16,18 @@
 
 struct NpNvDecoder {
 #if defined(NP_VIDEO_HAS_NV_CODEC_HEADERS)
+    struct ReadySurface {
+        CUVIDPARSERDISPINFO display{};
+        CUdeviceptr pointer = 0;
+        unsigned int pitch = 0;
+    };
     CudaFunctions *cuda = nullptr;
     CuvidFunctions *cuvid = nullptr;
     CUcontext context = nullptr;
     CUstream stream = nullptr;
     CUvideoparser parser = nullptr;
     CUvideodecoder decoder = nullptr;
-    std::deque<CUVIDPARSERDISPINFO> ready;
+    std::deque<ReadySurface> ready;
     std::vector<CUdeviceptr> mapped;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -143,10 +148,29 @@ int CUDAAPI decoder_display(void *opaque, CUVIDPARSERDISPINFO *display) {
     if (display == nullptr) {
         return 1;
     }
+    CUVIDPROCPARAMS process{};
+    process.progressive_frame = display->progressive_frame;
+    process.top_field_first = display->top_field_first;
+    process.unpaired_field = display->repeat_first_field < 0;
+    process.output_stream = decoder->stream;
+    CUdeviceptr pointer = 0;
+    unsigned int pitch = 0;
+    decoder->callback_error = decoder->cuvid->cuvidMapVideoFrame(
+        decoder->decoder, display->picture_index, &pointer, &pitch, &process);
+    if (decoder->callback_error != CUDA_SUCCESS) {
+        return 0;
+    }
+    bool tracked = false;
     try {
-        decoder->ready.push_back(*display);
+        decoder->mapped.push_back(pointer);
+        tracked = true;
+        decoder->ready.push_back({*display, pointer, pitch});
         return 1;
     } catch (...) {
+        if (tracked) {
+            decoder->mapped.pop_back();
+        }
+        decoder->cuvid->cuvidUnmapVideoFrame(decoder->decoder, pointer);
         decoder->callback_error = CUDA_ERROR_UNKNOWN;
         return 0;
     }
@@ -328,6 +352,25 @@ extern "C" NP_VIDEO_EXPORT int32_t np_video_nvdecoder_flush(
 #endif
 }
 
+extern "C" NP_VIDEO_EXPORT int32_t np_video_nvdecoder_peek(
+    NpNvDecoder *decoder,
+    int32_t *out_picture_index,
+    NpVideoError *error) noexcept {
+#if !defined(NP_VIDEO_HAS_NV_CODEC_HEADERS)
+    (void)decoder; (void)out_picture_index;
+    return invalid_probe(error);
+#else
+    if (decoder == nullptr || out_picture_index == nullptr) {
+        return invalid_probe(error);
+    }
+    if (decoder->ready.empty()) {
+        return 0;
+    }
+    *out_picture_index = decoder->ready.front().display.picture_index;
+    return 1;
+#endif
+}
+
 extern "C" NP_VIDEO_EXPORT int32_t np_video_nvdecoder_map(
     NpNvDecoder *decoder,
     NpCudaVideoSurface *out_surface,
@@ -343,42 +386,17 @@ extern "C" NP_VIDEO_EXPORT int32_t np_video_nvdecoder_map(
     if (decoder->ready.empty()) {
         return 0;
     }
-    if (!push_context(decoder, error)) {
-        return context_failure(error);
-    }
-    const CUVIDPARSERDISPINFO display = decoder->ready.front();
-    CUVIDPROCPARAMS process{};
-    process.progressive_frame = display.progressive_frame;
-    process.top_field_first = display.top_field_first;
-    process.unpaired_field = display.repeat_first_field < 0;
-    process.output_stream = decoder->stream;
-    CUdeviceptr pointer = 0;
-    unsigned int pitch = 0;
-    const CUresult status = decoder->cuvid->cuvidMapVideoFrame(
-        decoder->decoder, display.picture_index, &pointer, &pitch, &process);
-    pop_context(decoder);
-    if (status != CUDA_SUCCESS) {
-        return cuda_fail(decoder, error, status, "map NVDEC output surface");
-    }
-    try {
-        decoder->mapped.push_back(pointer);
-    } catch (...) {
-        NpVideoError ignored{};
-        push_context(decoder, &ignored);
-        decoder->cuvid->cuvidUnmapVideoFrame(decoder->decoder, pointer);
-        pop_context(decoder);
-        return cuda_fail(decoder, error, CUDA_ERROR_UNKNOWN, "track NVDEC output surface");
-    }
+    const NpNvDecoder::ReadySurface ready = decoder->ready.front();
     decoder->ready.pop_front();
     out_surface->abi_version = NP_VIDEO_ABI_VERSION;
     out_surface->pixel_format = decoder->pixel_format;
-    out_surface->device_ptr = pointer;
-    out_surface->pitch = pitch;
+    out_surface->device_ptr = ready.pointer;
+    out_surface->pitch = ready.pitch;
     out_surface->width = decoder->width;
     out_surface->height = decoder->height;
-    out_surface->timestamp_100ns = display.timestamp;
-    out_surface->picture_index = display.picture_index;
-    out_surface->progressive = display.progressive_frame != 0;
+    out_surface->timestamp_100ns = ready.display.timestamp;
+    out_surface->picture_index = ready.display.picture_index;
+    out_surface->progressive = ready.display.progressive_frame != 0;
     return 1;
 #endif
 }

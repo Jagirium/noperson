@@ -1359,7 +1359,6 @@ fn run_photo_swap(
         provider,
         &stream,
     )?;
-
     let source_img = image::open(&source_path)?;
     let (sw, sh) = source_img.dimensions();
     let source_rgb = source_img.to_rgb8();
@@ -1511,6 +1510,7 @@ fn run_webcam_loop(
         provider,
         &stream,
     )?;
+    engine.set_tracking_policy(crate::pipeline::face_tracker::TrackerPolicy::realtime_adaptive());
 
     let _ = tx.send(WorkerMsg::Status("Opening webcam".into()));
     let (capture_worker, capture_info) = crate::io::webcam::WebcamCaptureWorker::spawn(
@@ -1660,6 +1660,7 @@ fn run_webcam_loop(
                 let _ = engine.process_chw(&mut slot.chw, fh, fw)?;
             }
             gpu.sync()?;
+            engine.reset_face_tracker();
             warmed = true;
             let _ = tx.send(WorkerMsg::Status("Running".into()));
             // Restore the first live frame after destructive warm-up passes.
@@ -2361,12 +2362,12 @@ mod tests {
     #[test]
     #[ignore = "local visual baseline is stored in ignored tests/snapshots"]
     fn live_layout_with_output_visual_snapshot() -> anyhow::Result<()> {
-        let (data, width, height) = load_image(std::path::Path::new("face.jpg"))?;
+        let (data, width, height) = load_image(std::path::Path::new("assets/photos/face.jpg"))?;
         let preview = color_preview_from_rgb(&data, width, height, 1024)?;
         let mut app = App::new(PathBuf::from("models"));
-        app.target_face_path = Some(PathBuf::from("face.jpg"));
+        app.target_face_path = Some(PathBuf::from("assets/photos/face.jpg"));
         app.target_face_preview = Some(preview.clone());
-        app.input_source = InputSource::Photo(PathBuf::from("face.jpg"));
+        app.input_source = InputSource::Photo(PathBuf::from("assets/photos/face.jpg"));
         app.input_preview = Some(preview.clone());
         app.output_preview = Some(preview);
         app.output_frame = Some((data, width, height));

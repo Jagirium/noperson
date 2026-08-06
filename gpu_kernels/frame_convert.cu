@@ -180,6 +180,7 @@ extern "C" __global__
 void chw_f32_to_nv12_scaled_kernel(
     const float* __restrict__ chw,
     unsigned char* __restrict__ nv12,
+    const unsigned int pitch,
     const unsigned int src_h,
     const unsigned int src_w,
     const unsigned int dst_h,
@@ -208,11 +209,11 @@ void chw_f32_to_nv12_scaled_kernel(
     float b = sample_chw_bilinear(chw, 2, src_h, src_w, y, x, dst_h, dst_w);
     float y_code = yr * r + yg * g + yb * b + y_offset;
     if (p010 != 0) {
-        unsigned short* p010_output = (unsigned short*)nv12;
+        unsigned short* p010_output = (unsigned short*)(nv12 + (size_t)y * pitch);
         float code = fminf(fmaxf(y_code * 4.0f, 0.0f), 1023.0f);
-        p010_output[idx] = ((unsigned short)(code + 0.5f)) << 6;
+        p010_output[x] = ((unsigned short)(code + 0.5f)) << 6;
     } else {
-        nv12[idx] = round_clamp_u8(y_code);
+        nv12[(size_t)y * pitch + x] = round_clamp_u8(y_code);
     }
 
     if ((x & 1u) != 0u || (y & 1u) != 0u) return;
@@ -234,18 +235,20 @@ void chw_f32_to_nv12_scaled_kernel(
     r = sum_r * 0.25f;
     g = sum_g * 0.25f;
     b = sum_b * 0.25f;
-    unsigned int uv = total + (y / 2) * dst_w + x;
     float u_code = ur * r + ug * g + ub * b + uv_offset;
     float v_code = vr * r + vg * g + vb * b + uv_offset;
+    unsigned char* uv_plane = nv12 + (size_t)pitch * dst_h;
     if (p010 != 0) {
-        unsigned short* p010_output = (unsigned short*)nv12;
+        unsigned short* p010_output =
+            (unsigned short*)(uv_plane + (size_t)(y / 2) * pitch);
         float u10 = fminf(fmaxf(u_code * 4.0f, 0.0f), 1023.0f);
         float v10 = fminf(fmaxf(v_code * 4.0f, 0.0f), 1023.0f);
-        p010_output[uv] = ((unsigned short)(u10 + 0.5f)) << 6;
-        p010_output[uv + 1] = ((unsigned short)(v10 + 0.5f)) << 6;
+        p010_output[x] = ((unsigned short)(u10 + 0.5f)) << 6;
+        p010_output[x + 1] = ((unsigned short)(v10 + 0.5f)) << 6;
     } else {
-        nv12[uv] = round_clamp_u8(u_code);
-        nv12[uv + 1] = round_clamp_u8(v_code);
+        unsigned char* uv_row = uv_plane + (size_t)(y / 2) * pitch;
+        uv_row[x] = round_clamp_u8(u_code);
+        uv_row[x + 1] = round_clamp_u8(v_code);
     }
 }
 

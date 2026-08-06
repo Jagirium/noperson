@@ -515,7 +515,7 @@ impl GpuOps {
         } else {
             (0.0_f32, 1.0_f32)
         };
-        let (rv, gu, gv, bu) = match (matrix, limited) {
+        let (rv, gu, gv, bu): (f32, f32, f32, f32) = match (matrix, limited) {
             (ColorMatrix::Bt601, true) => (1.596, -0.392, -0.813, 2.017),
             (ColorMatrix::Bt709, true) => (1.793, -0.213, -0.533, 2.112),
             (ColorMatrix::Bt2020NonConstantLuminance, true) => (1.679, -0.187, -0.650, 2.142),
@@ -581,12 +581,63 @@ impl GpuOps {
         range: crate::io::native_video::ColorRange,
         pixel_format: crate::io::native_video::PixelFormat,
     ) -> Result<(), DriverError> {
+        use crate::io::native_video::PixelFormat;
+
+        assert!(dst.len() >= dst_h as usize * dst_w as usize * 3 / 2);
+        let pitch = dst_w
+            * if matches!(pixel_format, PixelFormat::P010) {
+                2
+            } else {
+                1
+            };
+        let (device_ptr, _write_guard) = dst.device_ptr_mut(&self.stream);
+        unsafe {
+            self.chw_f32_to_pitched_nv12_scaled_color(
+                src,
+                device_ptr,
+                pitch,
+                src_h,
+                src_w,
+                dst_h,
+                dst_w,
+                matrix,
+                range,
+                pixel_format,
+            )
+        }
+    }
+
+    /// Scale CHW RGB directly into an externally-owned pitch-linear NV12/P010 surface.
+    ///
+    /// # Safety
+    /// `dst_device_ptr` must refer to at least `dst_h * 3 / 2` rows of
+    /// `dst_pitch` bytes on this CUDA context and must outlive all queued work.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn chw_f32_to_pitched_nv12_scaled_color(
+        &self,
+        src: &CudaSlice<f32>,
+        dst_device_ptr: u64,
+        dst_pitch: u32,
+        src_h: u32,
+        src_w: u32,
+        dst_h: u32,
+        dst_w: u32,
+        matrix: crate::io::native_video::ColorMatrix,
+        range: crate::io::native_video::ColorRange,
+        pixel_format: crate::io::native_video::PixelFormat,
+    ) -> Result<(), DriverError> {
         use crate::io::native_video::{ColorMatrix, ColorRange, PixelFormat};
 
         assert!(src_h > 0 && src_w > 0);
         assert!(dst_h > 0 && dst_w > 0 && dst_h.is_multiple_of(2) && dst_w.is_multiple_of(2));
         assert!(src.len() >= 3 * src_h as usize * src_w as usize);
-        assert!(dst.len() >= dst_h as usize * dst_w as usize * 3 / 2);
+        let row_bytes = dst_w
+            * if matches!(pixel_format, PixelFormat::P010) {
+                2
+            } else {
+                1
+            };
+        assert!(dst_device_ptr != 0 && dst_pitch >= row_bytes);
         let matrix = match matrix {
             ColorMatrix::Unspecified if dst_w < 1280 => ColorMatrix::Bt601,
             ColorMatrix::Unspecified => ColorMatrix::Bt709,
@@ -621,7 +672,8 @@ impl GpuOps {
         let total = dst_h * dst_w;
         let mut b = self.stream.launch_builder(&self.chw_f32_to_nv12_scaled_fn);
         b.arg(src);
-        b.arg(dst);
+        b.arg(&dst_device_ptr);
+        b.arg(&dst_pitch);
         b.arg(&src_h);
         b.arg(&src_w);
         b.arg(&dst_h);

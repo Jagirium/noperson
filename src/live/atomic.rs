@@ -350,12 +350,13 @@ impl AtomicLiveEngine {
         result
     }
 
-    pub fn process_chw_to_nv12(
+    pub fn process_chw_to_pitched_nv12(
         &mut self,
         frame: &mut CudaSlice<f32>,
         height: u32,
         width: u32,
-        output: &mut CudaSlice<u8>,
+        output_device_ptr: u64,
+        output_pitch: u32,
         matrix: crate::io::native_video::ColorMatrix,
         range: crate::io::native_video::ColorRange,
         pixel_format: crate::io::native_video::PixelFormat,
@@ -363,7 +364,16 @@ impl AtomicLiveEngine {
         self.poll_activation()?;
         let result = {
             let (_, engine) = self.supervisor.active_mut();
-            engine.process_chw_to_nv12(frame, height, width, output, matrix, range, pixel_format)
+            engine.process_chw_to_pitched_nv12(
+                frame,
+                height,
+                width,
+                output_device_ptr,
+                output_pitch,
+                matrix,
+                range,
+                pixel_format,
+            )
         };
         self.supervisor.record_frame(if result.is_ok() {
             FrameOutcome::Success

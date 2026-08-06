@@ -29,14 +29,13 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    tracing::info!("noperson v{} starting up", env!("CARGO_PKG_VERSION"));
-
     let runtime = match noperson::runtime::prepare()? {
         noperson::runtime::BootstrapOutcome::Ready(layout) => layout,
         noperson::runtime::BootstrapOutcome::Reexec(layout) => {
             return Err(noperson::runtime::reexec(&layout).into());
         }
     };
+    tracing::info!("noperson v{} starting up", env!("CARGO_PKG_VERSION"));
     tracing::info!("GPU runtime ready: {}", runtime.root().display());
 
     let explicit_models_dir = options.models_dir;

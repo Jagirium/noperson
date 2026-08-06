@@ -51,17 +51,46 @@ int32_t generic_error(NpVideoError *error, int32_t code, const char *message) no
 }
 
 #if defined(NP_VIDEO_HAS_NV_CODEC_HEADERS)
+const char *nvenc_status_name(NVENCSTATUS status) noexcept {
+    switch (status) {
+    case NV_ENC_SUCCESS: return "NV_ENC_SUCCESS";
+    case NV_ENC_ERR_NO_ENCODE_DEVICE: return "NV_ENC_ERR_NO_ENCODE_DEVICE";
+    case NV_ENC_ERR_UNSUPPORTED_DEVICE: return "NV_ENC_ERR_UNSUPPORTED_DEVICE";
+    case NV_ENC_ERR_INVALID_ENCODERDEVICE: return "NV_ENC_ERR_INVALID_ENCODERDEVICE";
+    case NV_ENC_ERR_INVALID_DEVICE: return "NV_ENC_ERR_INVALID_DEVICE";
+    case NV_ENC_ERR_DEVICE_NOT_EXIST: return "NV_ENC_ERR_DEVICE_NOT_EXIST";
+    case NV_ENC_ERR_INVALID_PTR: return "NV_ENC_ERR_INVALID_PTR";
+    case NV_ENC_ERR_INVALID_EVENT: return "NV_ENC_ERR_INVALID_EVENT";
+    case NV_ENC_ERR_INVALID_PARAM: return "NV_ENC_ERR_INVALID_PARAM";
+    case NV_ENC_ERR_INVALID_CALL: return "NV_ENC_ERR_INVALID_CALL";
+    case NV_ENC_ERR_OUT_OF_MEMORY: return "NV_ENC_ERR_OUT_OF_MEMORY";
+    case NV_ENC_ERR_ENCODER_NOT_INITIALIZED: return "NV_ENC_ERR_ENCODER_NOT_INITIALIZED";
+    case NV_ENC_ERR_UNSUPPORTED_PARAM: return "NV_ENC_ERR_UNSUPPORTED_PARAM";
+    case NV_ENC_ERR_LOCK_BUSY: return "NV_ENC_ERR_LOCK_BUSY";
+    case NV_ENC_ERR_NOT_ENOUGH_BUFFER: return "NV_ENC_ERR_NOT_ENOUGH_BUFFER";
+    case NV_ENC_ERR_INVALID_VERSION: return "NV_ENC_ERR_INVALID_VERSION";
+    case NV_ENC_ERR_MAP_FAILED: return "NV_ENC_ERR_MAP_FAILED";
+    case NV_ENC_ERR_NEED_MORE_INPUT: return "NV_ENC_ERR_NEED_MORE_INPUT";
+    case NV_ENC_ERR_ENCODER_BUSY: return "NV_ENC_ERR_ENCODER_BUSY";
+    case NV_ENC_ERR_EVENT_NOT_REGISTERD: return "NV_ENC_ERR_EVENT_NOT_REGISTERD";
+    case NV_ENC_ERR_GENERIC: return "NV_ENC_ERR_GENERIC";
+    case NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY: return "NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY";
+    case NV_ENC_ERR_UNIMPLEMENTED: return "NV_ENC_ERR_UNIMPLEMENTED";
+    case NV_ENC_ERR_RESOURCE_REGISTER_FAILED: return "NV_ENC_ERR_RESOURCE_REGISTER_FAILED";
+    case NV_ENC_ERR_RESOURCE_NOT_REGISTERED: return "NV_ENC_ERR_RESOURCE_NOT_REGISTERED";
+    case NV_ENC_ERR_RESOURCE_NOT_MAPPED: return "NV_ENC_ERR_RESOURCE_NOT_MAPPED";
+    case NV_ENC_ERR_NEED_MORE_OUTPUT: return "NV_ENC_ERR_NEED_MORE_OUTPUT";
+    default: return "NV_ENC_ERR_UNKNOWN";
+    }
+}
+
 int32_t nvenc_error(NpNvEncoder *encoder, NpVideoError *error, NVENCSTATUS status,
                     const char *operation) noexcept {
-    const char *detail = nullptr;
-    if (encoder != nullptr && encoder->session != nullptr &&
-        encoder->api.nvEncGetLastErrorString != nullptr) {
-        detail = encoder->api.nvEncGetLastErrorString(encoder->session);
-    }
+    (void)encoder;
     if (error != nullptr) {
         error->code = static_cast<int32_t>(status);
         std::snprintf(error->message, sizeof(error->message), "%s: %s (NVENC %d)",
-                      operation, detail != nullptr ? detail : "NVENC failure",
+                      operation, nvenc_status_name(status),
                       static_cast<int>(status));
     }
     return -static_cast<int32_t>(status == NV_ENC_SUCCESS ? NV_ENC_ERR_GENERIC : status);
@@ -292,8 +321,12 @@ extern "C" NP_VIDEO_EXPORT int32_t np_video_nvencoder_open(
         destroy_encoder(encoder);
         return result;
     }
-    if (encoder->api.nvEncSetIOCudaStreams != nullptr && cuda_stream != nullptr) {
-        status = encoder->api.nvEncSetIOCudaStreams(encoder->session, cuda_stream, cuda_stream);
+    if (encoder->api.nvEncSetIOCudaStreams != nullptr && encoder->stream != nullptr) {
+        // NV_ENC_CUSTREAM_PTR is a pointer to a CUstream handle, not the
+        // CUstream handle itself. Keep the handle in the encoder so the
+        // address passed to NVENC remains valid for the whole session.
+        status = encoder->api.nvEncSetIOCudaStreams(
+            encoder->session, &encoder->stream, &encoder->stream);
         if (status != NV_ENC_SUCCESS) {
             const int32_t result = nvenc_error(encoder, error, status, "bind NVENC CUDA stream");
             destroy_encoder(encoder);
@@ -350,6 +383,7 @@ extern "C" NP_VIDEO_EXPORT int32_t np_video_nvencoder_open(
     out_video->frame_rate_num = config->frame_rate_num;
     out_video->frame_rate_den = config->frame_rate_den;
     out_video->frame_count = 0;
+    out_video->duration_ts = 0;
     out_video->color_range = config->color_range;
     out_video->color_matrix = config->color_matrix;
     out_video->color_primaries = config->color_primaries;

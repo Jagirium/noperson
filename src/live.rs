@@ -27,6 +27,7 @@ use crate::pipeline::dfm::DfmContract;
 use crate::pipeline::face_detector::{FaceDetector, FaceDetectorBackend};
 use crate::pipeline::face_landmark::LandmarkModel;
 use crate::pipeline::face_recognizer::FaceRecognizer;
+use crate::pipeline::face_tracker::{TemporalFaceTracker, TrackerPolicy};
 use crate::pipeline::frame_enhancer::FrameEnhancer;
 use crate::pipeline::frame_processor::{
     AssignmentBackend, FrameResult, SourceFace, process_frame_gpu,
@@ -275,6 +276,7 @@ pub struct LiveEngine {
     gpu: Arc<GpuOps>,
     manager: ModelManager,
     detector: FaceDetector,
+    face_tracker: TemporalFaceTracker,
     workspace: GpuWorkspace,
     source_faces: Vec<SourceFace>,
     params: FaceSwapParams,
@@ -653,6 +655,14 @@ fn apply_face_likeness(source_latent: &mut [f32], target_latent: &[f32], factor:
 }
 
 impl LiveEngine {
+    pub fn set_tracking_policy(&mut self, policy: TrackerPolicy) {
+        self.face_tracker.set_policy(policy);
+    }
+
+    pub fn reset_face_tracker(&mut self) {
+        self.face_tracker.reset();
+    }
+
     pub fn new(
         gpu: Arc<GpuOps>,
         models_dir: &Path,
@@ -991,6 +1001,7 @@ impl LiveEngine {
             gpu,
             manager,
             detector,
+            face_tracker: TemporalFaceTracker::new(TrackerPolicy::offline_recovery()),
             workspace,
             source_faces,
             params: spec.params.clone(),
@@ -1025,6 +1036,7 @@ impl LiveEngine {
                 &mut self.workspace,
                 &self.source_faces,
                 &self.params,
+                &mut self.face_tracker,
             );
         }
 
@@ -1050,6 +1062,7 @@ impl LiveEngine {
             &mut self.workspace,
             &self.source_faces,
             &self.params,
+            &mut self.face_tracker,
         )?;
         self.gpu.rotate_quadrants(
             &rotated,
@@ -1063,24 +1076,28 @@ impl LiveEngine {
     }
 
     /// Process an already device-resident CHW frame and convert the final
-    /// (optionally enhanced) image directly into a tightly packed NV12 buffer.
-    pub fn process_chw_to_nv12(
+    /// image directly into an NVENC-compatible pitch-linear NV12/P010 surface.
+    pub fn process_chw_to_pitched_nv12(
         &mut self,
         frame: &mut CudaSlice<f32>,
         height: u32,
         width: u32,
-        output: &mut CudaSlice<u8>,
+        output_device_ptr: u64,
+        output_pitch: u32,
         matrix: crate::io::native_video::ColorMatrix,
         range: crate::io::native_video::ColorRange,
         pixel_format: crate::io::native_video::PixelFormat,
     ) -> anyhow::Result<FrameResult> {
         let result = self.process_chw(frame, height, width)?;
         let (output_width, output_height) = output_dimensions(&self.params, width, height)?;
-        let required = output_width as usize * output_height as usize * 3 / 2;
+        let bytes_per_sample = if pixel_format == crate::io::native_video::PixelFormat::P010 {
+            2
+        } else {
+            1
+        };
         anyhow::ensure!(
-            output.len() >= required,
-            "NV12 output buffer is too small: need {required}, got {}",
-            output.len()
+            output_device_ptr != 0 && output_pitch >= output_width * bytes_per_sample,
+            "NV12 output surface has invalid pointer or pitch"
         );
 
         let mut enhanced = if let Some(enhancer) = &mut self.enhancer {
@@ -1104,17 +1121,20 @@ impl LiveEngine {
             None
         };
         let output_chw = enhanced.as_ref().unwrap_or(frame);
-        self.gpu.chw_f32_to_nv12_scaled_color(
-            output_chw,
-            output,
-            output_height,
-            output_width,
-            output_height,
-            output_width,
-            matrix,
-            range,
-            pixel_format,
-        )?;
+        unsafe {
+            self.gpu.chw_f32_to_pitched_nv12_scaled_color(
+                output_chw,
+                output_device_ptr,
+                output_pitch,
+                output_height,
+                output_width,
+                output_height,
+                output_width,
+                matrix,
+                range,
+                pixel_format,
+            )?;
+        }
         self.enhanced_scratch = enhanced.take();
         Ok(result)
     }

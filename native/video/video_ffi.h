@@ -39,6 +39,7 @@ typedef struct NpVideoStreamInfo {
     uint32_t frame_rate_num;
     uint32_t frame_rate_den;
     int64_t frame_count;
+    int64_t duration_ts;
     int32_t color_range;
     int32_t color_matrix;
     int32_t color_primaries;
@@ -125,6 +126,12 @@ NP_VIDEO_EXPORT int32_t np_video_nvdecoder_send(
 
 NP_VIDEO_EXPORT int32_t np_video_nvdecoder_flush(
     NpNvDecoder *decoder,
+    NpVideoError *error) NP_VIDEO_NOEXCEPT;
+
+// Returns 1 and the next decoded picture slot, or 0 when no frame is ready.
+NP_VIDEO_EXPORT int32_t np_video_nvdecoder_peek(
+    NpNvDecoder *decoder,
+    int32_t *out_picture_index,
     NpVideoError *error) NP_VIDEO_NOEXCEPT;
 
 // Returns 1 for a mapped surface, 0 when no decoded frame is ready, negative on error.

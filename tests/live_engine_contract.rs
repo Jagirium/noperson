@@ -187,11 +187,11 @@ fn elon_self_swap_meets_photo_and_camera_quality_gates() -> anyhow::Result<()> {
     let mut engine = LiveEngine::new(
         gpu.clone(),
         std::path::Path::new("models"),
-        std::path::Path::new("face.jpg"),
+        std::path::Path::new("assets/photos/face.jpg"),
         FaceSwapParams::default(),
         &stream,
     )?;
-    let original = image::open("face.jpg")?;
+    let original = image::open("assets/photos/face.jpg")?;
     let (width, height) = original.dimensions();
     let original = original.to_rgb8();
     let output = engine.process_rgb(original.as_raw(), width, height)?;

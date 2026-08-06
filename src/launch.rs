@@ -14,6 +14,14 @@ pub enum LaunchMode {
     Headless,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PredecodeMode {
+    #[default]
+    Auto,
+    Full,
+    Off,
+}
+
 impl LaunchMode {
     pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, LaunchModeError> {
         Ok(LaunchOptions::parse(args)?.mode)
@@ -41,6 +49,7 @@ pub struct HeadlessOptions {
     pub face_detector_score: f32,
     pub max_faces: usize,
     pub worker_threads: usize,
+    pub predecode: PredecodeMode,
 }
 
 impl Default for HeadlessOptions {
@@ -55,6 +64,7 @@ impl Default for HeadlessOptions {
             face_detector_score: 0.5,
             max_faces: 20,
             worker_threads: std::thread::available_parallelism().map_or(1, usize::from),
+            predecode: PredecodeMode::Auto,
         }
     }
 }
@@ -170,6 +180,20 @@ impl LaunchOptions {
                         }
                         options.worker_threads = count;
                     }
+                    "--predecode" => {
+                        let mode = os_value(&option, value()?)?;
+                        options.predecode = match mode.as_str() {
+                            "auto" => PredecodeMode::Auto,
+                            "full" => PredecodeMode::Full,
+                            "off" => PredecodeMode::Off,
+                            _ => {
+                                return Err(LaunchModeError::InvalidOptionValue {
+                                    option,
+                                    value: mode,
+                                });
+                            }
+                        };
+                    }
                     _ => return Err(LaunchModeError::UnknownArgument(option)),
                 }
                 continue;
@@ -273,6 +297,7 @@ pub const fn headless_help_text() -> &'static str {
         "      --execution-provider <NAME>  cuda (default) or tensorrt\n",
         "      --device-id <ID>              CUDA device index [default: 0]\n",
         "      --worker-threads <COUNT>      Decode/encode workers [1..32]\n",
+        "      --predecode <MODE>            auto (default), full, or off\n",
         "\n",
         "Quality:\n",
         "      --swap-resolution <PX>       128, 256, 384, or 512 [default: 128]\n",
@@ -311,7 +336,7 @@ pub enum LaunchModeError {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{HeadlessOptions, LaunchMode, LaunchModeError, LaunchOptions};
+    use super::{HeadlessOptions, LaunchMode, LaunchModeError, LaunchOptions, PredecodeMode};
 
     #[test]
     fn headless_run_accepts_facefusion_path_contract() {
@@ -378,6 +403,8 @@ mod tests {
             "3".into(),
             "--worker-threads".into(),
             "8".into(),
+            "--predecode".into(),
+            "full".into(),
         ])
         .unwrap();
         let headless = options.headless.unwrap();
@@ -388,6 +415,7 @@ mod tests {
         assert_eq!(headless.face_detector_score, 0.72);
         assert_eq!(headless.max_faces, 3);
         assert_eq!(headless.worker_threads, 8);
+        assert_eq!(headless.predecode, PredecodeMode::Full);
     }
 
     #[test]

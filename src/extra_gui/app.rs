@@ -955,6 +955,13 @@ impl ExtraGuiApp {
                         |total| format!("{action} {processed}/{total}"),
                     );
                 }
+                EditorRuntimeEvent::PredecodeProgress { decoded, total } => {
+                    self.state.runtime_progress = Some((decoded, total));
+                    self.state.status = total.map_or_else(
+                        || format!("Pre-decoding {decoded} frames to VRAM"),
+                        |total| format!("Pre-decoding {decoded}/{total} frames to VRAM"),
+                    );
+                }
                 EditorRuntimeEvent::Completed(path) => {
                     self.state.last_output = Some(path.clone());
                     self.state.runtime_progress = None;

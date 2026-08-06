@@ -12,6 +12,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::ptr::NonNull;
+#[cfg(target_os = "linux")]
+use std::sync::Arc;
+
+#[cfg(target_os = "linux")]
+use cudarc::driver::{CudaStream, result, sys};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -99,8 +104,23 @@ pub struct VideoStreamInfo {
     pub frame_rate_num: u32,
     pub frame_rate_den: u32,
     pub frame_count: Option<u64>,
+    pub duration_ts: Option<i64>,
     pub color: VideoColorInfo,
     pub extradata: Vec<u8>,
+}
+
+impl VideoStreamInfo {
+    pub fn fps(&self) -> Option<f64> {
+        (self.frame_rate_num > 0 && self.frame_rate_den > 0)
+            .then(|| f64::from(self.frame_rate_num) / f64::from(self.frame_rate_den))
+    }
+
+    pub fn duration_seconds(&self) -> Option<f64> {
+        let duration = self.duration_ts?;
+        (duration > 0 && self.time_base_num > 0 && self.time_base_den > 0).then(|| {
+            duration as f64 * f64::from(self.time_base_num) / f64::from(self.time_base_den)
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +305,7 @@ struct NativeStreamInfo {
     frame_rate_num: u32,
     frame_rate_den: u32,
     frame_count: i64,
+    duration_ts: i64,
     color_range: i32,
     color_matrix: i32,
     color_primaries: i32,
@@ -374,6 +395,11 @@ unsafe extern "C" {
         error: *mut NativeError,
     ) -> c_int;
     fn np_video_nvdecoder_flush(decoder: *mut c_void, error: *mut NativeError) -> c_int;
+    fn np_video_nvdecoder_peek(
+        decoder: *mut c_void,
+        out_picture_index: *mut i32,
+        error: *mut NativeError,
+    ) -> c_int;
     fn np_video_nvdecoder_map(
         decoder: *mut c_void,
         out_surface: *mut NativeCudaVideoSurface,
@@ -608,8 +634,21 @@ impl NvDecoder {
             width: native.width,
             height: native.height,
             timestamp_100ns: native.timestamp_100ns,
+            picture_index: native.picture_index,
             pixel_format,
         }))
+    }
+
+    pub fn next_picture_index(&self) -> anyhow::Result<Option<i32>> {
+        let mut picture_index = 0;
+        let mut error = NativeError::empty();
+        let status = unsafe {
+            np_video_nvdecoder_peek(self.inner.handle.as_ptr(), &mut picture_index, &mut error)
+        };
+        if status < 0 {
+            return Err(error.into_anyhow("peek NVDEC surface"));
+        }
+        Ok((status > 0).then_some(picture_index))
     }
 }
 
@@ -628,6 +667,7 @@ pub struct MappedVideoSurface {
     width: u32,
     height: u32,
     timestamp_100ns: i64,
+    picture_index: i32,
     pixel_format: PixelFormat,
 }
 
@@ -653,6 +693,10 @@ impl MappedVideoSurface {
         self.timestamp_100ns
     }
 
+    pub fn picture_index(&self) -> i32 {
+        self.picture_index
+    }
+
     pub fn pixel_format(&self) -> PixelFormat {
         self.pixel_format
     }
@@ -670,6 +714,98 @@ impl Drop for MappedVideoSurface {
                 "failed to release NVDEC surface: {}",
                 error.into_anyhow("unmap")
             );
+        }
+    }
+}
+
+/// A pitch-linear CUDA allocation compatible with NVENC resource registration.
+///
+/// NVENC does not accept allocations from CUDA's stream-ordered memory pool, so
+/// encoder inputs deliberately use the synchronous driver allocator. Declare
+/// these surfaces before `NvEncoder`: Rust's reverse drop order then guarantees
+/// NVENC unregisters every resource before the underlying CUDA memory is freed.
+#[cfg(target_os = "linux")]
+pub struct NvEncoderInputSurface {
+    stream: Arc<CudaStream>,
+    device_ptr: u64,
+    pitch: u32,
+    width: u32,
+    height: u32,
+    pixel_format: PixelFormat,
+}
+
+#[cfg(target_os = "linux")]
+impl NvEncoderInputSurface {
+    pub fn new(
+        stream: Arc<CudaStream>,
+        width: u32,
+        height: u32,
+        pixel_format: PixelFormat,
+    ) -> anyhow::Result<Self> {
+        VideoDescriptor::new(width, height, pixel_format, VideoColorInfo::default())?;
+        let row_bytes = width as usize
+            * match pixel_format {
+                PixelFormat::Nv12 => 1,
+                PixelFormat::P010 => 2,
+            };
+        let allocation_rows = height as usize + height as usize / 2;
+        stream.context().bind_to_thread()?;
+        let mut device_ptr = 0;
+        let mut pitch = 0;
+        unsafe {
+            sys::cuMemAllocPitch_v2(&mut device_ptr, &mut pitch, row_bytes, allocation_rows, 16)
+                .result()?;
+        }
+        let pitch = match u32::try_from(pitch) {
+            Ok(pitch) => pitch,
+            Err(error) => {
+                unsafe { result::free_sync(device_ptr)? };
+                return Err(error.into());
+            }
+        };
+        Ok(Self {
+            stream,
+            device_ptr,
+            pitch,
+            width,
+            height,
+            pixel_format,
+        })
+    }
+
+    pub const fn device_ptr(&self) -> u64 {
+        self.device_ptr
+    }
+
+    pub const fn pitch(&self) -> u32 {
+        self.pitch
+    }
+
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub const fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for NvEncoderInputSurface {
+    fn drop(&mut self) {
+        if let Err(error) = self.stream.synchronize() {
+            tracing::warn!("failed to synchronize NVENC input surface: {error}");
+        }
+        if let Err(error) = self.stream.context().bind_to_thread() {
+            tracing::warn!("failed to bind CUDA context before freeing NVENC surface: {error}");
+            return;
+        }
+        if let Err(error) = unsafe { result::free_sync(self.device_ptr) } {
+            tracing::warn!("failed to free NVENC input surface: {error}");
         }
     }
 }
@@ -945,6 +1081,7 @@ fn video_stream_from_native(native: &NativeStreamInfo) -> anyhow::Result<VideoSt
         frame_count: u64::try_from(native.frame_count)
             .ok()
             .filter(|count| *count > 0),
+        duration_ts: (native.duration_ts > 0).then_some(native.duration_ts),
         color: map_color_info(native),
         extradata,
     })
@@ -1034,6 +1171,7 @@ impl NativeDemuxer {
             frame_count: u64::try_from(native.frame_count)
                 .ok()
                 .filter(|count| *count > 0),
+            duration_ts: (native.duration_ts > 0).then_some(native.duration_ts),
             color: map_color_info(&native),
             extradata,
         };
@@ -1186,6 +1324,7 @@ fn native_stream_info(video: &VideoStreamInfo) -> NativeStreamInfo {
             .frame_count
             .and_then(|count| i64::try_from(count).ok())
             .unwrap_or(0),
+        duration_ts: video.duration_ts.unwrap_or(0),
         color_range: native_color_range(video.color.range),
         color_matrix: native_color_matrix(video.color.matrix),
         color_primaries: native_color_primaries(video.color.primaries),

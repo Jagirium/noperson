@@ -38,7 +38,7 @@ fn prepare_identical_swap_inputs(
     stream: &Arc<CudaStream>,
     manager: &mut ModelManager,
 ) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
-    let image = image::open("face.jpg")?;
+    let image = image::open("assets/photos/face.jpg")?;
     let (width, height) = image.dimensions();
     let rgb = image.to_rgb8();
     let input = gpu.upload_u8(rgb.as_raw())?;
@@ -159,7 +159,7 @@ fn chw_f32_to_rgb_u8(chw: &[f32], width: usize, height: usize) -> Vec<u8> {
 #[ignore = "requires CUDA, ONNX models, and face.jpg"]
 fn dump_rust_alignment_for_python_stage_comparison() -> anyhow::Result<()> {
     let (stream, gpu) = init_gpu()?;
-    let image = image::open("face.jpg")?;
+    let image = image::open("assets/photos/face.jpg")?;
     let (width, height) = image.dimensions();
     let rgb = image.to_rgb8();
     let input = gpu.upload_u8(rgb.as_raw())?;
@@ -215,7 +215,7 @@ fn dump_rust_alignment_for_python_stage_comparison() -> anyhow::Result<()> {
 #[ignore = "requires CUDA, TensorRT, ONNX models, and face.jpg"]
 fn provider_stage_cosines_locate_first_identity_divergence() -> anyhow::Result<()> {
     let (stream, gpu) = init_gpu()?;
-    let image = image::open("face.jpg")?;
+    let image = image::open("assets/photos/face.jpg")?;
     let (width, height) = image.dimensions();
     let rgb = image.to_rgb8();
     let input = gpu.upload_u8(rgb.as_raw())?;
@@ -351,14 +351,14 @@ fn raw_inswapper_provider_activations_have_the_same_direction() -> anyhow::Resul
 #[ignore = "requires CUDA, TensorRT, ONNX models, and face.jpg"]
 fn elon_self_swap_cuda_and_tensorrt_preserve_the_same_identity() -> anyhow::Result<()> {
     let (stream, gpu) = init_gpu()?;
-    let image = image::open("face.jpg")?;
+    let image = image::open("assets/photos/face.jpg")?;
     let (width, height) = image.dimensions();
     let rgb = image.to_rgb8();
 
     let mut cuda_engine = LiveEngine::new_with_provider(
         gpu.clone(),
         Path::new("models"),
-        Path::new("face.jpg"),
+        Path::new("assets/photos/face.jpg"),
         FaceSwapParams::default(),
         ExecutionProvider::Cuda,
         &stream,
@@ -370,7 +370,7 @@ fn elon_self_swap_cuda_and_tensorrt_preserve_the_same_identity() -> anyhow::Resu
     let mut tensorrt_engine = LiveEngine::new_with_provider(
         gpu.clone(),
         Path::new("models"),
-        Path::new("face.jpg"),
+        Path::new("assets/photos/face.jpg"),
         FaceSwapParams::default(),
         ExecutionProvider::TensorRT,
         &stream,

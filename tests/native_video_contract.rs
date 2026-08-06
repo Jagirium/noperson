@@ -5,7 +5,8 @@ use noperson::io::native_video::{
 
 #[cfg(target_os = "linux")]
 use noperson::io::native_video::{
-    NativeDemuxer, NativeMuxer, NvDecoder, NvEncoder, NvEncoderConfig, remux_audio,
+    MappedVideoSurface, NativeDemuxer, NativeMuxer, NvDecoder, NvEncoder, NvEncoderConfig,
+    NvEncoderInputSurface, remux_audio,
 };
 
 #[test]
@@ -86,7 +87,7 @@ fn native_video_pipeline_uses_deferred_surfaces_and_a_bounded_encoder_ring() {
     let runtime = std::fs::read_to_string("src/extra_gui/runtime.rs").unwrap();
     assert!(runtime.contains("DeferredVideoSurface"));
     assert!(runtime.contains("record_event(None)"));
-    assert!(runtime.contains("let mut encode_surfaces = (0..5)"));
+    assert!(runtime.contains("let encode_surfaces = (0..5)"));
     assert!(
         !runtime.contains("gpu_ops.stream.synchronize()?"),
         "production recording must not synchronize the whole CUDA stream per frame"
@@ -96,6 +97,55 @@ fn native_video_pipeline_uses_deferred_surfaces_and_a_bounded_encoder_ring() {
     assert!(encoder.contains("constexpr size_t bitstream_ring_size = 4"));
     assert!(encoder.contains("free_bitstreams"));
     assert!(encoder.contains("np_video_nvencoder_receive"));
+}
+
+#[test]
+fn nvenc_input_surfaces_are_pitched_and_outlive_resource_registration() {
+    let video = std::fs::read_to_string("src/io/native_video.rs").unwrap();
+    assert!(video.contains("cuMemAllocPitch_v2"));
+    assert!(video.contains("pub struct NvEncoderInputSurface"));
+
+    let runtime = std::fs::read_to_string("src/extra_gui/runtime.rs").unwrap();
+    assert!(runtime.contains("NvEncoderInputSurface::new"));
+    assert!(runtime.contains("process_chw_to_pitched_nv12"));
+    assert!(
+        runtime.find("let encode_surfaces").unwrap() < runtime.find("let mut encoder").unwrap(),
+        "encoder must drop and unregister resources before its CUDA surfaces are freed"
+    );
+    assert!(!runtime.contains("alloc_zeros_u8(output_bytes)"));
+}
+
+#[test]
+fn nvenc_errors_use_stable_status_names() {
+    let encoder = std::fs::read_to_string("native/video/nvcodec_encoder.cpp").unwrap();
+    assert!(encoder.contains("NV_ENC_ERR_RESOURCE_REGISTER_FAILED"));
+    assert!(encoder.contains("nvenc_status_name(status)"));
+    assert!(!encoder.contains("nvEncGetLastErrorString"));
+}
+
+#[test]
+fn nvenc_receives_a_pointer_to_the_cuda_stream_handle() {
+    let encoder = std::fs::read_to_string("native/video/nvcodec_encoder.cpp").unwrap();
+    assert!(encoder.contains("&encoder->stream, &encoder->stream"));
+    assert!(!encoder.contains("nvEncSetIOCudaStreams(encoder->session, cuda_stream, cuda_stream)"));
+}
+
+#[test]
+fn nv12_cuda_color_coefficients_use_the_kernel_float_abi() {
+    let ops = std::fs::read_to_string("src/gpu/ops.rs").unwrap();
+    assert!(ops.contains("let (rv, gu, gv, bu): (f32, f32, f32, f32)"));
+    assert!(ops.contains("let coefficients: [f32; 11]"));
+}
+
+#[test]
+fn nvdec_releases_a_reused_picture_slot_before_mapping_it_again() {
+    let shim = std::fs::read_to_string("native/video/nvcodec_shim.cpp").unwrap();
+    assert!(shim.contains("np_video_nvdecoder_peek"));
+
+    let runtime = std::fs::read_to_string("src/extra_gui/runtime.rs").unwrap();
+    assert!(runtime.contains("decoder.next_picture_index()?"));
+    assert!(runtime.contains("surface.picture_index() == next_picture_index"));
+    assert!(runtime.contains(".remove(position)"));
 }
 
 #[cfg(target_os = "linux")]
@@ -193,7 +243,6 @@ fn native_muxer_preserves_encoded_packets_and_timestamps_in_process() {
         .status()
         .unwrap();
     assert!(status.success());
-
     let mut source = NativeDemuxer::open(&input).unwrap();
     let stream = source.video_stream().clone();
     let mut sink = NativeMuxer::create(&output, &stream).unwrap();
@@ -340,13 +389,16 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
     use std::sync::Arc;
 
     use anyhow::Context;
-    use cudarc::driver::{CudaContext, DevicePtr};
+    use cudarc::driver::CudaContext;
     use noperson::gpu::npp;
     use noperson::gpu::ops::GpuOps;
 
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.mp4");
     let output = directory.path().join("output.mp4");
+    let reference_png = directory.path().join("reference.png");
+    let reference_raw = directory.path().join("reference.rgb");
+    let decoded_png = directory.path().join("decoded.png");
     let status = std::process::Command::new("ffmpeg")
         .args([
             "-v",
@@ -354,7 +406,7 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=256x144:rate=2:duration=1",
+            "testsrc2=size=256x144:rate=12:duration=2",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -372,11 +424,33 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
         .arg(&input)
         .status()?;
     assert!(status.success());
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&input)
+        .args([
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-y",
+        ])
+        .arg(&reference_raw)
+        .status()?;
+    assert!(status.success());
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&input)
+        .args(["-frames:v", "1", "-y"])
+        .arg(&reference_png)
+        .status()?;
+    assert!(status.success());
 
     npp::initialize_runtime(std::path::Path::new("libs/base"))
         .context("initialize the local NPP runtime")?;
     let context = Arc::new(CudaContext::new(0).context("create CUDA context")?);
-    let stream = context.default_stream();
+    let stream = context.new_stream()?;
     let gpu = GpuOps::new(&context, stream.clone()).context("initialize GPU kernels")?;
     let mut source = NativeDemuxer::open(&input)?;
     let source_info = source.video_stream().clone();
@@ -387,17 +461,15 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
             source_info.codec,
         )?
     };
-    while let Some(packet) = source.next_decode_packet()? {
-        decoder.send_packet(
-            &packet,
-            source_info.time_base_num,
-            source_info.time_base_den,
-        )?;
-    }
-    decoder.flush().context("flush NVDEC parser")?;
-
-    let config =
-        NvEncoderConfig::h264_quality(256, 144, 2, 1, 1, 16_384).with_color(source_info.color);
+    let config = NvEncoderConfig::h264_quality(
+        256,
+        144,
+        source_info.frame_rate_num,
+        source_info.frame_rate_den,
+        source_info.time_base_num,
+        source_info.time_base_den,
+    )
+    .with_color(source_info.color);
     let mut encoder = unsafe {
         NvEncoder::open(
             context.cu_ctx() as *mut std::ffi::c_void,
@@ -407,12 +479,16 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
     };
     let mut muxer = NativeMuxer::create(&output, encoder.video_stream())?;
     let mut chw = gpu.alloc_zeros(3 * 256 * 144)?;
-    let mut nv12 = [
-        gpu.alloc_zeros_u8(256 * 144 * 3 / 2)?,
-        gpu.alloc_zeros_u8(256 * 144 * 3 / 2)?,
-    ];
+    let mut decoded_rgb = gpu.alloc_zeros_u8(3 * 256 * 144)?;
+    let mut decoded_frames = Vec::with_capacity(24 * 3 * 256 * 144);
+    let nv12 = (0..5)
+        .map(|_| NvEncoderInputSurface::new(stream.clone(), 256, 144, PixelFormat::Nv12))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let frame_duration = i64::from(source_info.time_base_den)
+        * i64::from(source_info.frame_rate_den)
+        / (i64::from(source_info.time_base_num) * i64::from(source_info.frame_rate_num));
     let mut encoded = 0_i64;
-    while let Some(decoded) = decoder.next_frame()? {
+    let mut encode_decoded = |decoded: MappedVideoSurface| -> anyhow::Result<()> {
         assert_ne!(decoded.device_ptr(), 0);
         assert_eq!((decoded.width(), decoded.height()), (256, 144));
         assert_eq!(decoded.pixel_format(), PixelFormat::Nv12);
@@ -431,32 +507,118 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
         stream
             .synchronize()
             .context("finish NVDEC surface conversion")?;
+        gpu.chw_f32_to_hwc_u8(&chw, &mut decoded_rgb, 144, 256)?;
+        let host = stream.clone_dtoh(&decoded_rgb)?;
+        if encoded == 0 {
+            image::save_buffer(&decoded_png, &host, 256, 144, image::ColorType::Rgb8)?;
+        }
+        decoded_frames.extend_from_slice(&host);
         drop(decoded);
-        gpu.chw_f32_to_nv12_scaled_color(
-            &chw,
-            &mut nv12[encoded as usize],
-            144,
-            256,
-            144,
-            256,
-            source_info.color.matrix,
-            source_info.color.range,
-            PixelFormat::Nv12,
-        )?;
-        let (device_ptr, _guard) = nv12[encoded as usize].device_ptr(&stream);
-        let pts = encoded * 8192;
-        if let Some(packet) = unsafe { encoder.encode_device_frame(device_ptr, 256, pts, 8192)? } {
+        let encode_surface = &nv12[encoded as usize % nv12.len()];
+        unsafe {
+            gpu.chw_f32_to_pitched_nv12_scaled_color(
+                &chw,
+                encode_surface.device_ptr(),
+                encode_surface.pitch(),
+                144,
+                256,
+                144,
+                256,
+                source_info.color.matrix,
+                source_info.color.range,
+                PixelFormat::Nv12,
+            )?;
+        }
+        let pts = encoded * frame_duration;
+        if let Some(packet) = unsafe {
+            encoder.encode_device_frame(
+                encode_surface.device_ptr(),
+                encode_surface.pitch(),
+                pts,
+                frame_duration,
+            )?
+        } {
             muxer.write_video_packet(&packet)?;
         }
         encoded += 1;
+        Ok(())
+    };
+    while let Some(packet) = source.next_decode_packet()? {
+        decoder.send_packet(
+            &packet,
+            source_info.time_base_num,
+            source_info.time_base_den,
+        )?;
+        while let Some(decoded) = decoder.next_frame()? {
+            encode_decoded(decoded)?;
+        }
     }
-    assert_eq!(encoded, 2);
+    decoder.flush().context("flush NVDEC parser")?;
+    while let Some(decoded) = decoder.next_frame()? {
+        encode_decoded(decoded)?;
+    }
+    assert_eq!(encoded, 24);
     let pending = encoder.finish()?;
-    assert_eq!(pending.len(), 2);
+    assert_eq!(pending.len(), 4);
     for packet in pending {
         muxer.write_video_packet(&packet)?;
     }
     muxer.finish()?;
+
+    let decoded_raw = directory.path().join("decoded.rgb");
+    std::fs::write(&decoded_raw, &decoded_frames)?;
+    let reference_frames = std::fs::read(&reference_raw)?;
+    assert_eq!(decoded_frames.len(), reference_frames.len());
+    let frame_bytes = 3 * 256 * 144;
+    let max_frame_mse = decoded_frames
+        .chunks_exact(frame_bytes)
+        .zip(reference_frames.chunks_exact(frame_bytes))
+        .map(|(decoded, reference)| {
+            decoded
+                .iter()
+                .zip(reference)
+                .map(|(&actual, &expected)| {
+                    let difference = i64::from(actual) - i64::from(expected);
+                    (difference * difference) as f64
+                })
+                .sum::<f64>()
+                / frame_bytes as f64
+        })
+        .fold(0.0_f64, f64::max);
+    if max_frame_mse >= 4.0 {
+        std::fs::create_dir_all("test")?;
+        std::fs::copy(&input, "test/nvdec-order-source.mp4")?;
+        std::fs::copy(&decoded_raw, "test/nvdec-order-output.rgb")?;
+    }
+    assert!(
+        max_frame_mse < 4.0,
+        "NVDEC sequence maximum frame MSE is {max_frame_mse:.2}"
+    );
+
+    let decode_comparison = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-i"])
+        .arg(&reference_png)
+        .args(["-i"])
+        .arg(&decoded_png)
+        .args(["-lavfi", "[0:v][1:v]psnr", "-f", "null", "-"])
+        .output()?;
+    assert!(decode_comparison.status.success());
+    let decode_report = String::from_utf8_lossy(&decode_comparison.stderr);
+    let decode_average = decode_report
+        .split("average:")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|value| value.parse::<f32>().ok())
+        .context("ffmpeg did not report NVDEC-to-RGB PSNR")?;
+    if decode_average < 30.0 {
+        std::fs::create_dir_all("test")?;
+        std::fs::copy(&reference_png, "test/nvdec-reference.png")?;
+        std::fs::copy(&decoded_png, "test/nvdec-decoded.png")?;
+    }
+    assert!(
+        decode_average >= 30.0,
+        "NVDEC-to-RGB PSNR is {decode_average:.2} dB"
+    );
 
     let mut result = NativeDemuxer::open(&output)?;
     assert_eq!(result.video_stream().codec, VideoCodec::H264);
@@ -464,5 +626,27 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
     assert_eq!(result.video_stream().color.range, ColorRange::Limited);
     assert!(result.next_video_packet()?.is_some());
     assert!(result.next_video_packet()?.is_some());
+
+    let comparison = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-i"])
+        .arg(&input)
+        .args(["-i"])
+        .arg(&output)
+        .args(["-lavfi", "[0:v][1:v]psnr", "-f", "null", "-"])
+        .output()?;
+    assert!(comparison.status.success());
+    let report = String::from_utf8_lossy(&comparison.stderr);
+    let average = report
+        .split("average:")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|value| value.parse::<f32>().ok())
+        .context("ffmpeg did not report round-trip PSNR")?;
+    if average < 30.0 {
+        std::fs::create_dir_all("test")?;
+        std::fs::copy(&input, "test/nvcodec-order-source.mp4")?;
+        std::fs::copy(&output, "test/nvcodec-order-output.mp4")?;
+    }
+    assert!(average >= 30.0, "NV12 round-trip PSNR is {average:.2} dB");
     Ok(())
 }

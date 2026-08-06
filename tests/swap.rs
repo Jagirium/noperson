@@ -68,7 +68,7 @@ fn load_and_detect(
     manager: &mut ModelManager,
     stream: &Arc<CudaStream>,
 ) -> anyhow::Result<DetectedFrame> {
-    let img = image::open("face.jpg")?;
+    let img = image::open("assets/photos/face.jpg")?;
     let (width, height) = img.dimensions();
     let rgb = img.to_rgb8();
 

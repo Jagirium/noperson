@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     let img_path = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("face.jpg"));
+        .unwrap_or_else(|| PathBuf::from("assets/photos/face.jpg"));
 
     tracing::info!("Loading image: {}", img_path.display());
     let img = image::open(&img_path)

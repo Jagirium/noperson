@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cudarc::driver::CudaContext;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -11,7 +12,9 @@ use crate::config::parameters::{FaceSwapParams, SwapDim};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 use crate::extra_gui::{EditorEngineRequest, EditorRuntimeEvent, EditorRuntimeHandle};
 use crate::gpu::ops::GpuOps;
-use crate::launch::HeadlessOptions;
+#[cfg(target_os = "linux")]
+use crate::io::native_video::NativeDemuxer;
+use crate::launch::{HeadlessOptions, PredecodeMode};
 use crate::live::{
     AtomicLiveEngine, FaceAssignmentInputs, FaceIdentityInput, LiveShadowBuilder, build_live_spec,
 };
@@ -31,6 +34,7 @@ pub struct HeadlessPlan {
     pub provider: ExecutionProvider,
     pub device_id: i32,
     pub worker_threads: usize,
+    pub predecode: PredecodeMode,
     pub params: FaceSwapParams,
 }
 
@@ -87,6 +91,7 @@ pub fn build_plan(options: &HeadlessOptions) -> anyhow::Result<HeadlessPlan> {
         provider,
         device_id: options.device_id,
         worker_threads: options.worker_threads.clamp(1, 32),
+        predecode: options.predecode,
         params,
     })
 }
@@ -154,6 +159,7 @@ fn engine_request(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<Edit
         spec,
         assignments,
         worker_threads: plan.worker_threads,
+        predecode: plan.predecode,
     })
 }
 
@@ -175,6 +181,15 @@ fn process_image(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<()> {
 }
 
 fn process_video(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    let preflight = {
+        let source = NativeDemuxer::open(&plan.target_path)?;
+        let info = source.video_stream();
+        Some((info.frame_count, info.duration_seconds(), info.fps()))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let preflight: Option<(Option<u64>, Option<f64>, Option<f64>)> = None;
+
     let request = engine_request(plan, models_dir)?;
     let runtime = EditorRuntimeHandle::spawn_headless(models_dir.to_path_buf(), plan.device_id)?;
     runtime.record(
@@ -183,24 +198,58 @@ fn process_video(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<()> {
         request,
         BTreeMap::new(),
     )?;
-    let progress = ProgressBar::new_spinner();
-    progress.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {pos}/{len} {per_sec} ETA {eta}",
-        )?
-        .progress_chars("━━╸"),
-    );
-    progress.set_message("Processing video");
+    let known_total = preflight.and_then(|(total, _, _)| total);
+    let progress = known_total.map_or_else(ProgressBar::new_spinner, ProgressBar::new);
+    let waiting_style =
+        ProgressStyle::with_template("{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {pos}/{len}")?
+            .progress_chars("━━╸");
+    let running_style = ProgressStyle::with_template(
+        "{spinner:.cyan} {msg} [{bar:40.cyan/blue}] {pos}/{len} {per_sec} ETA {eta}",
+    )?
+    .progress_chars("━━╸");
+    let finished_style =
+        ProgressStyle::with_template("{spinner:.green} {msg} [{bar:40.green/blue}] {pos}/{len}")?
+            .progress_chars("━━╸");
+    progress.set_style(waiting_style);
+    let details = preflight
+        .and_then(|(_, duration, fps)| duration.zip(fps))
+        .map(|(duration, fps)| format!("Processing video · {:.2}s · {fps:.3} FPS", duration))
+        .unwrap_or_else(|| "Processing video".to_owned());
+    progress.set_message(details);
+    let mut processing_started = false;
+    let mut previous_frame_completed = None;
+    let mut frame_intervals = Vec::new();
     loop {
         match runtime.recv_event()? {
-            EditorRuntimeEvent::Progress { processed, total } => {
+            EditorRuntimeEvent::PredecodeProgress { decoded, total } => {
+                progress.set_message("Pre-decoding video to VRAM");
                 if let Some(total) = total {
                     progress.set_length(total);
+                }
+                progress.set_position(decoded);
+            }
+            EditorRuntimeEvent::Progress { processed, total } => {
+                let completed_at = Instant::now();
+                if let Some(total) = total {
+                    progress.set_length(total);
+                }
+                if processed > 0 && !processing_started {
+                    progress.set_style(running_style.clone());
+                    progress.set_message("Processing video");
+                    progress.set_position(0);
+                    processing_started = true;
+                }
+                if let Some(previous) = previous_frame_completed.replace(completed_at) {
+                    frame_intervals.push(completed_at.duration_since(previous));
                 }
                 progress.set_position(processed);
             }
             EditorRuntimeEvent::Completed(path) => {
-                progress.finish_with_message(format!("Saved {}", path.display()));
+                progress.set_style(finished_style);
+                progress.finish_with_message(video_completion_message(
+                    &path,
+                    median_frame_rate(&frame_intervals),
+                ));
                 return Ok(());
             }
             EditorRuntimeEvent::Failed(error) => {
@@ -210,6 +259,32 @@ fn process_video(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<()> {
             _ => {}
         }
     }
+}
+
+fn median_frame_rate(intervals: &[Duration]) -> Option<f64> {
+    let mut frame_times = intervals
+        .iter()
+        .map(Duration::as_secs_f64)
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .collect::<Vec<_>>();
+    if frame_times.is_empty() {
+        return None;
+    }
+    frame_times.sort_by(f64::total_cmp);
+    let middle = frame_times.len() / 2;
+    let median_frame_time = if frame_times.len().is_multiple_of(2) {
+        (frame_times[middle - 1] + frame_times[middle]) / 2.0
+    } else {
+        frame_times[middle]
+    };
+    Some(1.0 / median_frame_time)
+}
+
+fn video_completion_message(path: &Path, median_fps: Option<f64>) -> String {
+    median_fps.map_or_else(
+        || format!("Saved {}", path.display()),
+        |fps| format!("Saved {} · median {fps:.2} FPS", path.display()),
+    )
 }
 
 fn is_image(path: &Path) -> bool {
@@ -228,4 +303,31 @@ fn is_video(path: &Path) -> bool {
 
 fn extension(path: &Path) -> Option<String> {
     path.extension()?.to_str().map(str::to_ascii_lowercase)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::{median_frame_rate, video_completion_message};
+
+    #[test]
+    fn median_frame_rate_uses_completed_frame_intervals() {
+        let intervals = [
+            Duration::from_millis(10),
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        ];
+
+        assert_eq!(median_frame_rate(&intervals), Some(100.0));
+    }
+
+    #[test]
+    fn completion_message_reports_median_instead_of_wall_clock_rate() {
+        assert_eq!(
+            video_completion_message(Path::new("out.mp4"), Some(89.734)),
+            "Saved out.mp4 · median 89.73 FPS"
+        );
+    }
 }

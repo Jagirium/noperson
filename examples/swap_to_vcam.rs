@@ -18,6 +18,7 @@ use noperson::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
 use noperson::models::manager::ModelManager;
 use noperson::pipeline::face_detector::YoloFaceDetector;
 use noperson::pipeline::face_recognizer::FaceRecognizer;
+use noperson::pipeline::face_tracker::{TemporalFaceTracker, TrackerPolicy};
 use noperson::pipeline::frame_processor::{AssignmentBackend, SourceFace, process_frame_gpu};
 use noperson::pipeline::workspace::GpuWorkspace;
 
@@ -26,10 +27,10 @@ fn main() -> anyhow::Result<()> {
 
     let source_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "face.jpg".to_string());
+        .unwrap_or_else(|| "assets/photos/face.jpg".to_string());
     let target_path = std::env::args()
         .nth(2)
-        .unwrap_or_else(|| "face.jpg".to_string());
+        .unwrap_or_else(|| "assets/photos/face.jpg".to_string());
     let output_path = std::env::args()
         .nth(3)
         .filter(|argument| argument != "--vcam")
@@ -51,6 +52,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Models loaded");
 
     let mut ws = GpuWorkspace::new(&stream)?;
+    let mut face_tracker = TemporalFaceTracker::new(TrackerPolicy::offline_recovery());
 
     // ── Load target face → extract embedding → compute latent ──
     let target_img = image::open(&target_path)?;
@@ -111,6 +113,7 @@ fn main() -> anyhow::Result<()> {
         &mut ws,
         &sources,
         &params,
+        &mut face_tracker,
     )?;
     tracing::info!(
         "Pipeline done: {} detected, {} swapped",
