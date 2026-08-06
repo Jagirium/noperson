@@ -16,9 +16,14 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
         "--native",
         "cargo build --locked --release",
         "SOURCE_DATE_EPOCH",
+        "CARGO_PROFILE_RELEASE_LTO=true",
         "--sort=name",
         "--owner=0",
         "--group=0",
+        ".tar.zst",
+        "zstd -q -T0 -19",
+        "mktemp \"$repo_root/dist/.",
+        "mv -f -- \"$archive_tmp\" \"$archive\"",
         "sha256sum",
         "git diff-index --quiet HEAD --",
         "run --rm --interactive",
@@ -42,11 +47,22 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
         "code release must not bundle models"
     );
     assert!(!script.contains("aarch64"), "ARM releases are out of scope");
+    assert!(
+        !script.contains("| gzip -n -9"),
+        "Linux code releases must use the same zstd container as runtime packs"
+    );
 
     assert_eq!(
         script.matches("export ORT_CUDA_VERSION=12").count(),
         2,
         "native and container builds must select the CUDA 12 ORT distribution"
+    );
+    assert_eq!(
+        script
+            .matches("export CARGO_PROFILE_RELEASE_LTO=true")
+            .count(),
+        2,
+        "packaged releases must retain fat LTO while local release builds stay incremental"
     );
     assert!(
         !script.contains("-exec install -m 0755 {} \"$stage/lib/\"")
@@ -56,6 +72,21 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
     assert!(
         script.contains("libcublasLt.so.12") && script.contains("libcudart.so.12"),
         "the builder must reject an ORT provider compiled for another CUDA ABI"
+    );
+}
+
+#[test]
+fn linux_native_release_reads_cuda_version_from_the_complete_nvcc_output() {
+    let script = fs::read_to_string("scripts/release/linux.sh").expect("release builder exists");
+
+    assert!(
+        script.contains("nvcc_version=$(\"$nvcc\" --version)")
+            && script.contains("case \"$nvcc_version\" in"),
+        "CUDA 12.8 detection must inspect the complete nvcc version output"
+    );
+    assert!(
+        !script.contains("case \"$(\"$nvcc\" --version | tail -1)\" in"),
+        "the final nvcc line contains the build identifier, not the release field"
     );
 }
 
@@ -86,9 +117,73 @@ fn linux_release_bundles_a_pinned_minimal_lgpl_ffmpeg_runtime() {
             "missing native video release control: {required}"
         );
     }
+    assert_eq!(
+        script.matches(r#"make -s -j"$(nproc)""#).count(),
+        2,
+        "native and container FFmpeg builds must use every available CPU while hiding chatter"
+    );
+}
+
+#[test]
+fn linux_release_dev_mode_only_bypasses_worktree_cleanliness() {
+    let script = fs::read_to_string("scripts/release/linux.sh").expect("release builder exists");
+
     assert!(
-        script.matches("CARGO_BUILD_JOBS=2").count() >= 2,
-        "native and container builds must cap linker concurrency"
+        script.contains("--dev"),
+        "Linux release builder must accept --dev"
+    );
+    assert!(
+        script.contains("if test \"$dev_mode\" != true"),
+        "dirty-worktree checks must be conditional on development mode"
+    );
+    assert!(
+        script.contains("git diff-index --quiet HEAD --")
+            && script.contains("git status --porcelain --untracked-files=normal"),
+        "normal release mode must retain both cleanliness checks"
+    );
+    assert!(
+        script.contains("NOPERSON_REQUIRE_NV_CODEC_HEADERS=1"),
+        "development mode must not weaken the NVCodec dependency contract"
+    );
+    assert!(
+        script.contains("if test \"$dev_mode\" != true; then\n        export RUSTFLAGS="),
+        "development mode must reuse the normal Cargo release cache"
+    );
+    for cache_contract in [
+        ".cache/release/linux-${artifact_arch}",
+        "rustup run \"$RUST_TOOLCHAIN\" rustc --version",
+        "FFMPEG_RUNTIME_CACHE_VERSION=1",
+        "release: using cached minimal FFmpeg runtime",
+    ] {
+        assert!(
+            script.contains(cache_contract),
+            "development release cache is missing: {cache_contract}"
+        );
+    }
+}
+
+#[test]
+fn linux_native_release_does_not_poison_the_normal_cargo_target() {
+    let script = fs::read_to_string("scripts/release/linux.sh").expect("release builder exists");
+
+    assert!(script.contains("CARGO_TARGET_DIR=\"$release_target_dir\""));
+    assert!(script.contains("$dependency_root/cargo-target"));
+    assert!(script.contains("$work_dir/cargo-target"));
+    assert!(script.contains("$release_target_dir/release/noperson"));
+    assert!(script.contains("verify_ort_cuda12 \"$release_target_dir/release\""));
+}
+
+#[test]
+fn linux_release_uses_the_actual_pinned_nvcodec_archive_directory() {
+    let script = fs::read_to_string("scripts/release/linux.sh").expect("release builder exists");
+
+    assert!(
+        script.contains("nv-codec-headers-${NV_CODEC_HEADERS_VERSION}/include"),
+        "the GitHub tag archive retains the leading n in its extracted directory"
+    );
+    assert!(
+        !script.contains("nv-codec-headers-${NV_CODEC_HEADERS_VERSION#n}/include"),
+        "the builder must not point at a directory that the archive does not create"
     );
 }
 
@@ -139,13 +234,6 @@ fn cargo_and_runtime_logging_pin_the_compatible_ort_contract() {
         assert!(body.contains("incremental = false"));
         assert!(body.contains("codegen-units = 2"));
     }
-    let cargo_config =
-        fs::read_to_string(".cargo/config.toml").expect("project Cargo config exists");
-    assert!(
-        cargo_config.contains("jobs = 2"),
-        "local builds must not recreate the linker process storm"
-    );
-
     let main = fs::read_to_string("src/main.rs").expect("binary entrypoint exists");
     let launch = fs::read_to_string("src/launch.rs").expect("launch mode parser exists");
     assert!(
@@ -179,6 +267,10 @@ fn release_entrypoint_is_only_an_interactive_three_variant_router() {
     assert!(script.contains("Linux GPU native"));
     assert!(script.contains("Windows GPU native"));
     assert!(script.contains("release/linux.sh"));
+    assert!(
+        script.contains("--dev") && script.contains("dev_args"),
+        "the thin router must forward development mode to the platform builder"
+    );
     assert!(!script.contains("cargo build"));
     assert!(!script.contains("apt-get"));
 }
@@ -192,6 +284,10 @@ fn native_kernel_build_has_explicit_arch_and_no_downloadable_runtime_links() {
         "embedded PTX must use the oldest supported virtual architecture"
     );
     assert!(build.contains("nvcc.exe"));
+    assert!(
+        build.contains(".cache/dependencies") && build.contains("nv-codec-headers-n13.0.19.0"),
+        "local builds must discover the ignored repository dependency cache"
+    );
     assert!(!build.contains("--use_fast_math"));
     assert!(
         build.contains("rustc-link-lib=static=jpeg")
@@ -253,6 +349,7 @@ fn linux_runtime_collector_splits_common_libraries_from_tensorrt_arch_resources(
         "libcublasLt.so.12",
         "libcudnn.so.9",
         "libnppif.so.12",
+        "libnvjpeg.so.12",
         "libnvinfer.so.10",
         "libnvonnxparser.so.10",
         "for architecture in sm75 sm80 sm86 sm89 sm90 sm100 sm120 ptx",
@@ -278,6 +375,25 @@ fn linux_runtime_collector_splits_common_libraries_from_tensorrt_arch_resources(
         script.find("RUNTIME-MANIFEST").unwrap() < script.find("BLAKE3SUMS").unwrap(),
         "the runtime metadata must be written before the BLAKE3 inventory"
     );
+}
+
+#[test]
+fn linux_runtime_blake3_failures_are_not_hidden_by_command_substitution() {
+    for path in [
+        "scripts/runtime/collect-linux-libs.sh",
+        "scripts/runtime/verify-linux-libs.sh",
+        "scripts/runtime/pack-linux-libs.sh",
+    ] {
+        let script = fs::read_to_string(path).expect("runtime script exists");
+        assert!(
+            script.contains("hash=$(hash_file") || script.contains("actual=$(hash_file"),
+            "{path} must capture BLAKE3 output before printing it"
+        );
+        assert!(
+            script.contains("|| die \"BLAKE3"),
+            "{path} must abort when the hasher fails"
+        );
+    }
 }
 
 #[test]

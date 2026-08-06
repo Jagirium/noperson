@@ -24,9 +24,17 @@ pub struct ExtraGuiApp {
 
 impl ExtraGuiApp {
     pub fn new(models_dir: PathBuf) -> Self {
+        Self::new_with_render_state(models_dir, None)
+    }
+
+    fn new_with_render_state(
+        models_dir: PathBuf,
+        render_state: Option<egui_wgpu::RenderState>,
+    ) -> Self {
         let state = ExtraGuiState::new(&models_dir);
-        let runtime = EditorRuntimeHandle::spawn(models_dir.clone())
-            .expect("extra GUI worker thread must be available");
+        let runtime =
+            EditorRuntimeHandle::spawn_with_render_state(models_dir.clone(), render_state)
+                .expect("extra GUI worker thread must be available");
         Self {
             models_dir,
             state,
@@ -55,7 +63,9 @@ impl ExtraGuiApp {
         }
         self.state.preview_loaded = selected;
         self.state.source_texture = None;
+        self.state.source_gpu_texture = None;
         self.state.output_texture = None;
+        self.state.output_gpu_texture = None;
         self.state.latest_output = None;
         let Some(item) = selected.and_then(|id| self.state.media.item(id)) else {
             return;
@@ -175,7 +185,9 @@ impl ExtraGuiApp {
         self.state.output_directory = document.output_directory;
         self.state.preview_loaded = None;
         self.state.source_texture = None;
+        self.state.source_gpu_texture = None;
         self.state.output_texture = None;
+        self.state.output_gpu_texture = None;
         self.state.latest_output = None;
         self.state.face_textures.clear();
         self.state.source_face_textures.clear();
@@ -470,6 +482,9 @@ impl ExtraGuiApp {
         }
         if std::mem::take(&mut self.state.play_requested) {
             self.begin_playback();
+        }
+        if std::mem::take(&mut self.state.record_requested) {
+            self.begin_record();
         }
     }
 
@@ -866,6 +881,8 @@ impl ExtraGuiApp {
                     output,
                     playback,
                 } => {
+                    self.state.source_gpu_texture = None;
+                    self.state.output_gpu_texture = None;
                     let source_image = egui::ColorImage::from_rgb(
                         [input.width as usize, input.height as usize],
                         &input.data,
@@ -893,6 +910,37 @@ impl ExtraGuiApp {
                         output.faces_detected, output.faces_swapped
                     );
                     self.state.latest_output = Some(output);
+                }
+                #[cfg(target_os = "linux")]
+                EditorRuntimeEvent::GpuPreview {
+                    input_bridge,
+                    output_bridge,
+                    faces_detected,
+                    faces_swapped,
+                    playback,
+                } => {
+                    if input_bridge.consume_latest() {
+                        self.state.source_gpu_texture = Some(egui::load::SizedTexture::new(
+                            input_bridge.texture_id(),
+                            input_bridge.size(),
+                        ));
+                        self.state.source_texture = None;
+                    }
+                    if output_bridge.consume_latest() {
+                        self.state.output_gpu_texture = Some(egui::load::SizedTexture::new(
+                            output_bridge.texture_id(),
+                            output_bridge.size(),
+                        ));
+                        self.state.output_texture = None;
+                    }
+                    if !playback {
+                        self.state.preview.reset();
+                        self.state.active_panel = ExtraGuiPanel::Preview;
+                    }
+                    self.state.status = format!(
+                        "Preview ready · {faces_detected} detected · {faces_swapped} swapped"
+                    );
+                    self.state.latest_output = None;
                 }
                 EditorRuntimeEvent::Progress { processed, total } => {
                     self.state.runtime_progress = Some((processed, total));
@@ -948,24 +996,8 @@ impl ExtraGuiApp {
             }
         });
     }
-}
 
-impl eframe::App for ExtraGuiApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        Self::install_style(ctx);
-        self.sync_preview_texture(ctx);
-        self.sync_face_textures(ctx);
-        self.autosave();
-        self.poll_runtime(ctx);
-        self.consume_dropped_media(ctx);
-        self.consume_analysis_intent();
-        self.keyboard_shortcuts(ctx);
-        self.consume_timeline_intents();
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let mut selected_panel = self.state.active_panel;
-
+    fn render_studio_shell(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.heading("noperson extra");
@@ -984,31 +1016,49 @@ impl eframe::App for ExtraGuiApp {
             });
             ui.separator();
 
+            let available = ui.available_size();
+            let left_width = 270.0_f32.min((available.x * 0.24).max(230.0));
+            let right_width = 360.0_f32.min((available.x * 0.30).max(300.0));
+            let center_width = (available.x - left_width - right_width - 16.0).max(420.0);
+
             ui.horizontal(|ui| {
-                let navigation_size = egui::vec2(156.0, ui.available_height());
                 ui.allocate_ui_with_layout(
-                    navigation_size,
+                    egui::vec2(left_width, available.y),
                     egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.add_space(8.0);
-                        for panel in ExtraGuiPanel::ALL {
-                            if ui
-                                .selectable_label(selected_panel == panel, panel.label())
-                                .clicked()
-                            {
-                                selected_panel = panel;
-                            }
-                        }
-                    },
+                    |ui| panels::media_dock(ui, &mut self.state),
                 );
                 ui.separator();
-
-                self.state.active_panel = selected_panel;
-                ui.vertical(|ui| {
-                    panels::render(selected_panel, ui, &mut self.state, &self.models_dir);
-                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(center_width, available.y),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| panels::player_workspace(ui, &mut self.state),
+                );
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_width, available.y),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| panels::inspector(ui, &mut self.state, &self.models_dir),
+                );
             });
         });
+    }
+}
+
+impl eframe::App for ExtraGuiApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        Self::install_style(ctx);
+        self.sync_preview_texture(ctx);
+        self.sync_face_textures(ctx);
+        self.autosave();
+        self.poll_runtime(ctx);
+        self.consume_dropped_media(ctx);
+        self.consume_analysis_intent();
+        self.keyboard_shortcuts(ctx);
+        self.consume_timeline_intents();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render_studio_shell(ui);
     }
 }
 
@@ -1023,6 +1073,44 @@ pub fn launch(models_dir: PathBuf) -> eframe::Result<()> {
     eframe::run_native(
         "noperson extra",
         options,
-        Box::new(move |_cc| Ok(Box::new(ExtraGuiApp::new(models_dir)))),
+        Box::new(move |cc| {
+            Ok(Box::new(ExtraGuiApp::new_with_render_state(
+                models_dir,
+                cc.wgpu_render_state.clone(),
+            )))
+        }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable as _};
+
+    #[test]
+    fn studio_shell_keeps_media_player_timeline_and_inspector_visible_together() {
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .build_ui_state(
+                |ui, app| app.render_studio_shell(ui),
+                ExtraGuiApp::new(PathBuf::from("models")),
+            );
+
+        for label in [
+            "TARGET MEDIA",
+            "SOURCE IDENTITIES",
+            "PLAYER",
+            "TIMELINE",
+            "Faces",
+            "Parameters",
+            "Settings",
+            "Play",
+            "Record",
+        ] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "studio shell is missing {label}"
+            );
+        }
+    }
 }

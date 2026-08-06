@@ -1,13 +1,13 @@
 //! Pre-allocated GPU workspace — zero allocations in hot path.
 //!
 //! All buffers are allocated once at startup. The pipeline reuses them
-//! frame after frame. Buffer sizes are based on max resolution (1080p default).
+//! frame after frame. Live-frame buffers are sized to the selected source.
 
 use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DriverError, PinnedHostSlice};
 
-/// Maximum supported frame dimensions.
+/// Default frame-ring dimensions for callers without a negotiated source.
 pub const MAX_WIDTH: usize = 1920;
 pub const MAX_HEIGHT: usize = 1080;
 pub const MAX_SWAP_DIM: usize = 4;
@@ -206,6 +206,40 @@ pub struct FrameRing {
     max_pixels: usize,
 }
 
+/// Exact allocation geometry for a live capture source. Keeping this separate
+/// prevents every camera from paying the VRAM cost of the largest supported
+/// preset while still validating all size arithmetic before CUDA allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRingLayout {
+    max_pixels: usize,
+}
+
+impl FrameRingLayout {
+    pub fn new(width: u32, height: u32) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            width > 0 && height > 0,
+            "frame ring dimensions must be non-zero"
+        );
+        let max_pixels = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| anyhow::anyhow!("frame ring dimensions overflow"))?;
+        max_pixels
+            .checked_mul(3)
+            .ok_or_else(|| anyhow::anyhow!("frame ring RGB size overflow"))?;
+        Ok(Self { max_pixels })
+    }
+
+    #[must_use]
+    pub const fn max_pixels(self) -> usize {
+        self.max_pixels
+    }
+
+    #[must_use]
+    pub const fn rgb_elements(self) -> usize {
+        self.max_pixels * 3
+    }
+}
+
 impl FrameRing {
     pub const DEFAULT_CAPACITY: usize = 3;
 
@@ -213,17 +247,29 @@ impl FrameRing {
         ctx: &Arc<CudaContext>,
         stream: &Arc<CudaStream>,
         capacity: usize,
-    ) -> Result<Self, DriverError> {
-        let max_pixels = MAX_WIDTH * MAX_HEIGHT;
+    ) -> anyhow::Result<Self> {
+        Self::new_for_dimensions(ctx, stream, capacity, MAX_WIDTH as u32, MAX_HEIGHT as u32)
+    }
+
+    pub fn new_for_dimensions(
+        ctx: &Arc<CudaContext>,
+        stream: &Arc<CudaStream>,
+        capacity: usize,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(capacity > 0, "frame ring capacity must be non-zero");
+        let layout = FrameRingLayout::new(width, height)?;
+        let max_pixels = layout.max_pixels();
         let mut slots = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             // SAFETY: u8 has no invalid bit patterns. Pinned memory is owned by
             // the slot and released only after all recorded copies complete.
-            let host_out = unsafe { ctx.alloc_pinned::<u8>(max_pixels * 3)? };
+            let host_out = unsafe { ctx.alloc_pinned::<u8>(layout.rgb_elements())? };
             slots.push(FrameSlot {
-                u8_in: stream.alloc_zeros::<u8>(max_pixels * 3)?,
-                chw: stream.alloc_zeros::<f32>(max_pixels * 3)?,
-                u8_out: stream.alloc_zeros::<u8>(max_pixels * 3)?,
+                u8_in: stream.alloc_zeros::<u8>(layout.rgb_elements())?,
+                chw: stream.alloc_zeros::<f32>(layout.rgb_elements())?,
+                u8_out: stream.alloc_zeros::<u8>(layout.rgb_elements())?,
                 host_out,
             });
         }

@@ -1,11 +1,13 @@
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use fs2::FileExt;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use tokio_util::sync::CancellationToken;
 
-use crate::models::download::{DownloadConfig, DownloadProgress, ModelDownloader};
+use crate::models::download::{DownloadConfig, DownloadPhase, DownloadProgress, ModelDownloader};
 
 use super::registry::{GENERATION, artifacts_for};
 use super::{RuntimeLayout, TensorRtShard};
@@ -67,7 +69,7 @@ pub async fn ensure_runtime(
         return Ok(layout);
     }
 
-    let downloads = runtime_root.join("downloads");
+    let downloads = runtime_tmp_directory(runtime_root)?;
     let downloader = ModelDownloader::new(DownloadConfig::default())?;
     let mut archives = Vec::new();
     for artifact in artifacts_for(shard) {
@@ -78,33 +80,41 @@ pub async fn ensure_runtime(
         );
         let progress = DownloadProgress::default();
         let monitor_progress = progress.clone();
+        let progress_bar = runtime_progress_bar(artifact.size, io::stderr().is_terminal());
+        let monitor_bar = progress_bar.clone();
         let monitor_done = CancellationToken::new();
         let monitor_stop = monitor_done.clone();
-        let artifact_name = artifact.filename;
         let monitor = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
-                    () = monitor_stop.cancelled() => break,
+                    () = monitor_stop.cancelled() => {
+                        update_runtime_progress(&monitor_bar, &monitor_progress);
+                        break;
+                    },
                     _ = interval.tick() => {
-                        let snapshot = monitor_progress.snapshot();
-                        if snapshot.total_bytes > 0 {
-                            tracing::info!(
-                                "Runtime download: {artifact_name} {:.1}% ({}/{})",
-                                snapshot.downloaded_bytes as f64 * 100.0 / snapshot.total_bytes as f64,
-                                snapshot.downloaded_bytes,
-                                snapshot.total_bytes
-                            );
-                        }
+                        update_runtime_progress(&monitor_bar, &monitor_progress);
                     }
                 }
             }
         });
         let archive = downloader
-            .download(artifact, &downloads, CancellationToken::new(), progress)
+            .download(
+                artifact,
+                &downloads,
+                CancellationToken::new(),
+                progress.clone(),
+            )
             .await;
         monitor_done.cancel();
         let _ = monitor.await;
+        match progress.snapshot().phase {
+            DownloadPhase::Completed => progress_bar.finish_with_message("GPU runtime ready"),
+            DownloadPhase::Cancelled => progress_bar.abandon_with_message("GPU runtime cancelled"),
+            DownloadPhase::Failed => progress_bar.abandon_with_message("GPU runtime failed"),
+            _ => progress_bar.finish_and_clear(),
+        }
         let archive = archive?;
         archives.push(archive);
     }
@@ -143,6 +153,41 @@ pub async fn ensure_runtime(
         }
     }
     Ok(RuntimeLayout::new(final_root, shard))
+}
+
+fn runtime_tmp_directory(runtime_root: &Path) -> io::Result<PathBuf> {
+    let temporary = runtime_root.join("tmp");
+    let legacy = runtime_root.join("downloads");
+    if !temporary.exists() && legacy.exists() {
+        fs::rename(&legacy, &temporary)?;
+    }
+    fs::create_dir_all(&temporary)?;
+    Ok(temporary)
+}
+
+fn runtime_progress_bar(total_bytes: u64, terminal: bool) -> ProgressBar {
+    let target = if terminal {
+        ProgressDrawTarget::stderr_with_hz(10)
+    } else {
+        ProgressDrawTarget::hidden()
+    };
+    let bar = ProgressBar::with_draw_target(Some(total_bytes), target);
+    bar.set_style(
+        ProgressStyle::with_template(
+            "GPU runtime [{bar:36.cyan/blue}] {bytes}/{total_bytes} {percent}% · {bytes_per_sec} · ETA {eta}",
+        )
+        .expect("runtime progress template is valid")
+        .progress_chars("━━─"),
+    );
+    bar
+}
+
+fn update_runtime_progress(bar: &ProgressBar, progress: &DownloadProgress) {
+    let snapshot = progress.snapshot();
+    if snapshot.total_bytes > 0 {
+        bar.set_length(snapshot.total_bytes);
+    }
+    bar.set_position(snapshot.downloaded_bytes.min(snapshot.total_bytes));
 }
 
 fn unpack_archives(archives: &[PathBuf], destination: &Path) -> Result<(), RuntimeInstallError> {
@@ -201,5 +246,29 @@ mod tests {
         fs::create_dir(&output).unwrap();
         unpack_archives(&[archive_path], &output).unwrap();
         assert_eq!(fs::read(output.join("base/libnppc.so.12")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn legacy_downloads_migrate_to_the_private_runtime_tmp_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let legacy = fixture.path().join("downloads");
+        fs::create_dir(&legacy).unwrap();
+        fs::write(legacy.join("runtime.tar.zst.tmp"), b"partial").unwrap();
+
+        let temporary = runtime_tmp_directory(fixture.path()).unwrap();
+
+        assert_eq!(temporary, fixture.path().join("tmp"));
+        assert_eq!(
+            fs::read(temporary.join("runtime.tar.zst.tmp")).unwrap(),
+            b"partial"
+        );
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn non_terminal_runtime_progress_is_hidden() {
+        let progress = runtime_progress_bar(1024, false);
+        assert!(progress.is_hidden());
+        assert_eq!(progress.length(), Some(1024));
     }
 }

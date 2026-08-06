@@ -53,8 +53,9 @@ print(h.hexdigest())' "$file" \
 }
 
 while IFS= read -r -d '' archive; do
+    hash=$(hash_file "$archive") || die "BLAKE3 hashing failed: $(basename -- "$archive")"
     printf '%s %s %s\n' \
-        "$(hash_file "$archive")" \
+        "$hash" \
         "$(stat -Lc '%s' "$archive")" \
         "$(basename -- "$archive")"
 done < <(find "$stage" -type f -name '*.tar.zst' -print0 | sort -z) \

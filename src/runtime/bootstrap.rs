@@ -167,21 +167,14 @@ fn persistent_runtime_root() -> anyhow::Result<PathBuf> {
     if let Some(root) = env::var_os("NOPERSON_RUNTIME_DIR") {
         return Ok(PathBuf::from(root));
     }
-    #[cfg(target_os = "windows")]
-    let base = required_env_path("LOCALAPPDATA")?;
-    #[cfg(not(target_os = "windows"))]
-    let base = match env::var_os("XDG_DATA_HOME") {
-        Some(path) => PathBuf::from(path),
-        None => required_env_path("HOME")?.join(".local/share"),
-    };
-    Ok(base.join("noperson/runtime"))
+    portable_runtime_root(&env::current_exe()?)
 }
 
-fn required_env_path(name: &str) -> anyhow::Result<PathBuf> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("{name} is not set"))
+fn portable_runtime_root(executable: &Path) -> anyhow::Result<PathBuf> {
+    executable
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("executable has no parent directory"))
 }
 
 #[allow(dead_code)]
@@ -225,5 +218,14 @@ mod tests {
                 b"provider"
             );
         }
+    }
+
+    #[test]
+    fn portable_runtime_root_is_the_executable_directory() {
+        let executable = Path::new("/portable/noperson/noperson");
+        assert_eq!(
+            portable_runtime_root(executable).unwrap(),
+            PathBuf::from("/portable/noperson")
+        );
     }
 }

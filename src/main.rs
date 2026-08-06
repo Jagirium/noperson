@@ -5,7 +5,12 @@
 //! I/O: nokhwa (webcam), v4l2loopback (virtual camera)
 
 fn main() -> anyhow::Result<()> {
-    let launch_mode = noperson::launch::LaunchMode::parse(std::env::args_os().skip(1))?;
+    let options = noperson::launch::LaunchOptions::parse(std::env::args_os().skip(1))?;
+    if options.help {
+        print!("{}", noperson::launch::help_text());
+        return Ok(());
+    }
+    let launch_mode = options.mode;
 
     // Init logging
     tracing_subscriber::fmt()
@@ -25,7 +30,20 @@ fn main() -> anyhow::Result<()> {
     };
     tracing::info!("GPU runtime ready: {}", runtime.root().display());
 
-    let models_dir = std::path::PathBuf::from("models");
+    let explicit_models_dir = options.models_dir;
+    let models_dir = explicit_models_dir
+        .or_else(|| std::env::var_os("NOPERSON_MODELS_DIR").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("models"));
+    tracing::info!("Models directory: {}", models_dir.display());
+
+    let async_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    async_runtime.block_on(noperson::models::install::ensure_required_models(
+        &models_dir,
+    ))?;
+
     if launch_mode == noperson::launch::LaunchMode::RuntimeCheck {
         let probe_model = models_dir.join("yoloface_8n.onnx");
         if probe_model.is_file() {
@@ -47,30 +65,6 @@ fn main() -> anyhow::Result<()> {
         }
         tracing::info!("GPU runtime bootstrap check passed");
         return Ok(());
-    }
-
-    // Check models directory
-    if !models_dir.exists() {
-        std::fs::create_dir_all(&models_dir).ok();
-        tracing::warn!("Created models/ directory — place .onnx files here");
-    }
-
-    // List .onnx files
-    if models_dir.exists() {
-        let onnx_files: Vec<_> = std::fs::read_dir(&models_dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "onnx"))
-            .collect();
-        if onnx_files.is_empty() {
-            tracing::warn!("No .onnx models in models/");
-            tracing::warn!("Required: yoloface_8n.onnx, w600k_r50.onnx, inswapper_128.fp16.onnx");
-        } else {
-            for f in &onnx_files {
-                tracing::info!("Found model: {}", f.file_name().to_string_lossy());
-            }
-        }
     }
 
     match launch_mode {

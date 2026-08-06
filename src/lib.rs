@@ -15,6 +15,7 @@ pub mod config;
 pub mod engine;
 pub mod extra_gui;
 pub mod gpu;
+pub mod gpu_preview;
 pub mod io;
 pub mod launch;
 pub mod live;

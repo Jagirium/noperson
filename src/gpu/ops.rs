@@ -61,6 +61,7 @@ pub struct GpuOps {
     // Frame conversion kernels
     hwc_u8_to_chw_f32_fn: CudaFunction,
     chw_f32_to_hwc_u8_fn: CudaFunction,
+    chw_f32_to_rgba_u8_pitched_fn: CudaFunction,
     nv12_to_chw_f32_fn: CudaFunction,
     chw_f32_to_nv12_scaled_fn: CudaFunction,
     letterbox_fn: CudaFunction,
@@ -175,6 +176,10 @@ impl GpuOps {
             scalar_blend_inplace_fn: load("alpha_blend", "scalar_blend_inplace_kernel"),
             hwc_u8_to_chw_f32_fn: load("frame_convert", "hwc_u8_to_chw_f32_kernel"),
             chw_f32_to_hwc_u8_fn: load("frame_convert", "chw_f32_to_hwc_u8_kernel"),
+            chw_f32_to_rgba_u8_pitched_fn: load(
+                "frame_convert",
+                "chw_f32_to_rgba_u8_pitched_kernel",
+            ),
             nv12_to_chw_f32_fn: load("frame_convert", "nv12_to_chw_f32_kernel"),
             chw_f32_to_nv12_scaled_fn: load("frame_convert", "chw_f32_to_nv12_scaled_kernel"),
             letterbox_fn: load("frame_convert", "letterbox_resize_kernel"),
@@ -448,6 +453,32 @@ impl GpuOps {
         b.arg(&h);
         b.arg(&w);
         unsafe { b.launch(LaunchConfig::for_num_elems(total)) }?;
+        Ok(())
+    }
+
+    /// CHW f32 [3,H,W] in [0,255] -> pitch-linear RGBA8.
+    pub fn chw_f32_to_rgba_u8_pitched<D>(
+        &self,
+        src: &CudaSlice<f32>,
+        dst: &mut D,
+        h: u32,
+        w: u32,
+        row_bytes: u32,
+    ) -> Result<(), DriverError>
+    where
+        D: cudarc::driver::DevicePtrMut<u8>,
+    {
+        let total = h * w;
+        let mut builder = self
+            .stream
+            .launch_builder(&self.chw_f32_to_rgba_u8_pitched_fn);
+        let (dst_ptr, _dst_guard) = dst.device_ptr_mut(&self.stream);
+        builder.arg(src);
+        builder.arg(&dst_ptr);
+        builder.arg(&h);
+        builder.arg(&w);
+        builder.arg(&row_bytes);
+        unsafe { builder.launch(LaunchConfig::for_num_elems(total)) }?;
         Ok(())
     }
 

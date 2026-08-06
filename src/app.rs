@@ -47,7 +47,12 @@ pub fn launch(models_dir: PathBuf) -> eframe::Result<()> {
     eframe::run_native(
         "noperson",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(models_dir)))),
+        Box::new(move |cc| {
+            Ok(Box::new(App::new_with_render_state(
+                models_dir,
+                cc.wgpu_render_state.clone(),
+            )))
+        }),
     )
 }
 
@@ -77,6 +82,20 @@ pub enum InputSource {
 pub enum OutputDest {
     VirtualCamera(u32),
     File(PathBuf),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartIntent {
+    CameraPreview,
+    FaceSwap,
+}
+
+fn start_intent(input: &InputSource, target_face: Option<&Path>) -> Option<StartIntent> {
+    match (input, target_face) {
+        (InputSource::Webcam(_), None) => Some(StartIntent::CameraPreview),
+        (InputSource::Webcam(_) | InputSource::Photo(_), Some(_)) => Some(StartIntent::FaceSwap),
+        (InputSource::None, _) | (InputSource::Photo(_), None) => None,
+    }
 }
 
 /// A frame the worker thread sends back to the UI thread.
@@ -236,6 +255,7 @@ pub struct App {
     /// Preview of the swapped output (what the pipeline produces).
     output_preview: Option<egui::ColorImage>,
     output_texture: Option<egui::TextureHandle>,
+    output_gpu_texture: Option<egui::load::SizedTexture>,
     output_frame: Option<(Vec<u8>, u32, u32)>,
     output_zoom_open: bool,
     output_viewport: OutputViewport,
@@ -251,18 +271,36 @@ pub struct App {
     params: FaceSwapParams,
     /// Lazily-initialized GPU context (lives for the app's lifetime once created).
     gpu: Option<Arc<GpuOps>>,
+    #[cfg(target_os = "linux")]
+    gpu_preview: Option<Arc<crate::gpu_preview::LinuxPreviewBridge>>,
+    #[cfg(target_os = "linux")]
+    render_state: Option<egui_wgpu::RenderState>,
     /// Worker thread handle (None when idle).
     worker: Option<thread::JoinHandle<()>>,
     /// Channel from worker → UI.
     msg_rx: Option<Receiver<WorkerMsg>>,
     /// Clone of the sender handed to each new worker.
-    msg_tx: Option<std::sync::mpsc::Sender<WorkerMsg>>,
+    msg_tx: Option<std::sync::mpsc::SyncSender<WorkerMsg>>,
     stop_flag: Arc<AtomicBool>,
     realtime_preview: RealtimePreviewState,
+    webcam_presets: Vec<crate::io::webcam::WebcamPreset>,
+    webcam_preset: usize,
+    webcam_probe_rx: Option<Receiver<Vec<crate::io::webcam::WebcamPreset>>>,
 }
 
 impl App {
     pub fn new(models_dir: PathBuf) -> Self {
+        Self::new_with_render_state(models_dir, None)
+    }
+
+    fn new_with_render_state(
+        models_dir: PathBuf,
+        render_state: Option<egui_wgpu::RenderState>,
+    ) -> Self {
+        let (webcam_probe_tx, webcam_probe_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = webcam_probe_tx.send(crate::io::webcam::WebcamSource::probe_all());
+        });
         Self {
             input_source: InputSource::None,
             input_preview: None,
@@ -272,6 +310,7 @@ impl App {
             target_face_texture: None,
             output_preview: None,
             output_texture: None,
+            output_gpu_texture: None,
             output_frame: None,
             output_zoom_open: false,
             output_viewport: OutputViewport::default(),
@@ -286,11 +325,44 @@ impl App {
             models_loaded: false,
             params: FaceSwapParams::default(),
             gpu: None,
+            #[cfg(target_os = "linux")]
+            gpu_preview: None,
+            #[cfg(target_os = "linux")]
+            render_state,
             worker: None,
             msg_rx: None,
             msg_tx: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             realtime_preview: RealtimePreviewState::default(),
+            webcam_presets: vec![crate::io::webcam::WebcamPreset {
+                camera_index: 0,
+                camera_name: "Probing cameras…".to_owned(),
+                width: 1280,
+                height: 720,
+                fps: 30,
+            }],
+            webcam_preset: 0,
+            webcam_probe_rx: Some(webcam_probe_rx),
+        }
+    }
+
+    fn poll_webcam_probe(&mut self) {
+        let Some(receiver) = &self.webcam_probe_rx else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(presets) => {
+                self.webcam_presets = presets;
+                self.webcam_preset = 0;
+                if matches!(self.input_source, InputSource::Webcam(_))
+                    && let Some(preset) = self.webcam_presets.first()
+                {
+                    self.input_source = InputSource::Webcam(preset.camera_index);
+                }
+                self.webcam_probe_rx = None;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => self.webcam_probe_rx = None,
+            Err(mpsc::TryRecvError::Empty) => {}
         }
     }
 
@@ -334,6 +406,7 @@ impl App {
             self.face_count = 0;
             self.output_preview = None;
             self.output_texture = None;
+            self.output_gpu_texture = None;
             self.output_frame = None;
             self.realtime_preview.open();
         }
@@ -348,15 +421,16 @@ impl App {
         if self.running {
             return;
         }
-        if self.target_face_path.is_none() {
-            self.status = "Select a target face first".to_string();
+        let Some(intent) = start_intent(&self.input_source, self.target_face_path.as_deref())
+        else {
+            self.status = if matches!(self.input_source, InputSource::None) {
+                "Select an input source first".to_string()
+            } else {
+                "Select a source face first".to_string()
+            };
             return;
-        }
-        if matches!(self.input_source, InputSource::None) {
-            self.status = "Select an input source first".to_string();
-            return;
-        }
-        if !self.models_loaded {
+        };
+        if intent == StartIntent::FaceSwap && !self.models_loaded {
             self.load_models();
             if !self.models_loaded {
                 return;
@@ -364,28 +438,61 @@ impl App {
         }
 
         // Set up channel.
-        let (tx, rx) = mpsc::channel::<WorkerMsg>();
+        let (tx, rx) = mpsc::sync_channel::<WorkerMsg>(3);
         self.msg_rx = Some(rx);
         self.msg_tx = Some(tx.clone());
-        let gpu = match self.ensure_gpu() {
-            Ok(g) => g,
-            Err(e) => {
-                self.status = format!("GPU init failed: {e}");
-                return;
-            }
+        let gpu = match intent {
+            StartIntent::FaceSwap => match self.ensure_gpu() {
+                Ok(gpu) => Some(gpu),
+                Err(error) => {
+                    self.status = format!("GPU init failed: {error}");
+                    return;
+                }
+            },
+            StartIntent::CameraPreview => None,
         };
         self.stop_flag.store(false, Ordering::Release);
         let stop_flag = self.stop_flag.clone();
-        let target_path = self.target_face_path.clone().unwrap();
+        let target_path = self.target_face_path.clone();
         let models_dir = self.models_dir.clone();
         let params = self.params.clone();
         let output_dest = self.output_dest.clone();
         let provider = self.provider;
         let ctx2 = ctx.clone();
         let input = self.input_source.clone();
+        let webcam_preset = self.webcam_presets.get(self.webcam_preset).cloned();
+        #[cfg(target_os = "linux")]
+        let gpu_preview =
+            if intent == StartIntent::FaceSwap && matches!(&input, InputSource::Webcam(_)) {
+                self.render_state
+                    .as_ref()
+                    .zip(webcam_preset.as_ref())
+                    .and_then(|(render_state, preset)| {
+                        let geometry =
+                            crate::gpu_preview::PreviewGeometry::new(preset.width, preset.height)?;
+                        match crate::gpu_preview::LinuxPreviewBridge::new(render_state, geometry) {
+                            Ok(bridge) => Some(bridge),
+                            Err(error) => {
+                                tracing::warn!("GPU preview disabled: {error:#}");
+                                None
+                            }
+                        }
+                    })
+            } else {
+                None
+            };
+        #[cfg(target_os = "linux")]
+        {
+            self.gpu_preview = gpu_preview.clone();
+            self.output_gpu_texture = gpu_preview
+                .as_ref()
+                .map(|bridge| egui::load::SizedTexture::new(bridge.texture_id(), bridge.size()));
+        }
         let preview_input = input.clone();
         let handle = match input {
             InputSource::Photo(path) => thread::spawn(move || {
+                let gpu = gpu.expect("face-swap intent always initializes CUDA");
+                let target_path = target_path.expect("photo face-swap intent requires a face");
                 let stream = gpu.stream.clone();
                 let result = run_photo_swap(
                     gpu,
@@ -401,21 +508,48 @@ impl App {
                 send_worker_done(&tx, &ctx2, result);
             }),
             InputSource::Webcam(idx) => thread::spawn(move || {
-                let stream = gpu.stream.clone();
                 let completion_ctx = ctx2.clone();
-                let result = run_webcam_loop(
-                    gpu,
-                    models_dir,
-                    idx,
-                    target_path,
-                    params,
-                    provider,
-                    output_dest,
-                    tx.clone(),
-                    ctx2,
-                    stream.clone(),
-                    stop_flag,
-                );
+                let preset = webcam_preset.unwrap_or(crate::io::webcam::WebcamPreset {
+                    camera_index: idx,
+                    camera_name: format!("Camera {idx}"),
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                });
+                let result = match intent {
+                    StartIntent::CameraPreview => run_webcam_preview_loop(
+                        preset.camera_index,
+                        preset.width,
+                        preset.height,
+                        preset.fps,
+                        output_dest,
+                        tx.clone(),
+                        ctx2,
+                        stop_flag,
+                    ),
+                    StartIntent::FaceSwap => {
+                        let gpu = gpu.expect("face-swap intent always initializes CUDA");
+                        let stream = gpu.stream.clone();
+                        run_webcam_loop(
+                            gpu,
+                            models_dir,
+                            preset.camera_index,
+                            preset.width,
+                            preset.height,
+                            preset.fps,
+                            target_path.expect("webcam face-swap intent requires a face"),
+                            params,
+                            provider,
+                            output_dest,
+                            tx.clone(),
+                            ctx2,
+                            stream,
+                            stop_flag,
+                            #[cfg(target_os = "linux")]
+                            gpu_preview,
+                        )
+                    }
+                };
                 send_worker_done(&tx, &completion_ctx, result);
             }),
             InputSource::None => return,
@@ -441,15 +575,21 @@ impl App {
 
     /// Drain the worker channel and update state. Called every frame.
     fn poll_worker(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "linux")]
+        if let Some(preview) = &self.gpu_preview
+            && preview.consume_latest()
+        {
+            self.output_gpu_texture = Some(egui::load::SizedTexture::new(
+                preview.texture_id(),
+                preview.size(),
+            ));
+            self.output_viewport.reset();
+        }
         let Some(rx) = &self.msg_rx else { return };
+        let mut latest_frame = None;
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                WorkerMsg::Frame(data, w, h) => {
-                    self.output_preview = color_preview_from_rgb(&data, w, h, 1024).ok();
-                    self.output_frame = Some((data, w, h));
-                    self.output_texture = None; // force reload
-                    self.output_viewport.reset();
-                }
+                WorkerMsg::Frame(data, w, h) => latest_frame = Some((data, w, h)),
                 WorkerMsg::Status(s) => self.status = s,
                 WorkerMsg::Fps(f) => self.fps = f,
                 WorkerMsg::FaceCount(n) => self.face_count = n,
@@ -464,6 +604,13 @@ impl App {
                     self.worker = None;
                 }
             }
+        }
+        if let Some((data, width, height)) = latest_frame {
+            self.output_preview = color_preview_from_rgb(&data, width, height, 1024).ok();
+            self.output_frame = Some((data, width, height));
+            self.output_texture = None;
+            self.output_gpu_texture = None;
+            self.output_viewport.reset();
         }
         ctx.request_repaint();
     }
@@ -484,7 +631,11 @@ impl App {
             return;
         }
         let snapshot = RealtimePreviewSnapshot {
-            texture: self.output_texture(ctx),
+            texture: self.output_gpu_texture.or_else(|| {
+                self.output_texture(ctx)
+                    .as_ref()
+                    .map(egui::load::SizedTexture::from_handle)
+            }),
             fps: self.fps,
             face_count: self.face_count,
             provider: self.provider,
@@ -661,11 +812,6 @@ impl App {
                         )
                     };
                     ui.add(StatusPill::new().item(label, state));
-                    ui.label(
-                        egui::RichText::new(elegance::glyphs::POWER)
-                            .color(TEXT_FAINT)
-                            .size(13.0),
-                    );
                 });
             });
 
@@ -722,6 +868,21 @@ impl App {
                                 }
                                 Err(e) => self.status = format!("Error: {e}"),
                             }
+                        }
+                        if selected.is_some()
+                            && ui
+                                .add(
+                                    EleganceButton::new("Clear face")
+                                        .outline()
+                                        .full_width()
+                                        .enabled(!self.running),
+                                )
+                                .clicked()
+                        {
+                            self.target_face_path = None;
+                            self.target_face_preview = None;
+                            self.target_face_texture = None;
+                            self.status = "Camera preview ready".to_owned();
                         }
                     },
                 );
@@ -865,10 +1026,31 @@ impl App {
                         );
                     }
                 });
-                if let InputSource::Webcam(index) = &mut self.input_source {
+                if matches!(self.input_source, InputSource::Webcam(_)) {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Camera index").color(TEXT_DIM));
-                        ui.add(egui::DragValue::new(index).range(0..=16));
+                        ui.label(egui::RichText::new("Camera mode").color(TEXT_DIM));
+                        let selected = self
+                            .webcam_presets
+                            .get(self.webcam_preset)
+                            .map_or_else(|| "Camera 0: 720p30".to_owned(), |preset| preset.label());
+                        egui::ComboBox::from_id_salt("realtime-camera-preset")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for (preset_index, preset) in self.webcam_presets.iter().enumerate()
+                                {
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.webcam_preset,
+                                            preset_index,
+                                            preset.label(),
+                                        )
+                                        .changed()
+                                    {
+                                        self.input_source =
+                                            InputSource::Webcam(preset.camera_index);
+                                    }
+                                }
+                            });
                         ui.label(
                             egui::RichText::new("Output: /dev/video10")
                                 .color(TEXT_FAINT)
@@ -960,10 +1142,12 @@ impl App {
     }
 
     fn action_bar(&mut self, ui: &mut egui::Ui) {
-        let ready =
-            self.target_face_path.is_some() && !matches!(self.input_source, InputSource::None);
+        let intent = start_intent(&self.input_source, self.target_face_path.as_deref());
+        let ready = intent.is_some();
         let action_label = if self.running {
             "Stop live"
+        } else if intent == Some(StartIntent::CameraPreview) {
+            "Preview camera"
         } else if matches!(self.input_source, InputSource::Photo(_)) {
             "Process photo"
         } else {
@@ -991,6 +1175,8 @@ impl App {
             ui.label(
                 egui::RichText::new(if ready {
                     &self.status
+                } else if matches!(self.input_source, InputSource::Webcam(_)) {
+                    "Camera preview is available without a source face"
                 } else {
                     "Select a source face and target"
                 })
@@ -1160,7 +1346,7 @@ fn run_photo_swap(
     params: FaceSwapParams,
     provider: ExecutionProvider,
     output_dest: OutputDest,
-    tx: mpsc::Sender<WorkerMsg>,
+    tx: mpsc::SyncSender<WorkerMsg>,
     stream: Arc<cudarc::driver::CudaStream>,
 ) -> anyhow::Result<()> {
     use image::GenericImageView;
@@ -1221,21 +1407,101 @@ fn run_photo_swap(
     Ok(())
 }
 
+/// Camera-only path used before a source identity is selected. It avoids CUDA
+/// and model startup entirely while retaining the same preview and virtual
+/// camera lifecycle as the face-swap worker.
+#[allow(clippy::too_many_arguments)]
+fn run_webcam_preview_loop(
+    webcam_idx: usize,
+    webcam_width: u32,
+    webcam_height: u32,
+    webcam_fps: u32,
+    output_dest: OutputDest,
+    tx: mpsc::SyncSender<WorkerMsg>,
+    ctx: egui::Context,
+    stop_flag: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    use crate::io::video::FrameSource;
+
+    let _ = tx.send(WorkerMsg::Status("Opening camera preview".into()));
+    let mut camera = crate::io::webcam::WebcamSource::new(
+        webcam_idx,
+        webcam_width,
+        webcam_height,
+        webcam_fps as f32,
+    )?;
+    let (width, height) = camera.dimensions();
+    let fps = camera.fps().round().max(1.0) as u32;
+    let mut virtual_camera_warning = None;
+    let mut virtual_camera = if let OutputDest::VirtualCamera(device) = output_dest {
+        match VirtualCamera::open(device, width, height, fps) {
+            Ok(camera) => Some(camera),
+            Err(error) => {
+                virtual_camera_warning = Some(format!(
+                    "Camera preview only; virtual camera unavailable: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let _ = tx
+        .send(WorkerMsg::Status(virtual_camera_warning.unwrap_or_else(
+            || format!("Camera preview · {width}×{height}@{fps}"),
+        )));
+
+    let mut frames = 0_u64;
+    let mut sample_started = std::time::Instant::now();
+    let mut last_frame_at = std::time::Instant::now();
+    while !stop_flag.load(Ordering::Acquire) {
+        let frame = match camera.next_frame_result() {
+            Ok(frame) => frame,
+            Err(error) => {
+                anyhow::ensure!(
+                    last_frame_at.elapsed() < Duration::from_secs(5),
+                    "Webcam stopped delivering frames for 5 seconds: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(4));
+                continue;
+            }
+        };
+        last_frame_at = std::time::Instant::now();
+        if let Some(camera) = &mut virtual_camera {
+            camera.send_frame(&frame.data)?;
+        }
+        let _ = tx.try_send(WorkerMsg::Frame(frame.data, frame.width, frame.height));
+
+        frames += 1;
+        let elapsed = sample_started.elapsed();
+        if elapsed >= Duration::from_millis(500) {
+            let _ = tx.try_send(WorkerMsg::Fps(frames as f32 / elapsed.as_secs_f32()));
+            frames = 0;
+            sample_started = std::time::Instant::now();
+        }
+        ctx.request_repaint();
+    }
+    Ok(())
+}
+
 /// Webcam live path: open webcam → loop frames → swap each → vcam + preview.
 fn run_webcam_loop(
     gpu: Arc<GpuOps>,
     models_dir: PathBuf,
     webcam_idx: usize,
+    webcam_width: u32,
+    webcam_height: u32,
+    webcam_fps: u32,
     target_path: PathBuf,
     params: FaceSwapParams,
     provider: ExecutionProvider,
     output_dest: OutputDest,
-    tx: mpsc::Sender<WorkerMsg>,
+    tx: mpsc::SyncSender<WorkerMsg>,
     ctx: egui::Context,
     stream: Arc<cudarc::driver::CudaStream>,
     stop_flag: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")] gpu_preview: Option<Arc<crate::gpu_preview::LinuxPreviewBridge>>,
 ) -> anyhow::Result<()> {
-    use crate::io::video::FrameSource;
     let _ = tx.send(WorkerMsg::Status("Setting up target face".into()));
     let mut engine = LiveEngine::new_with_provider(
         gpu.clone(),
@@ -1246,17 +1512,52 @@ fn run_webcam_loop(
         &stream,
     )?;
 
-    let mut frames = FrameRing::new(stream.context(), &stream, FrameRing::DEFAULT_CAPACITY)?;
-
     let _ = tx.send(WorkerMsg::Status("Opening webcam".into()));
-    let (vw, vh) = (640u32, 480u32);
-    let mut cam = crate::io::webcam::WebcamSource::new(webcam_idx, vw, vh, 60.0)?;
-    let (camera_width, camera_height) = cam.dimensions();
-    let _ = tx.send(WorkerMsg::Status("Webcam opened".into()));
+    let (capture_worker, capture_info) = crate::io::webcam::WebcamCaptureWorker::spawn(
+        webcam_idx,
+        webcam_width,
+        webcam_height,
+        webcam_fps as f32,
+        Arc::clone(&stop_flag),
+    )?;
+    let (camera_width, camera_height) = (capture_info.width, capture_info.height);
+    let camera_fps = capture_info.fps.round().max(1.0) as u32;
+    #[cfg(target_os = "linux")]
+    let gpu_preview = gpu_preview.filter(|preview| {
+        let geometry = preview.geometry();
+        let matches = geometry.width() == camera_width && geometry.height() == camera_height;
+        if !matches {
+            tracing::warn!(
+                "GPU preview geometry {}x{} differs from camera {}x{}; using CPU preview",
+                geometry.width(),
+                geometry.height(),
+                camera_width,
+                camera_height
+            );
+        }
+        matches
+    });
+    let mut frames = FrameRing::new_for_dimensions(
+        stream.context(),
+        &stream,
+        FrameRing::DEFAULT_CAPACITY,
+        camera_width,
+        camera_height,
+    )?;
+    stream.context().bind_to_thread()?;
+    let mut nvjpeg = crate::io::nvjpeg::NvJpegDecoder::load().ok();
+    let decoder_name = if nvjpeg.is_some() {
+        "nvJPEG"
+    } else {
+        "CPU JPEG fallback"
+    };
+    let _ = tx.send(WorkerMsg::Status(format!(
+        "Webcam opened · {camera_width}×{camera_height}@{camera_fps} · {decoder_name}"
+    )));
 
     let mut virtual_camera_warning = None;
     let mut vcam = if let OutputDest::VirtualCamera(dev) = &output_dest {
-        match VirtualCamera::open(*dev, camera_width, camera_height, 60) {
+        match VirtualCamera::open(*dev, camera_width, camera_height, camera_fps) {
             Ok(camera) => Some(camera),
             Err(error) => {
                 virtual_camera_warning =
@@ -1272,30 +1573,81 @@ fn run_webcam_loop(
     let mut last_t = std::time::Instant::now();
     let mut frame_n = 0u64;
     let mut warmed = false;
-    let mut last_frame_at = std::time::Instant::now();
+    let live_profiling = std::env::var_os("NOPERSON_PROFILE_GPU").is_some_and(|value| {
+        !matches!(
+            value.to_string_lossy().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "off"
+        )
+    });
+    let mut live_profile_samples = 0_u32;
+    let mut live_profile_ms = [0.0_f64; 5];
     let _ = tx.send(WorkerMsg::Status(
         virtual_camera_warning.unwrap_or_else(|| "Waiting for first frame".to_owned()),
     ));
     loop {
+        let cycle_started = std::time::Instant::now();
         if stop_flag.load(Ordering::Acquire) {
             break;
         }
 
-        let Some(frame) = cam.next_frame() else {
-            anyhow::ensure!(
-                last_frame_at.elapsed() < Duration::from_secs(5),
-                "Webcam stopped delivering frames for 5 seconds"
-            );
-            std::thread::sleep(Duration::from_millis(16));
+        let Some(capture) = capture_worker.recv_latest(Duration::from_millis(100))? else {
             continue;
         };
-        last_frame_at = std::time::Instant::now();
-        let (fw, fh) = (frame.width, frame.height);
+        let capture_finished = std::time::Instant::now();
+        let (fw, fh) = match &capture {
+            crate::io::webcam::WebcamCapture::Mjpeg { width, height, .. } => (*width, *height),
+            crate::io::webcam::WebcamCapture::Rgb(frame) => (frame.width, frame.height),
+        };
         let slot = frames.acquire(fw, fh)?;
         let active = 3 * fw as usize * fh as usize;
-        gpu.upload_into_u8(&frame.data, &mut slot.u8_in)?;
-        gpu.hwc_u8_to_chw_f32(&slot.u8_in, &mut slot.chw, fh, fw)?;
+        match capture {
+            crate::io::webcam::WebcamCapture::Mjpeg {
+                buffer,
+                width,
+                height,
+            } => {
+                let data = buffer.buffer();
+                let decode_result = nvjpeg
+                    .as_mut()
+                    .map(|decoder| decoder.decode_into(data, &mut slot.u8_in, &stream));
+                match decode_result {
+                    Some(Ok((decoded_width, decoded_height))) => anyhow::ensure!(
+                        (decoded_width, decoded_height) == (width, height),
+                        "nvJPEG geometry {decoded_width}x{decoded_height} differs from camera {width}x{height}"
+                    ),
+                    Some(Err(error)) => {
+                        nvjpeg = None;
+                        let _ = tx.send(WorkerMsg::Status(format!(
+                            "nvJPEG disabled; using CPU JPEG fallback: {error}"
+                        )));
+                        let rgb = image::load_from_memory(data)
+                            .map_err(|error| anyhow::anyhow!("MJPEG frame decode failed: {error}"))?
+                            .into_rgb8();
+                        anyhow::ensure!(
+                            rgb.dimensions() == (width, height),
+                            "CPU JPEG geometry differs from camera frame"
+                        );
+                        gpu.upload_into_u8(rgb.as_raw(), &mut slot.u8_in)?;
+                    }
+                    None => {
+                        let rgb = image::load_from_memory(data)
+                            .map_err(|error| anyhow::anyhow!("MJPEG frame decode failed: {error}"))?
+                            .into_rgb8();
+                        anyhow::ensure!(
+                            rgb.dimensions() == (width, height),
+                            "CPU JPEG geometry differs from camera frame"
+                        );
+                        gpu.upload_into_u8(rgb.as_raw(), &mut slot.u8_in)?;
+                    }
+                }
+            }
+            crate::io::webcam::WebcamCapture::Rgb(frame) => {
+                gpu.upload_into_u8(&frame.data, &mut slot.u8_in)?;
+            }
+        }
+        let input_finished = std::time::Instant::now();
 
+        let was_warmed = warmed;
         if !warmed {
             let _ = tx.send(WorkerMsg::Status(format!(
                 "Warming up {}x",
@@ -1304,7 +1656,6 @@ fn run_webcam_loop(
             // Three real-shape passes populate cuDNN/ORT algorithm caches and
             // touch every persistent ring/workspace allocation before live work.
             for _ in 0..3 {
-                gpu.upload_into_u8(&frame.data, &mut slot.u8_in)?;
                 gpu.hwc_u8_to_chw_f32(&slot.u8_in, &mut slot.chw, fh, fw)?;
                 let _ = engine.process_chw(&mut slot.chw, fh, fw)?;
             }
@@ -1312,22 +1663,49 @@ fn run_webcam_loop(
             warmed = true;
             let _ = tx.send(WorkerMsg::Status("Running".into()));
             // Restore the first live frame after destructive warm-up passes.
-            gpu.upload_into_u8(&frame.data, &mut slot.u8_in)?;
             gpu.hwc_u8_to_chw_f32(&slot.u8_in, &mut slot.chw, fh, fw)?;
             last_t = std::time::Instant::now();
             frame_n = 0;
+        } else {
+            gpu.hwc_u8_to_chw_f32(&slot.u8_in, &mut slot.chw, fh, fw)?;
         }
 
         let result = engine.process_chw(&mut slot.chw, fh, fw)?;
-        let _ = tx.send(WorkerMsg::FaceCount(result.faces_detected));
+        let process_finished = std::time::Instant::now();
+        let _ = tx.try_send(WorkerMsg::FaceCount(result.faces_detected));
 
-        gpu.chw_f32_to_hwc_u8(&slot.chw, &mut slot.u8_out, fh, fw)?;
-        let out_view = slot.u8_out.slice(..active);
-        let host_out = slot.host_out.as_mut_slice()?;
-        gpu.stream.memcpy_dtoh(&out_view, &mut host_out[..active])?;
-        gpu.sync()?;
-        let out = host_out[..active].to_vec();
-        let _ = tx.send(WorkerMsg::Frame(out.clone(), fw, fh));
+        #[cfg(target_os = "linux")]
+        let gpu_preview_active = gpu_preview.is_some();
+        #[cfg(not(target_os = "linux"))]
+        let gpu_preview_active = false;
+
+        let needs_host_output = vcam.is_some() || save_to_file || !gpu_preview_active;
+        if needs_host_output {
+            gpu.chw_f32_to_hwc_u8(&slot.chw, &mut slot.u8_out, fh, fw)?;
+            let out_view = slot.u8_out.slice(..active);
+            let host_out = slot.host_out.as_mut_slice()?;
+            gpu.stream.memcpy_dtoh(&out_view, &mut host_out[..active])?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(preview) = &gpu_preview {
+            // The bridge sync also completes an optional V4L2/file readback,
+            // so the hot path pays for one stream boundary, not two.
+            if !preview.publish(&gpu, &slot.chw)? && needs_host_output {
+                gpu.sync()?;
+            }
+        } else if needs_host_output {
+            gpu.sync()?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        if needs_host_output {
+            gpu.sync()?;
+        }
+        let out = if needs_host_output {
+            let host_out = slot.host_out.as_mut_slice()?;
+            host_out[..active].to_vec()
+        } else {
+            Vec::new()
+        };
         if let Some(v) = &mut vcam {
             send_virtual_camera_frame(v, &gpu, &slot.chw, &out, fw, fh)?;
         }
@@ -1343,13 +1721,43 @@ fn run_webcam_loop(
             };
             let _ = image::save_buffer(&name, &out, fw, fh, image::ColorType::Rgb8);
         }
+        if !gpu_preview_active {
+            let _ = tx.try_send(WorkerMsg::Frame(out, fw, fh));
+        }
+        let output_finished = std::time::Instant::now();
+
+        if live_profiling && was_warmed {
+            for (total, elapsed) in live_profile_ms.iter_mut().zip([
+                capture_finished.duration_since(cycle_started),
+                input_finished.duration_since(capture_finished),
+                process_finished.duration_since(input_finished),
+                output_finished.duration_since(process_finished),
+                output_finished.duration_since(cycle_started),
+            ]) {
+                *total += elapsed.as_secs_f64() * 1_000.0;
+            }
+            live_profile_samples += 1;
+            if live_profile_samples == 30 {
+                let average = live_profile_ms.map(|total| total / f64::from(live_profile_samples));
+                tracing::info!(
+                    "[live-profile] total={:.2}ms | capture_wait={:.2}ms | input={:.2}ms | process={:.2}ms | output={:.2}ms",
+                    average[4],
+                    average[0],
+                    average[1],
+                    average[2],
+                    average[3]
+                );
+                live_profile_ms = [0.0; 5];
+                live_profile_samples = 0;
+            }
+        }
 
         frame_n += 1;
         let now = std::time::Instant::now();
         let dt = now.duration_since(last_t);
         if dt >= Duration::from_millis(500) {
             let fps = frame_n as f32 / dt.as_secs_f32();
-            let _ = tx.send(WorkerMsg::Fps(fps));
+            let _ = tx.try_send(WorkerMsg::Fps(fps));
             frame_n = 0;
             last_t = now;
         }
@@ -1373,6 +1781,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         // Drain worker channel every frame.
+        self.poll_webcam_probe();
         self.poll_worker(ctx);
     }
 
@@ -1578,9 +1987,14 @@ impl eframe::App for App {
             });
 
             // ── Output preview ──
-            if self.output_preview.is_some() || self.output_texture.is_some() {
+            if self.output_preview.is_some()
+                || self.output_texture.is_some()
+                || self.output_gpu_texture.is_some()
+            {
                 card(ui, "Preview", |ui| {
-                    if let Some(texture) = &self.output_texture {
+                    if let Some(texture) = self.output_gpu_texture {
+                        ui.add(egui::Image::new(texture).max_size(egui::vec2(420.0, 236.0)));
+                    } else if let Some(texture) = &self.output_texture {
                         ui.add(
                             egui::Image::new(egui::load::SizedTexture::from_handle(texture))
                                 .max_size(egui::vec2(420.0, 236.0)),
@@ -1727,7 +2141,11 @@ impl eframe::App for App {
     }
 }
 
-fn send_worker_done(tx: &mpsc::Sender<WorkerMsg>, ctx: &egui::Context, result: anyhow::Result<()>) {
+fn send_worker_done(
+    tx: &mpsc::SyncSender<WorkerMsg>,
+    ctx: &egui::Context,
+    result: anyhow::Result<()>,
+) {
     let _ = tx.send(WorkerMsg::Done(result));
     ctx.request_repaint();
 }
@@ -1802,6 +2220,22 @@ mod tests {
     }
 
     #[test]
+    fn webcam_without_a_face_starts_camera_preview_instead_of_failing() {
+        assert_eq!(
+            start_intent(&InputSource::Webcam(0), None),
+            Some(StartIntent::CameraPreview)
+        );
+        assert_eq!(
+            start_intent(&InputSource::Webcam(0), Some(Path::new("face.jpg"))),
+            Some(StartIntent::FaceSwap)
+        );
+        assert_eq!(
+            start_intent(&InputSource::Photo("photo.jpg".into()), None),
+            None
+        );
+    }
+
+    #[test]
     fn output_viewport_toggles_between_fit_and_natural_size() {
         let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 400.0));
         let image_size = egui::vec2(1000.0, 500.0);
@@ -1871,6 +2305,12 @@ mod tests {
         }
         assert!(harness.query_by_label("Video").is_none());
         assert!(harness.query_by_label("Preview").is_none());
+        assert!(
+            harness
+                .query_by_label(&elegance::glyphs::POWER.to_string())
+                .is_none(),
+            "the redundant private-use power glyph collides with Inter and renders as G"
+        );
         for unsupported in [
             "Color correction",
             "Occlusion mask",
@@ -2060,6 +2500,19 @@ mod tests {
     }
 
     #[test]
+    fn preview_mailbox_renders_only_the_latest_queued_frame() {
+        let mut app = App::new(PathBuf::from("models"));
+        let (tx, rx) = std::sync::mpsc::sync_channel(3);
+        app.msg_rx = Some(rx);
+        tx.send(WorkerMsg::Frame(vec![1, 1, 1], 1, 1)).unwrap();
+        tx.send(WorkerMsg::Frame(vec![2, 2, 2], 1, 1)).unwrap();
+
+        app.poll_worker(&egui::Context::default());
+
+        assert_eq!(app.output_frame, Some((vec![2, 2, 2], 1, 1)));
+    }
+
+    #[test]
     fn terminal_worker_message_wakes_the_root_viewport() {
         use std::sync::atomic::AtomicUsize;
 
@@ -2069,7 +2522,7 @@ mod tests {
         ctx.set_request_repaint_callback(move |_| {
             observed_repaints.fetch_add(1, Ordering::Relaxed);
         });
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
 
         send_worker_done(&tx, &ctx, Ok(()));
 

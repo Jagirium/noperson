@@ -67,6 +67,7 @@ for library in \
     libcufft.so.11 \
     libnvrtc.so.12 \
     libnvrtc-builtins.so.12.8 \
+    libnvjpeg.so.12 \
     libnppc.so.12 \
     libnppig.so.12 \
     libnppif.so.12 \
@@ -149,7 +150,8 @@ print(h.hexdigest())' "$file" \
 manifest="$stage/BLAKE3SUMS"
 while IFS= read -r -d '' file; do
     relative=${file#"$stage/"}
-    printf '%s  %s\n' "$(hash_file "$file")" "$relative"
+    hash=$(hash_file "$file") || die "BLAKE3 hashing failed: $relative"
+    printf '%s  %s\n' "$hash" "$relative"
 done < <(find "$stage" -type f ! -name BLAKE3SUMS -print0 | sort -z) >"$manifest"
 
 mv -- "$stage" "$output"

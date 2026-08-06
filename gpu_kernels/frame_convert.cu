@@ -56,6 +56,31 @@ void chw_f32_to_hwc_u8_kernel(
     hwc[dst + 2] = (unsigned char)b;
 }
 
+extern "C" __global__
+void chw_f32_to_rgba_u8_pitched_kernel(
+    const float* __restrict__ chw,
+    unsigned char* __restrict__ rgba,
+    const unsigned int H,
+    const unsigned int W,
+    const unsigned int row_bytes
+) {
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int total = H * W;
+    if (idx >= total) return;
+
+    unsigned int y = idx / W;
+    unsigned int x = idx % W;
+    unsigned int plane = H * W;
+    unsigned int dst = y * row_bytes + x * 4;
+    float r = fminf(fmaxf(chw[0 * plane + idx], 0.0f), 255.0f);
+    float g = fminf(fmaxf(chw[1 * plane + idx], 0.0f), 255.0f);
+    float b = fminf(fmaxf(chw[2 * plane + idx], 0.0f), 255.0f);
+    rgba[dst + 0] = (unsigned char)r;
+    rgba[dst + 1] = (unsigned char)g;
+    rgba[dst + 2] = (unsigned char)b;
+    rgba[dst + 3] = 255;
+}
+
 __device__ __forceinline__
 float sample_chw_bilinear(
     const float* __restrict__ chw,

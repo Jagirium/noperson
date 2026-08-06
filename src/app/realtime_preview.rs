@@ -16,7 +16,7 @@ pub(super) fn viewport_id() -> egui::ViewportId {
 
 #[derive(Clone)]
 pub(super) struct RealtimePreviewSnapshot {
-    pub(super) texture: Option<egui::TextureHandle>,
+    pub(super) texture: Option<egui::load::SizedTexture>,
     pub(super) fps: f32,
     pub(super) face_count: usize,
     pub(super) provider: ExecutionProvider,
@@ -131,7 +131,7 @@ pub(super) fn render_content(ui: &mut egui::Ui, snapshot: &RealtimePreviewSnapsh
             if let Some(texture) = &snapshot.texture {
                 let image_rect = egui::Rect::from_center_size(
                     stage_rect.center(),
-                    fit_image_size(texture.size_vec2(), stage_rect.size()),
+                    fit_image_size(texture.size, stage_rect.size()),
                 );
                 let corner_radius = egui::CornerRadius::same(12);
                 ui.painter().add(
@@ -143,7 +143,7 @@ pub(super) fn render_content(ui: &mut egui::Ui, snapshot: &RealtimePreviewSnapsh
                     }
                     .as_shape(image_rect, corner_radius),
                 );
-                egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                egui::Image::new(*texture)
                     .fit_to_exact_size(image_rect.size())
                     .corner_radius(corner_radius)
                     .alt_text("Live swapped output")
@@ -351,7 +351,7 @@ mod tests {
                 render_content(
                     ui,
                     &RealtimePreviewSnapshot {
-                        texture: Some(texture),
+                        texture: Some(egui::load::SizedTexture::from_handle(&texture)),
                         fps: 27.4,
                         face_count: 1,
                         provider: ExecutionProvider::TensorRT,
@@ -377,7 +377,7 @@ mod tests {
                 render_content(
                     ui,
                     &RealtimePreviewSnapshot {
-                        texture: Some(texture),
+                        texture: Some(egui::load::SizedTexture::from_handle(&texture)),
                         fps: 27.4,
                         face_count: 1,
                         provider: ExecutionProvider::TensorRT,

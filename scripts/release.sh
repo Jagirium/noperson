@@ -2,7 +2,20 @@
 set -Eeuo pipefail
 
 root=$(cd -- "$(dirname -- "$0")" && pwd)
-choice=${1:-}
+choice=
+dev_args=()
+for argument in "$@"; do
+    case "$argument" in
+        --dev) dev_args+=(--dev) ;;
+        *)
+            test -z "$choice" || {
+                printf 'Unknown release variant: %s\n' "$argument" >&2
+                exit 2
+            }
+            choice=$argument
+            ;;
+    esac
+done
 if test -z "$choice"; then
     printf '%s\n' \
         'Choose release build:' \
@@ -14,10 +27,10 @@ fi
 
 case "$choice" in
     1|docker|--docker)
-        exec "$root/release/linux.sh" --docker
+        exec "$root/release/linux.sh" --docker "${dev_args[@]}"
         ;;
     2|native|--native)
-        exec "$root/release/linux.sh" --native
+        exec "$root/release/linux.sh" --native "${dev_args[@]}"
         ;;
     3|windows|--windows)
         case "$(uname -s)" in

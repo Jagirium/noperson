@@ -7,6 +7,7 @@ FFMPEG_VERSION=8.1.2
 FFMPEG_SHA256=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
 NV_CODEC_HEADERS_VERSION=n13.0.19.0
 NV_CODEC_HEADERS_SHA256=86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116
+FFMPEG_RUNTIME_CACHE_VERSION=1
 
 die() {
     printf 'release: %s\n' "$*" >&2
@@ -16,11 +17,13 @@ die() {
 command -v git >/dev/null || die 'git is required'
 command -v tar >/dev/null || die 'tar is required'
 command -v readelf >/dev/null || die 'readelf is required'
+command -v zstd >/dev/null || die 'zstd is required'
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die 'run from a git worktree'
 
 verify_ort_cuda12() {
+    local release_dir=$1
     local provider needed
-    provider=$(find -L target/release -maxdepth 1 -type f \
+    provider=$(find -L "$release_dir" -maxdepth 1 -type f \
         -name 'libonnxruntime_providers_cuda.so' -print -quit)
     test -n "$provider" || die 'CUDAExecutionProvider library is missing'
     needed=$(readelf -d "$provider")
@@ -29,22 +32,47 @@ verify_ort_cuda12() {
     case "$needed" in *'.so.13'*) die 'CUDA 13 dependency leaked into CUDA 12 release' ;; esac
 }
 
+download_verified() {
+    local url=$1
+    local output=$2
+    local expected_sha256=$3
+    local partial="${output}.part"
+    if test -f "$output" \
+        && printf '%s  %s\n' "$expected_sha256" "$output" | sha256sum -c --status; then
+        return
+    fi
+    if ! curl -fL --retry 3 --continue-at - "$url" -o "$partial"; then
+        curl -fL --retry 3 "$url" -o "$partial"
+    fi
+    printf '%s  %s\n' "$expected_sha256" "$partial" | sha256sum -c -
+    mv -f -- "$partial" "$output"
+}
+
 build_native_video_dependencies() {
     local root=$1
     local ffmpeg_archive="$root/ffmpeg-${FFMPEG_VERSION}.tar.xz"
     local headers_archive="$root/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz"
-    curl -fL --retry 3 "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
-        -o "$ffmpeg_archive"
-    printf '%s  %s\n' "$FFMPEG_SHA256" "$ffmpeg_archive" | sha256sum -c -
-    tar -xf "$ffmpeg_archive" -C "$root"
-    curl -fL --retry 3 \
+    mkdir -p "$root"
+    download_verified \
+        "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+        "$ffmpeg_archive" "$FFMPEG_SHA256"
+    download_verified \
         "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/${NV_CODEC_HEADERS_VERSION}.tar.gz" \
-        -o "$headers_archive"
-    printf '%s  %s\n' "$NV_CODEC_HEADERS_SHA256" "$headers_archive" | sha256sum -c -
-    tar -xf "$headers_archive" -C "$root"
+        "$headers_archive" "$NV_CODEC_HEADERS_SHA256"
     ffmpeg_source="$root/ffmpeg-${FFMPEG_VERSION}"
-    ffmpeg_prefix="$root/ffmpeg-runtime"
-    nv_codec_headers="$root/nv-codec-headers-${NV_CODEC_HEADERS_VERSION#n}/include"
+    ffmpeg_prefix="$root/ffmpeg-runtime-v${FFMPEG_RUNTIME_CACHE_VERSION}"
+    nv_codec_headers="$root/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}/include"
+    if ! test -f "$ffmpeg_source/configure"; then
+        tar -xf "$ffmpeg_archive" -C "$root"
+    fi
+    if ! test -f "$nv_codec_headers/ffnvcodec/nvEncodeAPI.h"; then
+        tar -xf "$headers_archive" -C "$root"
+    fi
+    if test -f "$ffmpeg_prefix/.complete" \
+        && test -f "$ffmpeg_prefix/lib/pkgconfig/libavformat.pc"; then
+        printf 'release: using cached minimal FFmpeg runtime\n'
+        return
+    fi
     (
         cd "$ffmpeg_source"
         ./configure \
@@ -67,8 +95,10 @@ build_native_video_dependencies() {
             --disable-hwaccels \
             --disable-filters \
             --disable-devices
-        make -j2
-        make install
+        printf 'release: building minimal FFmpeg runtime\n'
+        make -s -j"$(nproc)"
+        make -s install
+        touch "$ffmpeg_prefix/.complete"
     )
 }
 
@@ -107,16 +137,30 @@ verify_native_video_bundle() {
     done
 }
 
-mode=${1:---docker}
-case "$mode" in
-    --docker|--native) ;;
-    *) die 'usage: scripts/release/linux.sh [--docker|--native]' ;;
-esac
+mode=
+dev_mode=false
+for argument in "$@"; do
+    case "$argument" in
+        --docker|--native)
+            test -z "$mode" || test "$mode" = "$argument" \
+                || die 'choose exactly one build mode: --docker or --native'
+            mode=$argument
+            ;;
+        --dev)
+            dev_mode=true
+            ;;
+        *) die 'usage: scripts/release/linux.sh [--docker|--native] [--dev]' ;;
+    esac
+done
+mode=${mode:---docker}
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
-git diff-index --quiet HEAD -- || die 'tracked files are dirty; commit the release inputs first'
-test -z "$(git status --porcelain --untracked-files=normal)" || die 'untracked release inputs exist'
+if test "$dev_mode" != true; then
+    git diff-index --quiet HEAD -- || die 'tracked files are dirty; commit the release inputs first'
+    test -z "$(git status --porcelain --untracked-files=normal)" \
+        || die 'untracked release inputs exist'
+fi
 
 machine=$(uname -m)
 case "$machine" in
@@ -134,7 +178,13 @@ SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}
 export SOURCE_DATE_EPOCH
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/noperson-release.XXXXXXXX")
-cleanup() { rm -rf -- "$work_dir"; }
+archive_tmp=
+checksum_tmp=
+cleanup() {
+    rm -rf -- "$work_dir"
+    test -z "$archive_tmp" || rm -f -- "$archive_tmp"
+    test -z "$checksum_tmp" || rm -f -- "$checksum_tmp"
+}
 trap cleanup EXIT INT TERM
 source_dir="$work_dir/source"
 mkdir -p "$source_dir" "$repo_root/dist"
@@ -152,27 +202,44 @@ if test "$mode" = --native; then
     cuda_root=${CUDA_HOME:-${CUDA_PATH:-/usr/local/cuda}}
     nvcc="$cuda_root/bin/nvcc"
     test -x "$nvcc" || die "nvcc is missing: $nvcc"
-    case "$("$nvcc" --version | tail -1)" in
+    nvcc_version=$("$nvcc" --version)
+    case "$nvcc_version" in
         *'release 12.8'*) ;;
         *) die 'CUDA Toolkit release 12.8 is required' ;;
     esac
-    rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+    if test "$dev_mode" = true \
+        && rustup run "$RUST_TOOLCHAIN" rustc --version >/dev/null 2>&1; then
+        printf 'release: using cached Rust toolchain %s\n' "$RUST_TOOLCHAIN"
+    else
+        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+    fi
     export CUDA_HOME="$cuda_root"
     export ORT_CUDA_VERSION=12
     export CARGO_INCREMENTAL=0
+    export CARGO_PROFILE_RELEASE_LTO=true
     export NOPERSON_CUDA_ARCH=compute_75
     export CARGO_BUILD_JOBS=2
-    build_native_video_dependencies "$work_dir"
+    dependency_root=$work_dir
+    if test "$dev_mode" = true; then
+        dependency_root="$repo_root/.cache/release/linux-${artifact_arch}"
+        release_target_dir="$dependency_root/cargo-target"
+    else
+        release_target_dir="$work_dir/cargo-target"
+    fi
+    build_native_video_dependencies "$dependency_root"
     export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig"
     export NOPERSON_NV_CODEC_HEADERS="$nv_codec_headers"
     export NOPERSON_REQUIRE_NV_CODEC_HEADERS=1
-    export RUSTFLAGS="--remap-path-prefix=${repo_root}=. -C link-arg=-Wl,--build-id=none"
-    cargo "+$RUST_TOOLCHAIN" build --locked --release
-    verify_ort_cuda12
+    if test "$dev_mode" != true; then
+        export RUSTFLAGS="--remap-path-prefix=${repo_root}=. -C link-arg=-Wl,--build-id=none"
+    fi
+    CARGO_TARGET_DIR="$release_target_dir" \
+        cargo "+$RUST_TOOLCHAIN" build --locked --release
+    verify_ort_cuda12 "$release_target_dir/release"
 
     stage="$work_dir/$artifact"
     mkdir -p "$stage"
-    install -m 0755 target/release/noperson "$stage/noperson"
+    install -m 0755 "$release_target_dir/release/noperson" "$stage/noperson"
     stage_native_video_dependencies "$stage"
     verify_native_video_bundle "$stage"
     install -m 0644 LICENSE README.md "$stage/"
@@ -185,13 +252,22 @@ if test "$mode" = --native; then
         printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | awk '{print $1}')"
     } >"$stage/BUILD-MANIFEST"
     find "$stage" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
+    archive="$repo_root/dist/${artifact}.tar.zst"
+    checksum="${archive}.sha256"
+    archive_tmp=$(mktemp "$repo_root/dist/.${artifact}.tar.zst.XXXXXXXX")
+    checksum_tmp=$(mktemp "$repo_root/dist/.${artifact}.tar.zst.sha256.XXXXXXXX")
     tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 \
         --numeric-owner -C "$work_dir" -cf - "$artifact" \
-        | gzip -n -9 >"$repo_root/dist/${artifact}.tar.gz"
-    cd "$repo_root/dist"
-    sha256sum "${artifact}.tar.gz" >"${artifact}.tar.gz.sha256"
-    printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.gz"
-    printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.gz.sha256"
+        | zstd -q -T0 -19 >"$archive_tmp"
+    printf '%s  %s\n' "$(sha256sum "$archive_tmp" | awk '{print $1}')" \
+        "${artifact}.tar.zst" >"$checksum_tmp"
+    chmod 0644 "$archive_tmp" "$checksum_tmp"
+    mv -f -- "$archive_tmp" "$archive"
+    archive_tmp=
+    mv -f -- "$checksum_tmp" "$checksum"
+    checksum_tmp=
+    printf 'release: %s\n' "$archive"
+    printf 'release: %s\n' "$checksum"
     exit 0
 fi
 
@@ -246,7 +322,7 @@ apt-get -o Acquire::Check-Valid-Until=false update
 apt-get -o Acquire::Check-Valid-Until=false install -y --no-install-recommends \
     build-essential ca-certificates curl git libclang-dev libgtk-3-dev libjpeg-dev \
     libssl-dev libudev-dev libv4l-dev libwayland-dev libx11-dev libxkbcommon-dev \
-    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev nasm patchelf pkg-config xz-utils
+    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev nasm patchelf pkg-config xz-utils zstd
 rm -rf /var/lib/apt/lists/*
 
 export CARGO_HOME=/opt/rust/cargo
@@ -257,6 +333,7 @@ export PATH="$CARGO_HOME/bin:$PATH"
 export CUDA_HOME=/usr/local/cuda
 export ORT_CUDA_VERSION=12
 export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_RELEASE_LTO=true
 export NOPERSON_CUDA_ARCH=compute_75
 export CARGO_BUILD_JOBS=2
 export RUSTFLAGS="--remap-path-prefix=/build/source=. -C link-arg=-Wl,--build-id=none"
@@ -285,12 +362,13 @@ cd "$ffmpeg_source"
     --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
     --disable-encoders --disable-decoders --disable-hwaccels \
     --disable-filters --disable-devices
-make -j2
-make install
+printf 'release: building minimal FFmpeg runtime\n'
+make -s -j"$(nproc)"
+make -s install
 
 cd /build/source
 export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig"
-export NOPERSON_NV_CODEC_HEADERS="/build/dependencies/nv-codec-headers-${NV_CODEC_HEADERS_VERSION#n}/include"
+export NOPERSON_NV_CODEC_HEADERS="/build/dependencies/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}/include"
 export NOPERSON_REQUIRE_NV_CODEC_HEADERS=1
 cargo build --locked --release
 
@@ -341,17 +419,24 @@ install -m 0644 LICENSE README.md "$stage/"
 
 find "$stage" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
 cd /build/stage
+archive="/dist/${RELEASE_ARTIFACT}.tar.zst"
+checksum="${archive}.sha256"
+archive_tmp=$(mktemp "/dist/.${RELEASE_ARTIFACT}.tar.zst.XXXXXXXX")
+checksum_tmp=$(mktemp "/dist/.${RELEASE_ARTIFACT}.tar.zst.sha256.XXXXXXXX")
 tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 \
     --numeric-owner -cf - "$RELEASE_ARTIFACT" \
-    | gzip -n -9 >"/dist/${RELEASE_ARTIFACT}.tar.gz"
-cd /dist
-sha256sum "${RELEASE_ARTIFACT}.tar.gz" >"${RELEASE_ARTIFACT}.tar.gz.sha256"
-chown "$OUTPUT_UID:$OUTPUT_GID" "${RELEASE_ARTIFACT}.tar.gz" "${RELEASE_ARTIFACT}.tar.gz.sha256"
+    | zstd -q -T0 -19 >"$archive_tmp"
+printf '%s  %s\n' "$(sha256sum "$archive_tmp" | awk '{print $1}')" \
+    "${RELEASE_ARTIFACT}.tar.zst" >"$checksum_tmp"
+chmod 0644 "$archive_tmp" "$checksum_tmp"
+mv -f -- "$archive_tmp" "$archive"
+mv -f -- "$checksum_tmp" "$checksum"
+chown "$OUTPUT_UID:$OUTPUT_GID" "$archive" "$checksum"
 BUILD
 
-test -f "$repo_root/dist/${artifact}.tar.gz" \
+test -f "$repo_root/dist/${artifact}.tar.zst" \
     || die 'container did not export archive'
-test -f "$repo_root/dist/${artifact}.tar.gz.sha256" \
+test -f "$repo_root/dist/${artifact}.tar.zst.sha256" \
     || die 'container did not export checksum'
-printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.gz"
-printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.gz.sha256"
+printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.zst"
+printf 'release: %s\n' "$repo_root/dist/${artifact}.tar.zst.sha256"

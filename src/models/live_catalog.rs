@@ -32,7 +32,7 @@ pub const LIVE_MODELS: &[LiveModel] = &[
         logical_name: "Inswapper128ArcFace",
         filename: "w600k_r50.onnx",
         blake3: "c9cc033a308d5cbe0006b8f2d695f13fe716c985cc4b676ad5c0a20a497a07cc",
-        release_blake3: None,
+        release_blake3: Some("3899d93a9ca878fa782fd474078fcb999b94c78a09e93bb079d9b0904f7f0a8b"),
     },
     LiveModel {
         logical_name: "Inswapper128",

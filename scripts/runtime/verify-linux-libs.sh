@@ -38,7 +38,7 @@ while read -r expected relative; do
     test -n "$expected" || continue
     file="$root/$relative"
     test -f "$file" || die "manifest entry is missing: $relative"
-    actual=$(hash_file "$file")
+    actual=$(hash_file "$file") || die "BLAKE3 hashing failed: $relative"
     test "$actual" = "$expected" || die "BLAKE3 mismatch: $relative"
 done <"$root/BLAKE3SUMS"
 

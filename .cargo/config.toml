@@ -1,3 +1,3 @@
 [build]
 # Avoid memory spikes from many concurrent rustc/linker processes.
-jobs = 2
+jobs = 16

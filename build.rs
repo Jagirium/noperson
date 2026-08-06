@@ -82,6 +82,9 @@ fn main() {
         println!("cargo:rerun-if-changed=native/video/nvcodec_encoder.cpp");
         println!("cargo:rerun-if-env-changed=NOPERSON_NV_CODEC_HEADERS");
         println!("cargo:rerun-if-env-changed=NOPERSON_REQUIRE_NV_CODEC_HEADERS");
+        println!(
+            "cargo:rerun-if-changed=.cache/dependencies/nv-codec-headers-n13.0.19.0/include/ffnvcodec/nvEncodeAPI.h"
+        );
 
         let object = format!("{out_dir}/jpeg_roundtrip.o");
         let archive = format!("{out_dir}/libnoperson_jpeg_roundtrip.a");
@@ -179,7 +182,10 @@ fn main() {
 
 fn nvcodec_include_path() -> Option<PathBuf> {
     let configured = env::var_os("NOPERSON_NV_CODEC_HEADERS").map(PathBuf::from);
+    let project_cache = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default())
+        .join(".cache/dependencies/nv-codec-headers-n13.0.19.0/include");
     let candidates = configured.into_iter().chain([
+        project_cache,
         PathBuf::from("/usr/include"),
         PathBuf::from("/usr/local/include"),
     ]);

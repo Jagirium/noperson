@@ -7,67 +7,14 @@ use super::editor::{MediaKind, MediaRole};
 use super::faces::{ARC_FACE_MODEL, EmbeddingMergeMethod};
 use super::state::{ExtraGuiPanel, ExtraGuiState};
 
-pub(super) fn render(
-    panel: ExtraGuiPanel,
-    ui: &mut egui::Ui,
-    state: &mut ExtraGuiState,
-    models_dir: &Path,
-) {
-    match panel {
-        ExtraGuiPanel::Media => media(ui, state),
-        ExtraGuiPanel::Faces => faces(ui, state),
-        ExtraGuiPanel::Preview => preview(ui, state),
-        ExtraGuiPanel::Timeline => timeline(ui, state),
-        ExtraGuiPanel::Parameters => parameters(ui, state),
-        ExtraGuiPanel::Settings => settings(ui, state, models_dir),
-    }
-}
-
 fn heading(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.heading(title);
     ui.label(egui::RichText::new(subtitle).weak());
     ui.add_space(12.0);
 }
 
-fn media(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
-    heading(
-        ui,
-        "Media workspace",
-        "Targets, source identities, cameras and the output queue.",
-    );
-    ui.columns(3, |columns| {
-        media_column(&mut columns[0], state, MediaRole::Target);
-        media_column(&mut columns[1], state, MediaRole::Source);
-        columns[2].group(|ui| {
-            ui.strong("Output queue");
-            ui.label("Preview, record and export jobs");
-            ui.add_space(8.0);
-            ui.label(format!("State: {}", state.runtime_phase));
-            if let Some((processed, total)) = state.runtime_progress {
-                ui.label(total.map_or_else(
-                    || format!("{processed} frames"),
-                    |total| format!("{processed}/{total} frames"),
-                ));
-                if let Some(total) = total.filter(|total| *total > 0) {
-                    ui.add(
-                        egui::ProgressBar::new(processed as f32 / total as f32).show_percentage(),
-                    );
-                }
-            }
-            if let Some(path) = &state.last_output {
-                ui.label(path.display().to_string());
-            }
-        });
-    });
-}
-
 fn media_column(ui: &mut egui::Ui, state: &mut ExtraGuiState, role: MediaRole) {
     ui.group(|ui| {
-        let title = match role {
-            MediaRole::Target => "Target media",
-            MediaRole::Source => "Source identities",
-        };
-        ui.strong(title);
         ui.horizontal_wrapped(|ui| {
             if ui.button("Add files").clicked() {
                 let dialog = media_dialog(state, role);
@@ -167,6 +114,8 @@ fn media_column(ui: &mut egui::Ui, state: &mut ExtraGuiState, role: MediaRole) {
                             state.faces.clear_targets();
                             state.timeline = super::EditorTimeline::default();
                             state.output_texture = None;
+                            state.output_gpu_texture = None;
+                            state.source_gpu_texture = None;
                             state.latest_output = None;
                             if auto_swap_enabled(state) {
                                 state.analysis_requested = true;
@@ -178,6 +127,120 @@ fn media_column(ui: &mut egui::Ui, state: &mut ExtraGuiState, role: MediaRole) {
             }
         }
     });
+}
+
+pub(super) fn media_dock(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
+    ui.set_min_width(250.0);
+    ui.label(egui::RichText::new("MEDIA BIN").strong().size(11.0));
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .id_salt("extra_media_dock")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new("TARGET MEDIA").weak().strong());
+            media_column(ui, state, MediaRole::Target);
+            ui.add_space(10.0);
+            ui.label(egui::RichText::new("SOURCE IDENTITIES").weak().strong());
+            media_column(ui, state, MediaRole::Source);
+            ui.add_space(10.0);
+            ui.group(|ui| {
+                ui.strong("OUTPUT QUEUE");
+                ui.label(format!("State: {}", state.runtime_phase));
+                if let Some((processed, total)) = state.runtime_progress {
+                    let fraction = total
+                        .filter(|total| *total > 0)
+                        .map_or(0.0, |total| processed as f32 / total as f32);
+                    ui.add(egui::ProgressBar::new(fraction).show_percentage());
+                }
+                if let Some(path) = &state.last_output {
+                    ui.label(
+                        egui::RichText::new(path.display().to_string())
+                            .small()
+                            .weak(),
+                    );
+                }
+            });
+        });
+}
+
+pub(super) fn player_workspace(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("PLAYER").strong().size(11.0));
+        ui.separator();
+        let selected = state
+            .media
+            .selected(MediaRole::Target)
+            .and_then(|id| state.media.item(id))
+            .and_then(|item| item.path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("No target selected");
+        ui.label(egui::RichText::new(selected).weak());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(&state.runtime_phase).weak());
+        });
+    });
+    ui.add_space(4.0);
+    preview_toolbar(ui, state);
+    ui.add_space(4.0);
+
+    let timeline_height = 126.0;
+    let canvas_height = (ui.available_height() - timeline_height).max(280.0);
+    let canvas_width = ui.available_width();
+    preview_canvas(ui, state, egui::vec2(canvas_width, canvas_height));
+    ui.add_space(6.0);
+    compact_timeline(ui, state);
+
+    if state.preview.detached {
+        let mut open = true;
+        egui::Window::new("Detached preview")
+            .open(&mut open)
+            .default_size(egui::vec2(960.0, 640.0))
+            .show(ui.ctx(), |ui| {
+                preview_canvas(ui, state, ui.available_size());
+            });
+        state.preview.detached = open;
+    }
+}
+
+pub(super) fn inspector(ui: &mut egui::Ui, state: &mut ExtraGuiState, models_dir: &Path) {
+    if !matches!(
+        state.active_panel,
+        ExtraGuiPanel::Faces | ExtraGuiPanel::Parameters | ExtraGuiPanel::Settings
+    ) {
+        state.active_panel = ExtraGuiPanel::Faces;
+    }
+    ui.label(egui::RichText::new("INSPECTOR").strong().size(11.0));
+    ui.horizontal(|ui| {
+        for panel in [
+            ExtraGuiPanel::Faces,
+            ExtraGuiPanel::Parameters,
+            ExtraGuiPanel::Settings,
+        ] {
+            if ui
+                .selectable_label(state.active_panel == panel, panel.label())
+                .clicked()
+            {
+                state.active_panel = panel;
+            }
+        }
+    });
+    ui.separator();
+    match state.active_panel {
+        ExtraGuiPanel::Faces => {
+            egui::ScrollArea::vertical()
+                .id_salt("extra_faces_inspector")
+                .auto_shrink([false, false])
+                .show(ui, |ui| faces(ui, state));
+        }
+        ExtraGuiPanel::Parameters => parameters(ui, state),
+        ExtraGuiPanel::Settings => {
+            egui::ScrollArea::vertical()
+                .id_salt("extra_settings_inspector")
+                .auto_shrink([false, false])
+                .show(ui, |ui| settings(ui, state, models_dir));
+        }
+        _ => unreachable!("inspector panel was normalized above"),
+    }
 }
 
 fn media_dialog(state: &ExtraGuiState, role: MediaRole) -> rfd::FileDialog {
@@ -252,6 +315,8 @@ pub(super) fn add_media_paths(state: &mut ExtraGuiState, role: MediaRole, paths:
             state.faces.clear_targets();
             state.timeline = super::EditorTimeline::default();
             state.output_texture = None;
+            state.output_gpu_texture = None;
+            state.source_gpu_texture = None;
             state.latest_output = None;
         }
         state.status = format!("Added {added} media item(s)");
@@ -644,28 +709,6 @@ fn save_embedding_file(state: &mut ExtraGuiState, force_dialog: bool) {
     }
 }
 
-fn preview(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
-    heading(
-        ui,
-        "Preview",
-        "GPU output canvas with pan, zoom, compare and detached viewing.",
-    );
-    preview_toolbar(ui, state);
-    ui.add_space(6.0);
-    preview_canvas(ui, state, ui.available_size());
-
-    if state.preview.detached {
-        let mut open = true;
-        egui::Window::new("Detached preview")
-            .open(&mut open)
-            .default_size(egui::vec2(960.0, 640.0))
-            .show(ui.ctx(), |ui| {
-                preview_canvas(ui, state, ui.available_size());
-            });
-        state.preview.detached = open;
-    }
-}
-
 fn preview_toolbar(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
     ui.horizontal(|ui| {
         if ui.button("−").on_hover_text("Zoom out").clicked() {
@@ -728,13 +771,22 @@ fn preview_canvas(ui: &mut egui::Ui, state: &mut ExtraGuiState, size: egui::Vec2
             ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
         }
     }
-    let active = state
-        .output_texture
-        .as_ref()
-        .or(state.source_texture.as_ref());
+    let source = state.source_gpu_texture.or_else(|| {
+        state
+            .source_texture
+            .as_ref()
+            .map(egui::load::SizedTexture::from_handle)
+    });
+    let output = state.output_gpu_texture.or_else(|| {
+        state
+            .output_texture
+            .as_ref()
+            .map(egui::load::SizedTexture::from_handle)
+    });
+    let active = output.or(source);
     if let Some(texture) = active {
         if state.preview.compare
-            && let (Some(source), Some(output)) = (&state.source_texture, &state.output_texture)
+            && let (Some(source), Some(output)) = (source, output)
         {
             let split = rect.center().x;
             paint_preview_texture(
@@ -793,14 +845,14 @@ fn preview_canvas(ui: &mut egui::Ui, state: &mut ExtraGuiState, size: egui::Vec2
 
 fn paint_preview_texture(
     ui: &egui::Ui,
-    texture: &egui::TextureHandle,
+    texture: egui::load::SizedTexture,
     canvas: egui::Rect,
     state: &ExtraGuiState,
     clip: egui::Rect,
 ) {
     let image_rect = preview_image_rect(texture, canvas, state);
     ui.painter().with_clip_rect(clip).image(
-        texture.id(),
+        texture.id,
         image_rect,
         egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
         egui::Color32::WHITE,
@@ -808,11 +860,11 @@ fn paint_preview_texture(
 }
 
 fn preview_image_rect(
-    texture: &egui::TextureHandle,
+    texture: egui::load::SizedTexture,
     canvas: egui::Rect,
     state: &ExtraGuiState,
 ) -> egui::Rect {
-    let image = texture.size_vec2();
+    let image = texture.size;
     let fit = (canvas.width() / image.x).min(canvas.height() / image.y);
     let draw_size = image * fit * state.preview.zoom();
     let pan = state.preview.pan();
@@ -831,7 +883,13 @@ fn paint_face_diagnostics(ui: &egui::Ui, state: &ExtraGuiState, canvas: egui::Re
     if !show_boxes && !show_landmarks {
         return;
     }
-    let (Some(texture), Some(output)) = (&state.output_texture, &state.latest_output) else {
+    let texture = state.output_gpu_texture.or_else(|| {
+        state
+            .output_texture
+            .as_ref()
+            .map(egui::load::SizedTexture::from_handle)
+    });
+    let (Some(texture), Some(output)) = (texture, &state.latest_output) else {
         return;
     };
     let image_rect = preview_image_rect(texture, canvas, state);
@@ -904,86 +962,9 @@ fn save_preview_frame(state: &mut ExtraGuiState) {
     }
 }
 
-fn timeline(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
-    heading(
-        ui,
-        "Timeline",
-        "Frame-accurate transport, markers and parameter snapshots.",
-    );
-    ui.horizontal(|ui| {
-        if ui.button("|<").clicked() {
-            state.timeline.seek(0);
-        }
-        if ui.button("-1").clicked() {
-            state.timeline.step(-1);
-            apply_exact_marker(state);
-        }
-        if ui.button("-30").clicked() {
-            state.timeline.step(-30);
-            apply_exact_marker(state);
-        }
-        if ui
-            .button(if state.timeline.is_playing() {
-                "Pause"
-            } else {
-                "Play"
-            })
-            .clicked()
-        {
-            state.timeline.toggle_playback();
-            if state.timeline.is_playing() {
-                state.play_requested = true;
-            } else {
-                state.pause_requested = true;
-            }
-        }
-        if ui.button("+1").clicked() {
-            state.timeline.step(1);
-            apply_exact_marker(state);
-        }
-        if ui.button("+30").clicked() {
-            state.timeline.step(30);
-            apply_exact_marker(state);
-        }
-        if ui.button(">|").clicked() {
-            state
-                .timeline
-                .seek(state.timeline.total_frames().saturating_sub(1));
-        }
-        ui.separator();
-        if ui.button("Add marker").clicked() {
-            let face_controls = state
-                .faces
-                .targets()
-                .map(|face| (face.id.clone(), face.controls.clone()))
-                .collect();
-            state
-                .timeline
-                .add_marker_snapshot(state.controls.clone(), face_controls);
-            state.status = format!("Marker at frame {}", state.timeline.current_frame());
-            state.dirty = true;
-        }
-        if ui.button("Remove marker").clicked() {
-            state.timeline.remove_marker(state.timeline.current_frame());
-            state.dirty = true;
-        }
-        if ui.button("Previous marker").clicked()
-            && let Some(frame) = state.timeline.previous_marker()
-        {
-            state.timeline.seek(frame);
-            apply_exact_marker(state);
-        }
-        if ui.button("Next marker").clicked()
-            && let Some(frame) = state.timeline.next_marker()
-        {
-            state.timeline.seek(frame);
-            apply_exact_marker(state);
-        }
-        if ui.button("Clear markers").clicked() {
-            state.timeline.clear_markers();
-            state.dirty = true;
-        }
-    });
+fn compact_timeline(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
+    ui.label(egui::RichText::new("TIMELINE").strong().size(11.0));
+
     let mut frame = state.timeline.current_frame();
     if ui
         .add(
@@ -999,12 +980,80 @@ fn timeline(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
         apply_exact_marker(state);
         state.dirty = true;
     }
-    ui.label(format!(
-        "Frame {} / {} · {:.2} FPS",
-        state.timeline.current_frame(),
-        state.timeline.total_frames().saturating_sub(1),
-        state.timeline.fps()
-    ));
+
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("First").clicked() {
+            state.timeline.seek(0);
+            apply_exact_marker(state);
+        }
+        if ui.button("Previous frame").clicked() {
+            state.timeline.step(-1);
+            apply_exact_marker(state);
+        }
+        let playback_label = if state.timeline.is_playing() {
+            "Pause"
+        } else {
+            "Play"
+        };
+        if ui.button(playback_label).clicked() {
+            state.timeline.toggle_playback();
+            if state.timeline.is_playing() {
+                state.play_requested = true;
+            } else {
+                state.pause_requested = true;
+            }
+        }
+        if ui.button("Next frame").clicked() {
+            state.timeline.step(1);
+            apply_exact_marker(state);
+        }
+        if ui.button("Last").clicked() {
+            state
+                .timeline
+                .seek(state.timeline.total_frames().saturating_sub(1));
+            apply_exact_marker(state);
+        }
+        if ui.button("Record").clicked() {
+            state.record_requested = true;
+        }
+        ui.separator();
+        if ui.button("Add marker").clicked() {
+            let face_controls = state
+                .faces
+                .targets()
+                .map(|face| (face.id.clone(), face.controls.clone()))
+                .collect();
+            state
+                .timeline
+                .add_marker_snapshot(state.controls.clone(), face_controls);
+            state.status = format!("Marker at frame {}", state.timeline.current_frame());
+            state.dirty = true;
+        }
+        if ui.button("Previous marker").clicked()
+            && let Some(frame) = state.timeline.previous_marker()
+        {
+            state.timeline.seek(frame);
+            apply_exact_marker(state);
+        }
+        if ui.button("Next marker").clicked()
+            && let Some(frame) = state.timeline.next_marker()
+        {
+            state.timeline.seek(frame);
+            apply_exact_marker(state);
+        }
+        if ui.button("Remove marker").clicked() {
+            state.timeline.remove_marker(state.timeline.current_frame());
+            state.dirty = true;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(format!(
+                "{} / {} · {:.2} FPS",
+                state.timeline.current_frame(),
+                state.timeline.total_frames().saturating_sub(1),
+                state.timeline.fps()
+            ));
+        });
+    });
 }
 
 fn apply_exact_marker(state: &mut ExtraGuiState) {

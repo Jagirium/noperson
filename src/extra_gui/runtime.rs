@@ -27,6 +27,8 @@ use crate::live::{
     AnalyzedIdentity, AtomicLiveEngine, IdentityAnalyzer, LiveShadowBuilder, ProcessedRgb,
     output_dimensions,
 };
+#[cfg(target_os = "linux")]
+use crate::pipeline::workspace::FrameRing;
 
 use super::bridge::{EditorEngineRequest, EditorRuntimeConfig};
 use super::editor::{MediaId, MediaKind};
@@ -109,6 +111,14 @@ pub enum EditorRuntimeEvent {
     Preview {
         input: EditorPreviewImage,
         output: ProcessedRgb,
+        playback: bool,
+    },
+    #[cfg(target_os = "linux")]
+    GpuPreview {
+        input_bridge: Arc<crate::gpu_preview::LinuxPreviewBridge>,
+        output_bridge: Arc<crate::gpu_preview::LinuxPreviewBridge>,
+        faces_detected: usize,
+        faces_swapped: usize,
         playback: bool,
     },
     Progress {
@@ -256,14 +266,25 @@ pub struct EditorRuntimeHandle {
 }
 
 impl EditorRuntimeHandle {
-    pub fn spawn(models_dir: PathBuf) -> Result<Self, EditorRuntimeError> {
+    pub fn spawn_with_render_state(
+        models_dir: PathBuf,
+        render_state: Option<egui_wgpu::RenderState>,
+    ) -> Result<Self, EditorRuntimeError> {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let cancellation = Arc::new(CancellationEpoch::default());
         let worker_cancellation = Arc::clone(&cancellation);
         let worker = std::thread::Builder::new()
             .name("extra-gui-gpu".to_owned())
-            .spawn(move || worker_loop(models_dir, command_rx, event_tx, worker_cancellation))?;
+            .spawn(move || {
+                worker_loop(
+                    models_dir,
+                    command_rx,
+                    event_tx,
+                    worker_cancellation,
+                    render_state,
+                )
+            })?;
         Ok(Self {
             commands: command_tx,
             events: event_rx,
@@ -371,9 +392,16 @@ fn worker_loop(
     commands: Receiver<EditorRuntimeCommand>,
     events: Sender<EditorRuntimeEvent>,
     cancellation: Arc<CancellationEpoch>,
+    render_state: Option<egui_wgpu::RenderState>,
 ) {
     let mut gpu = None;
     let mut engine = None;
+    #[cfg(target_os = "linux")]
+    let mut gpu_input_preview = None;
+    #[cfg(target_os = "linux")]
+    let mut gpu_output_preview = None;
+    #[cfg(target_os = "linux")]
+    let mut preview_frames = None;
     while let Ok(command) = commands.recv() {
         if matches!(command, EditorRuntimeCommand::Shutdown) {
             break;
@@ -404,6 +432,14 @@ fn worker_loop(
                     &token,
                     &mut gpu,
                     &mut engine,
+                    #[cfg(target_os = "linux")]
+                    render_state.as_ref(),
+                    #[cfg(target_os = "linux")]
+                    &mut gpu_input_preview,
+                    #[cfg(target_os = "linux")]
+                    &mut gpu_output_preview,
+                    #[cfg(target_os = "linux")]
+                    &mut preview_frames,
                 )
             }
             EditorRuntimeCommand::Playback {
@@ -426,6 +462,14 @@ fn worker_loop(
                     &token,
                     &mut gpu,
                     &mut engine,
+                    #[cfg(target_os = "linux")]
+                    render_state.as_ref(),
+                    #[cfg(target_os = "linux")]
+                    &mut gpu_input_preview,
+                    #[cfg(target_os = "linux")]
+                    &mut gpu_output_preview,
+                    #[cfg(target_os = "linux")]
+                    &mut preview_frames,
                 )
             }
             EditorRuntimeCommand::Record {
@@ -451,6 +495,12 @@ fn worker_loop(
             EditorRuntimeCommand::ClearCache => {
                 engine.take();
                 gpu.take();
+                #[cfg(target_os = "linux")]
+                {
+                    gpu_input_preview.take();
+                    gpu_output_preview.take();
+                    preview_frames.take();
+                }
                 events
                     .send(EditorRuntimeEvent::CacheCleared)
                     .map_err(anyhow::Error::from)
@@ -535,15 +585,43 @@ fn preview_job(
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
     engine: &mut Option<AtomicLiveEngine>,
+    #[cfg(target_os = "linux")] render_state: Option<&egui_wgpu::RenderState>,
+    #[cfg(target_os = "linux")] gpu_input_preview: &mut Option<
+        Arc<crate::gpu_preview::LinuxPreviewBridge>,
+    >,
+    #[cfg(target_os = "linux")] gpu_output_preview: &mut Option<
+        Arc<crate::gpu_preview::LinuxPreviewBridge>,
+    >,
+    #[cfg(target_os = "linux")] preview_frames: &mut Option<(u32, u32, FrameRing)>,
 ) -> anyhow::Result<()> {
     cancel.ensure_active("preview")?;
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Building))?;
     let gpu_ops = ensure_gpu(gpu)?;
     let worker_threads = request.worker_threads;
-    configure_engine(models_dir, gpu_ops, engine, request, cancel)?;
+    configure_engine(models_dir, Arc::clone(&gpu_ops), engine, request, cancel)?;
     anyhow::ensure!(!cancel.is_cancelled(), "preview cancelled");
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Previewing))?;
     let (frame, _, _) = read_frame(&path, kind, frame_index, worker_threads)?;
+    #[cfg(target_os = "linux")]
+    if let Some(render_state) = render_state {
+        let (input_bridge, output_bridge, result) = process_gpu_preview(
+            &gpu_ops,
+            engine.as_mut().expect("engine was configured"),
+            &frame,
+            render_state,
+            gpu_input_preview,
+            gpu_output_preview,
+            preview_frames,
+        )?;
+        events.send(EditorRuntimeEvent::GpuPreview {
+            input_bridge,
+            output_bridge,
+            faces_detected: result.faces_detected,
+            faces_swapped: result.faces_swapped,
+            playback: false,
+        })?;
+        return Ok(());
+    }
     let output = engine
         .as_mut()
         .expect("engine was configured")
@@ -835,6 +913,84 @@ fn record_job_native(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn process_gpu_preview(
+    gpu: &Arc<GpuOps>,
+    engine: &mut AtomicLiveEngine,
+    frame: &Frame,
+    render_state: &egui_wgpu::RenderState,
+    input_bridge: &mut Option<Arc<crate::gpu_preview::LinuxPreviewBridge>>,
+    output_bridge: &mut Option<Arc<crate::gpu_preview::LinuxPreviewBridge>>,
+    frame_ring: &mut Option<(u32, u32, FrameRing)>,
+) -> anyhow::Result<(
+    Arc<crate::gpu_preview::LinuxPreviewBridge>,
+    Arc<crate::gpu_preview::LinuxPreviewBridge>,
+    crate::pipeline::frame_processor::FrameResult,
+)> {
+    let dimensions_changed = frame_ring
+        .as_ref()
+        .is_none_or(|(width, height, _)| (*width, *height) != (frame.width, frame.height));
+    if dimensions_changed {
+        *frame_ring = Some((
+            frame.width,
+            frame.height,
+            FrameRing::new_for_dimensions(
+                gpu.stream.context(),
+                &gpu.stream,
+                1,
+                frame.width,
+                frame.height,
+            )?,
+        ));
+    }
+    let geometry_changed = output_bridge.as_ref().is_none_or(|bridge| {
+        let geometry = bridge.geometry();
+        (geometry.width(), geometry.height()) != (frame.width, frame.height)
+    });
+    if geometry_changed {
+        let geometry = crate::gpu_preview::PreviewGeometry::new(frame.width, frame.height)
+            .ok_or_else(|| anyhow::anyhow!("invalid editor preview geometry"))?;
+        *input_bridge = Some(crate::gpu_preview::LinuxPreviewBridge::new(
+            render_state,
+            geometry,
+        )?);
+        *output_bridge = Some(crate::gpu_preview::LinuxPreviewBridge::new(
+            render_state,
+            geometry,
+        )?);
+    }
+    let slot = frame_ring
+        .as_mut()
+        .expect("editor frame ring initialized")
+        .2
+        .acquire(frame.width, frame.height)?;
+    gpu.upload_into_u8(&frame.data, &mut slot.u8_in)?;
+    gpu.hwc_u8_to_chw_f32(&slot.u8_in, &mut slot.chw, frame.height, frame.width)?;
+    let input_bridge = Arc::clone(
+        input_bridge
+            .as_ref()
+            .expect("editor input GPU preview initialized"),
+    );
+    let input_event_bridge = Arc::clone(&input_bridge);
+    let input_write = input_bridge.stage(gpu, &slot.chw)?;
+    let result = engine.process_chw(&mut slot.chw, frame.height, frame.width)?;
+    let output_bridge = Arc::clone(
+        output_bridge
+            .as_ref()
+            .expect("editor output GPU preview initialized"),
+    );
+    let output_event_bridge = Arc::clone(&output_bridge);
+    let output_write = output_bridge.stage(gpu, &slot.chw)?;
+    gpu.sync()?;
+    if let Some(write) = input_write {
+        write.commit();
+    }
+    if let Some(write) = output_write {
+        write.commit();
+    }
+    Ok((input_event_bridge, output_event_bridge, result))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn playback_job(
     models_dir: &std::path::Path,
@@ -847,6 +1003,14 @@ fn playback_job(
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
     engine: &mut Option<AtomicLiveEngine>,
+    #[cfg(target_os = "linux")] render_state: Option<&egui_wgpu::RenderState>,
+    #[cfg(target_os = "linux")] gpu_input_preview: &mut Option<
+        Arc<crate::gpu_preview::LinuxPreviewBridge>,
+    >,
+    #[cfg(target_os = "linux")] gpu_output_preview: &mut Option<
+        Arc<crate::gpu_preview::LinuxPreviewBridge>,
+    >,
+    #[cfg(target_os = "linux")] preview_frames: &mut Option<(u32, u32, FrameRing)>,
 ) -> anyhow::Result<()> {
     cancel.ensure_active("playback")?;
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Building))?;
@@ -876,10 +1040,42 @@ fn playback_job(
             configure_engine(models_dir, ensure_gpu(gpu)?, engine, request, cancel)?;
         }
         let started = std::time::Instant::now();
+        #[cfg(target_os = "linux")]
+        if let Some(render_state) = render_state {
+            let gpu_ops = ensure_gpu(gpu)?;
+            let (input_bridge, output_bridge, result) = process_gpu_preview(
+                &gpu_ops,
+                engine.as_mut().expect("engine was configured"),
+                &frame,
+                render_state,
+                gpu_input_preview,
+                gpu_output_preview,
+                preview_frames,
+            )?;
+            events.send(EditorRuntimeEvent::GpuPreview {
+                input_bridge,
+                output_bridge,
+                faces_detected: result.faces_detected,
+                faces_swapped: result.faces_swapped,
+                playback: true,
+            })?;
+        } else {
+            let output = engine
+                .as_mut()
+                .expect("engine was configured")
+                .process_rgb(&frame.data, frame.width, frame.height)?;
+            events.send(EditorRuntimeEvent::Preview {
+                input: EditorPreviewImage::from(&frame),
+                output,
+                playback: true,
+            })?;
+        }
+        #[cfg(not(target_os = "linux"))]
         let output = engine
             .as_mut()
             .expect("engine was configured")
             .process_rgb(&frame.data, frame.width, frame.height)?;
+        #[cfg(not(target_os = "linux"))]
         events.send(EditorRuntimeEvent::Preview {
             input: EditorPreviewImage::from(&frame),
             output,
