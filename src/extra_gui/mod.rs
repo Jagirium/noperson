@@ -29,6 +29,8 @@ pub use faces::{
     FaceWorkspace, FaceWorkspaceError, MergedIdentity, SavedEmbedding, SourceIdentity, TargetFace,
     load_embeddings, save_embeddings,
 };
-pub use runtime::{EditorJobPhase, EditorJobState, EditorRuntimeError};
+pub use runtime::{
+    EditorJobPhase, EditorJobState, EditorRuntimeError, EditorRuntimeEvent, EditorRuntimeHandle,
+};
 pub use state::ExtraGuiPanel;
 pub use workspace::{WorkspaceDocument, WorkspaceError};

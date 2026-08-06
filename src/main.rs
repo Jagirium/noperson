@@ -7,10 +7,19 @@
 fn main() -> anyhow::Result<()> {
     let options = noperson::launch::LaunchOptions::parse(std::env::args_os().skip(1))?;
     if options.help {
-        print!("{}", noperson::launch::help_text());
+        if options.mode == noperson::launch::LaunchMode::Headless {
+            print!("{}", noperson::launch::headless_help_text());
+        } else {
+            print!("{}", noperson::launch::help_text());
+        }
         return Ok(());
     }
     let launch_mode = options.mode;
+    let headless_plan = options
+        .headless
+        .as_ref()
+        .map(noperson::headless::prepare)
+        .transpose()?;
 
     // Init logging
     tracing_subscriber::fmt()
@@ -70,6 +79,12 @@ fn main() -> anyhow::Result<()> {
     match launch_mode {
         noperson::launch::LaunchMode::Realtime => noperson::app::launch(models_dir)?,
         noperson::launch::LaunchMode::ExtraGui => noperson::extra_gui::launch(models_dir)?,
+        noperson::launch::LaunchMode::Headless => noperson::headless::run_plan(
+            headless_plan
+                .as_ref()
+                .expect("headless plan exists for headless-run"),
+            &models_dir,
+        )?,
         noperson::launch::LaunchMode::RuntimeCheck => unreachable!("handled above"),
     }
     Ok(())

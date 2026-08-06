@@ -270,6 +270,18 @@ impl EditorRuntimeHandle {
         models_dir: PathBuf,
         render_state: Option<egui_wgpu::RenderState>,
     ) -> Result<Self, EditorRuntimeError> {
+        Self::spawn(models_dir, render_state, 0)
+    }
+
+    pub fn spawn_headless(models_dir: PathBuf, device_id: i32) -> Result<Self, EditorRuntimeError> {
+        Self::spawn(models_dir, None, device_id)
+    }
+
+    fn spawn(
+        models_dir: PathBuf,
+        render_state: Option<egui_wgpu::RenderState>,
+        device_id: i32,
+    ) -> Result<Self, EditorRuntimeError> {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let cancellation = Arc::new(CancellationEpoch::default());
@@ -283,6 +295,7 @@ impl EditorRuntimeHandle {
                     event_tx,
                     worker_cancellation,
                     render_state,
+                    device_id,
                 )
             })?;
         Ok(Self {
@@ -375,6 +388,12 @@ impl EditorRuntimeHandle {
     pub fn try_events(&self) -> impl Iterator<Item = EditorRuntimeEvent> + '_ {
         self.events.try_iter()
     }
+
+    pub fn recv_event(&self) -> Result<EditorRuntimeEvent, EditorRuntimeError> {
+        self.events
+            .recv()
+            .map_err(|_| EditorRuntimeError::WorkerStopped)
+    }
 }
 
 impl Drop for EditorRuntimeHandle {
@@ -393,6 +412,7 @@ fn worker_loop(
     events: Sender<EditorRuntimeEvent>,
     cancellation: Arc<CancellationEpoch>,
     render_state: Option<egui_wgpu::RenderState>,
+    device_id: i32,
 ) {
     let mut gpu = None;
     let mut engine = None;
@@ -412,7 +432,7 @@ fn worker_loop(
                 cancellation_epoch,
             } => {
                 let token = cancellation.token(cancellation_epoch);
-                analyze_job(&models_dir, request, &events, &token, &mut gpu)
+                analyze_job(&models_dir, request, &events, &token, &mut gpu, device_id)
             }
             EditorRuntimeCommand::Preview {
                 path,
@@ -432,6 +452,7 @@ fn worker_loop(
                     &token,
                     &mut gpu,
                     &mut engine,
+                    device_id,
                     #[cfg(target_os = "linux")]
                     render_state.as_ref(),
                     #[cfg(target_os = "linux")]
@@ -462,6 +483,7 @@ fn worker_loop(
                     &token,
                     &mut gpu,
                     &mut engine,
+                    device_id,
                     #[cfg(target_os = "linux")]
                     render_state.as_ref(),
                     #[cfg(target_os = "linux")]
@@ -490,6 +512,7 @@ fn worker_loop(
                     &token,
                     &mut gpu,
                     &mut engine,
+                    device_id,
                 )
             }
             EditorRuntimeCommand::ClearCache => {
@@ -516,11 +539,11 @@ fn worker_loop(
     }
 }
 
-fn ensure_gpu(gpu: &mut Option<Arc<GpuOps>>) -> anyhow::Result<Arc<GpuOps>> {
+fn ensure_gpu(gpu: &mut Option<Arc<GpuOps>>, device_id: i32) -> anyhow::Result<Arc<GpuOps>> {
     if let Some(gpu) = gpu {
         return Ok(Arc::clone(gpu));
     }
-    let context = Arc::new(CudaContext::new(0)?);
+    let context = Arc::new(CudaContext::new(device_id as usize)?);
     let stream = context.default_stream().clone();
     let initialized = Arc::new(GpuOps::new(&context, stream)?);
     *gpu = Some(Arc::clone(&initialized));
@@ -533,10 +556,11 @@ fn analyze_job(
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
+    device_id: i32,
 ) -> anyhow::Result<()> {
     cancel.ensure_active("analysis")?;
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Analyzing))?;
-    let gpu_ops = ensure_gpu(gpu)?;
+    let gpu_ops = ensure_gpu(gpu, device_id)?;
     let worker_threads = request.runtime.worker_threads;
     let mut analyzer = IdentityAnalyzer::new(
         gpu_ops,
@@ -544,7 +568,7 @@ fn analyze_job(
         request.runtime.params,
         request.runtime.provider,
         request.runtime.detector,
-        0,
+        device_id,
     )?;
     let (target_frame, total_frames, fps) = read_frame(
         &request.target_path,
@@ -585,6 +609,7 @@ fn preview_job(
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
     engine: &mut Option<AtomicLiveEngine>,
+    device_id: i32,
     #[cfg(target_os = "linux")] render_state: Option<&egui_wgpu::RenderState>,
     #[cfg(target_os = "linux")] gpu_input_preview: &mut Option<
         Arc<crate::gpu_preview::LinuxPreviewBridge>,
@@ -596,7 +621,7 @@ fn preview_job(
 ) -> anyhow::Result<()> {
     cancel.ensure_active("preview")?;
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Building))?;
-    let gpu_ops = ensure_gpu(gpu)?;
+    let gpu_ops = ensure_gpu(gpu, device_id)?;
     let worker_threads = request.worker_threads;
     configure_engine(models_dir, Arc::clone(&gpu_ops), engine, request, cancel)?;
     anyhow::ensure!(!cancel.is_cancelled(), "preview cancelled");
@@ -645,17 +670,18 @@ fn record_job(
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
     engine: &mut Option<AtomicLiveEngine>,
+    device_id: i32,
 ) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
         record_job_native(
-            models_dir, input, output, initial, markers, events, cancel, gpu, engine,
+            models_dir, input, output, initial, markers, events, cancel, gpu, engine, device_id,
         )
     }
     #[cfg(not(target_os = "linux"))]
     {
         record_job_pipe(
-            models_dir, input, output, initial, markers, events, cancel, gpu, engine,
+            models_dir, input, output, initial, markers, events, cancel, gpu, engine, device_id,
         )
     }
 }
@@ -672,10 +698,11 @@ fn record_job_pipe(
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
     engine: &mut Option<AtomicLiveEngine>,
+    device_id: i32,
 ) -> anyhow::Result<()> {
     cancel.ensure_active("recording")?;
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Building))?;
-    let gpu_ops = ensure_gpu(gpu)?;
+    let gpu_ops = ensure_gpu(gpu, device_id)?;
     let worker_threads = initial.worker_threads;
     let output_params = initial.spec.params.clone();
     let initial = take_effective_request(initial, &mut markers, 0);
@@ -703,7 +730,13 @@ fn record_job_pipe(
                 anyhow::bail!("recording cancelled");
             }
             if let Some(request) = markers.remove(&index) {
-                configure_engine(models_dir, ensure_gpu(gpu)?, engine, request, cancel)?;
+                configure_engine(
+                    models_dir,
+                    ensure_gpu(gpu, device_id)?,
+                    engine,
+                    request,
+                    cancel,
+                )?;
             }
             let processed = engine
                 .as_mut()
@@ -738,10 +771,11 @@ fn record_job_native(
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
     engine: &mut Option<AtomicLiveEngine>,
+    device_id: i32,
 ) -> anyhow::Result<()> {
     cancel.ensure_active("recording")?;
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Building))?;
-    let gpu_ops = ensure_gpu(gpu)?;
+    let gpu_ops = ensure_gpu(gpu, device_id)?;
     let output_params = initial.spec.params.clone();
     let initial = take_effective_request(initial, &mut markers, 0);
     configure_engine(models_dir, Arc::clone(&gpu_ops), engine, initial, cancel)?;
@@ -830,7 +864,13 @@ fn record_job_native(
                 }
                 cancel.ensure_active("recording")?;
                 if let Some(request) = markers.remove(&index) {
-                    configure_engine(models_dir, ensure_gpu(gpu)?, engine, request, cancel)?;
+                    configure_engine(
+                        models_dir,
+                        ensure_gpu(gpu, device_id)?,
+                        engine,
+                        request,
+                        cancel,
+                    )?;
                 }
                 let timestamp_100ns = surface.timestamp_100ns();
                 unsafe {
@@ -1003,6 +1043,7 @@ fn playback_job(
     cancel: &CancellationToken<'_>,
     gpu: &mut Option<Arc<GpuOps>>,
     engine: &mut Option<AtomicLiveEngine>,
+    device_id: i32,
     #[cfg(target_os = "linux")] render_state: Option<&egui_wgpu::RenderState>,
     #[cfg(target_os = "linux")] gpu_input_preview: &mut Option<
         Arc<crate::gpu_preview::LinuxPreviewBridge>,
@@ -1016,7 +1057,13 @@ fn playback_job(
     events.send(EditorRuntimeEvent::Phase(EditorJobPhase::Building))?;
     let worker_threads = request.worker_threads;
     let request = take_effective_request(request, &mut markers, start_frame);
-    configure_engine(models_dir, ensure_gpu(gpu)?, engine, request, cancel)?;
+    configure_engine(
+        models_dir,
+        ensure_gpu(gpu, device_id)?,
+        engine,
+        request,
+        cancel,
+    )?;
     let mut source = FfmpegVideoSource::open_with_threads(&path, worker_threads)?;
     let total = source.frame_count();
     let source_fps = source.fps().max(1.0);
@@ -1037,12 +1084,18 @@ fn playback_job(
             return Ok(());
         }
         if let Some(request) = markers.remove(&index) {
-            configure_engine(models_dir, ensure_gpu(gpu)?, engine, request, cancel)?;
+            configure_engine(
+                models_dir,
+                ensure_gpu(gpu, device_id)?,
+                engine,
+                request,
+                cancel,
+            )?;
         }
         let started = std::time::Instant::now();
         #[cfg(target_os = "linux")]
         if let Some(render_state) = render_state {
-            let gpu_ops = ensure_gpu(gpu)?;
+            let gpu_ops = ensure_gpu(gpu, device_id)?;
             let (input_bridge, output_bridge, result) = process_gpu_preview(
                 &gpu_ops,
                 engine.as_mut().expect("engine was configured"),
