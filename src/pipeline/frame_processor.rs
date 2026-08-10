@@ -30,6 +30,199 @@ pub struct SourceFace {
     pub params: Option<FaceSwapParams>,
 }
 
+const IDENTITY_EMBEDDING_LEN: usize = 512;
+const MAX_SWAP_TILES: usize = 16;
+const NO_SOURCE_INDEX: u32 = u32::MAX;
+
+fn replicate_latent_16(latent: &[f32]) -> anyhow::Result<Vec<f32>> {
+    anyhow::ensure!(
+        latent.len() == IDENTITY_EMBEDDING_LEN,
+        "Inswapper latent must contain {IDENTITY_EMBEDDING_LEN} values, got {}",
+        latent.len()
+    );
+    let values = MAX_SWAP_TILES
+        .checked_mul(IDENTITY_EMBEDDING_LEN)
+        .ok_or_else(|| anyhow::anyhow!("replicated Inswapper latent size overflow"))?;
+    let mut replicated = vec![0.0; values];
+    for tile in replicated.chunks_exact_mut(IDENTITY_EMBEDDING_LEN) {
+        tile.copy_from_slice(latent);
+    }
+    Ok(replicated)
+}
+
+struct AssignmentMatchPlan {
+    target_bank: Vec<f32>,
+    thresholds: Vec<f32>,
+    target_present: Vec<u32>,
+}
+
+impl AssignmentMatchPlan {
+    fn from_sources(sources: &[SourceFace]) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            sources.len() <= u32::MAX as usize,
+            "too many source assignments for the GPU matcher"
+        );
+        let bank_len = sources
+            .len()
+            .checked_mul(IDENTITY_EMBEDDING_LEN)
+            .ok_or_else(|| anyhow::anyhow!("target embedding bank size overflow"))?;
+        let mut target_bank = vec![0.0; bank_len];
+        let mut thresholds = Vec::with_capacity(sources.len());
+        let mut target_present = Vec::with_capacity(sources.len());
+        for (source, target_slot) in sources
+            .iter()
+            .zip(target_bank.chunks_exact_mut(IDENTITY_EMBEDDING_LEN))
+        {
+            match source.target_embedding.as_deref() {
+                Some(target) => {
+                    anyhow::ensure!(
+                        target.len() == IDENTITY_EMBEDDING_LEN,
+                        "target embedding must contain {IDENTITY_EMBEDDING_LEN} values, got {}",
+                        target.len()
+                    );
+                    target_slot.copy_from_slice(target);
+                    target_present.push(1);
+                }
+                None => target_present.push(0),
+            }
+            thresholds.push(source.threshold);
+        }
+        Ok(Self {
+            target_bank,
+            thresholds,
+            target_present,
+        })
+    }
+
+    #[cfg(test)]
+    fn select_first_cpu(&self, query: &[f32]) -> anyhow::Result<Option<usize>> {
+        anyhow::ensure!(
+            query.len() == IDENTITY_EMBEDDING_LEN,
+            "query embedding must contain {IDENTITY_EMBEDDING_LEN} values, got {}",
+            query.len()
+        );
+        debug_assert_eq!(self.thresholds.len(), self.target_present.len());
+        for (index, target) in self
+            .target_bank
+            .chunks_exact(IDENTITY_EMBEDDING_LEN)
+            .enumerate()
+        {
+            if self.target_present[index] == 0 {
+                return Ok(Some(index));
+            }
+            let cosine = FaceRecognizer::cosine_similarity(query, target);
+            if crosswap_similarity(cosine) >= self.thresholds[index] {
+                return Ok(Some(index));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Device-resident, immutable data belonging to one live engine generation.
+///
+/// Target embeddings and per-source Inswapper latents are uploaded exactly
+/// once while the shadow generation is built. The hot path downloads only the
+/// selected source index.
+pub struct GenerationGpuState {
+    target_bank: CudaSlice<f32>,
+    thresholds: CudaSlice<f32>,
+    target_present: CudaSlice<u32>,
+    selected_index: CudaSlice<u32>,
+    resident_latents: Vec<Option<CudaSlice<f32>>>,
+    source_count: u32,
+    host_selected: [u32; 1],
+}
+
+impl GenerationGpuState {
+    pub fn new(gpu: &GpuOps, sources: &[SourceFace]) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !sources.is_empty(),
+            "a live generation requires at least one source assignment"
+        );
+        let plan = AssignmentMatchPlan::from_sources(sources)?;
+        for source in sources {
+            if let AssignmentBackend::Inswapper { latent } = &source.backend {
+                anyhow::ensure!(
+                    latent.len() == IDENTITY_EMBEDDING_LEN,
+                    "Inswapper latent must contain {IDENTITY_EMBEDDING_LEN} values, got {}",
+                    latent.len()
+                );
+            }
+        }
+
+        let target_bank = gpu.upload(&plan.target_bank)?;
+        let thresholds = gpu.upload(&plan.thresholds)?;
+        let target_present = gpu.stream.clone_htod(&plan.target_present)?;
+        let selected_index = gpu.stream.alloc_zeros::<u32>(1)?;
+        let mut resident_latents = Vec::with_capacity(sources.len());
+        for source in sources {
+            let latent = match &source.backend {
+                AssignmentBackend::Inswapper { latent } => {
+                    let replicated = replicate_latent_16(latent)?;
+                    Some(gpu.upload(&replicated)?)
+                }
+                AssignmentBackend::Dfm { .. } => None,
+            };
+            resident_latents.push(latent);
+        }
+
+        Ok(Self {
+            target_bank,
+            thresholds,
+            target_present,
+            selected_index,
+            resident_latents,
+            source_count: sources.len() as u32,
+            host_selected: [NO_SOURCE_INDEX],
+        })
+    }
+
+    #[must_use]
+    pub const fn source_count(&self) -> usize {
+        self.source_count as usize
+    }
+
+    pub fn select_first_source(
+        &mut self,
+        gpu: &GpuOps,
+        query: &CudaSlice<f32>,
+    ) -> anyhow::Result<Option<usize>> {
+        anyhow::ensure!(
+            query.len() >= IDENTITY_EMBEDDING_LEN,
+            "query embedding buffer is shorter than {IDENTITY_EMBEDDING_LEN} values"
+        );
+        gpu.select_first_embedding_source(
+            query,
+            &self.target_bank,
+            &self.thresholds,
+            &self.target_present,
+            self.source_count,
+            &mut self.selected_index,
+        )?;
+        gpu.stream
+            .memcpy_dtoh(&self.selected_index, &mut self.host_selected)?;
+        let selected = self.host_selected[0];
+        if selected == NO_SOURCE_INDEX {
+            Ok(None)
+        } else {
+            anyhow::ensure!(
+                selected < self.source_count,
+                "GPU matcher returned out-of-range source index {selected}"
+            );
+            Ok(Some(selected as usize))
+        }
+    }
+
+    /// Return the generation-owned latent for an Inswapper assignment.
+    pub fn resident_latent(&self, source_index: usize) -> anyhow::Result<Option<&CudaSlice<f32>>> {
+        self.resident_latents
+            .get(source_index)
+            .map(Option::as_ref)
+            .ok_or_else(|| anyhow::anyhow!("source index {source_index} is out of range"))
+    }
+}
+
 /// Assignment-local swap implementation. Session names are content-addressed,
 /// allowing several DFM graphs to coexist in one immutable generation.
 #[derive(Clone)]
@@ -72,6 +265,58 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
     frame_w: u32,
     ws: &mut GpuWorkspace,
     sources: &[SourceFace],
+    params: &FaceSwapParams,
+    tracker: &mut TemporalFaceTracker,
+) -> anyhow::Result<FrameResult> {
+    process_frame_gpu_inner(
+        gpu, manager, detector, frame_chw, frame_h, frame_w, ws, sources, None, params, tracker,
+    )
+}
+
+/// Production frame path with generation-owned matcher inputs and latents.
+pub fn process_frame_gpu_with_state<D: FaceDetectorBackend + ?Sized>(
+    gpu: &GpuOps,
+    manager: &mut ModelManager,
+    detector: &D,
+    frame_chw: &mut CudaSlice<f32>,
+    frame_h: u32,
+    frame_w: u32,
+    ws: &mut GpuWorkspace,
+    sources: &[SourceFace],
+    generation_gpu_state: &mut GenerationGpuState,
+    params: &FaceSwapParams,
+    tracker: &mut TemporalFaceTracker,
+) -> anyhow::Result<FrameResult> {
+    anyhow::ensure!(
+        generation_gpu_state.source_count() == sources.len(),
+        "generation GPU state/source assignment count mismatch"
+    );
+    process_frame_gpu_inner(
+        gpu,
+        manager,
+        detector,
+        frame_chw,
+        frame_h,
+        frame_w,
+        ws,
+        sources,
+        Some(generation_gpu_state),
+        params,
+        tracker,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_frame_gpu_inner<D: FaceDetectorBackend + ?Sized>(
+    gpu: &GpuOps,
+    manager: &mut ModelManager,
+    detector: &D,
+    frame_chw: &mut CudaSlice<f32>,
+    frame_h: u32,
+    frame_w: u32,
+    ws: &mut GpuWorkspace,
+    sources: &[SourceFace],
+    mut generation_gpu_state: Option<&mut GenerationGpuState>,
     params: &FaceSwapParams,
     tracker: &mut TemporalFaceTracker,
 ) -> anyhow::Result<FrameResult> {
@@ -128,8 +373,23 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             .map_or(face.kps_5, |landmarks| landmarks.five);
 
         // 2a. Match against sources
-        let source = if sources.len() == 1 && sources[0].target_embedding.is_none() {
-            &sources[0]
+        let source_index = if sources.len() == 1 && sources[0].target_embedding.is_none() {
+            0
+        } else if let Some(state) = generation_gpu_state.as_deref_mut() {
+            FaceRecognizer::recognize_gpu_into_with_similarity(
+                manager,
+                gpu,
+                frame_chw,
+                frame_h,
+                frame_w,
+                &effective_kps,
+                ws,
+                params.similarity_type,
+            )?;
+            match state.select_first_source(gpu, &ws.arcface_embedding)? {
+                Some(index) => index,
+                None => continue,
+            }
         } else {
             let embedding = FaceRecognizer::recognize_gpu_with_similarity(
                 manager,
@@ -143,12 +403,13 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
             )?;
             match sources
                 .iter()
-                .find(|candidate| assignment_matches(candidate, &embedding))
+                .position(|candidate| assignment_matches(candidate, &embedding))
             {
-                Some(source) => source,
+                Some(index) => index,
                 None => continue,
             }
         };
+        let source = &sources[source_index];
         let _ = gpu.profile_mark(2); // after_recognize
 
         // CrossSwap stores controls per target face. Model topology is fixed
@@ -250,6 +511,15 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                             &transform,
                         )?;
                     }
+                    let resident_latent = if let Some(state) = generation_gpu_state.as_deref() {
+                        Some(state.resident_latent(source_index)?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "source {source_index} has no resident Inswapper latent"
+                            )
+                        })?)
+                    } else {
+                        None
+                    };
                     for iteration in 0..iterations {
                         let input_from_scratch = geometry_scaled && iteration == 0;
                         if needs_strength_copy(
@@ -261,15 +531,26 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
                             gpu.stream
                                 .memcpy_dtod(&ws.face_256, &mut ws.face_512_scratch)?;
                         }
-                        FaceSwapper::swap_gpu_cached(
-                            manager,
-                            gpu,
-                            ws,
-                            latent,
-                            dim,
-                            iteration == 0,
-                            input_from_scratch,
-                        )?;
+                        if let Some(resident_latent) = resident_latent {
+                            FaceSwapper::swap_gpu_cached_device(
+                                manager,
+                                gpu,
+                                ws,
+                                resident_latent,
+                                dim,
+                                input_from_scratch,
+                            )?;
+                        } else {
+                            FaceSwapper::swap_gpu_cached(
+                                manager,
+                                gpu,
+                                ws,
+                                latent,
+                                dim,
+                                iteration == 0,
+                                input_from_scratch,
+                            )?;
+                        }
                     }
                     if fractional_blend < 1.0 {
                         gpu.scalar_blend_inplace(
@@ -671,13 +952,115 @@ fn scaled_arcface_template(target_size: u32) -> [[f32; 2]; 5] {
 #[cfg(test)]
 mod tests {
     use super::{
-        AssignmentBackend, SourceFace, adjusted_keypoints, assignment_matches,
+        AssignmentBackend, AssignmentMatchPlan, SourceFace, adjusted_keypoints, assignment_matches,
         blend_restorer_affine, crosswap_similarity, needs_local_landmark, needs_strength_copy,
-        needs_strength_snapshot, pipeline_has_enabled_assignment, restorer_contract,
-        scaled_arcface_template, strength_plan,
+        needs_strength_snapshot, pipeline_has_enabled_assignment, replicate_latent_16,
+        restorer_contract, scaled_arcface_template, strength_plan,
     };
     use crate::config::parameters::FaceSwapParams;
     use crate::config::parameters::RestorerSize;
+
+    fn source(target_embedding: Option<Vec<f32>>, threshold: f32) -> SourceFace {
+        SourceFace {
+            target_embedding,
+            backend: AssignmentBackend::Inswapper {
+                latent: vec![0.0; 512],
+            },
+            threshold,
+            params: None,
+        }
+    }
+
+    fn basis(index: usize) -> Vec<f32> {
+        let mut embedding = vec![0.0; 512];
+        embedding[index] = 1.0;
+        embedding
+    }
+
+    #[test]
+    fn generation_gpu_latent_replication_has_sixteen_exact_tiles() {
+        let latent = (0..512).map(|value| value as f32).collect::<Vec<_>>();
+        let replicated = replicate_latent_16(&latent).unwrap();
+        assert_eq!(replicated.len(), 16 * 512);
+        for tile in replicated.chunks_exact(512) {
+            assert_eq!(tile, latent);
+        }
+        assert!(replicate_latent_16(&latent[..511]).is_err());
+    }
+
+    #[test]
+    fn generation_gpu_match_plan_preserves_source_order_and_none_position() {
+        let sources = vec![
+            source(Some(basis(1)), 0.75),
+            source(None, 1.0),
+            source(Some(basis(0)), 0.75),
+        ];
+        let plan = AssignmentMatchPlan::from_sources(&sources).unwrap();
+        assert_eq!(plan.select_first_cpu(&basis(0)).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn generation_gpu_match_plan_uses_independent_inclusive_thresholds() {
+        let sources = vec![
+            source(Some(basis(0)), 1.000_001),
+            source(Some(basis(0)), 1.0),
+            source(Some(basis(0)), 0.0),
+        ];
+        let plan = AssignmentMatchPlan::from_sources(&sources).unwrap();
+        assert_eq!(plan.select_first_cpu(&basis(0)).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn generation_gpu_match_plan_returns_none_without_a_match() {
+        let sources = vec![source(Some(basis(1)), 0.500_001)];
+        let plan = AssignmentMatchPlan::from_sources(&sources).unwrap();
+        assert_eq!(plan.select_first_cpu(&basis(0)).unwrap(), None);
+    }
+
+    #[test]
+    fn generation_gpu_match_plan_keeps_stable_ties_and_zero_norm_semantics() {
+        let tie = vec![source(Some(basis(0)), 1.0), source(Some(basis(0)), 1.0)];
+        assert_eq!(
+            AssignmentMatchPlan::from_sources(&tie)
+                .unwrap()
+                .select_first_cpu(&basis(0))
+                .unwrap(),
+            Some(0)
+        );
+
+        let zero = vec![source(Some(vec![0.0; 512]), 0.5)];
+        assert_eq!(
+            AssignmentMatchPlan::from_sources(&zero)
+                .unwrap()
+                .select_first_cpu(&vec![0.0; 512])
+                .unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn generation_gpu_match_plan_selects_disabled_source_before_pipeline_skip() {
+        let mut disabled = FaceSwapParams::default();
+        disabled.enabled = false;
+        let mut first = source(Some(basis(0)), 1.0);
+        first.params = Some(disabled);
+        let sources = vec![first, source(Some(basis(0)), 1.0)];
+        assert_eq!(
+            AssignmentMatchPlan::from_sources(&sources)
+                .unwrap()
+                .select_first_cpu(&basis(0))
+                .unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn generation_gpu_match_plan_rejects_malformed_embeddings() {
+        let malformed = vec![source(Some(vec![0.0; 511]), 0.5)];
+        assert!(AssignmentMatchPlan::from_sources(&malformed).is_err());
+        let valid = AssignmentMatchPlan::from_sources(&[source(Some(basis(0)), 0.5)]).unwrap();
+        assert!(valid.select_first_cpu(&[0.0; 511]).is_err());
+    }
 
     #[test]
     fn restorer_contract_maps_only_supported_runtime_sizes() {

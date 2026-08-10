@@ -10,48 +10,16 @@ use crate::gpu::ops::GpuOps;
 use crate::math::affine;
 use crate::math::constants::{ARCFACE_DST, ARCFACE_MAP_TEMPLATES};
 use crate::models::manager::ModelManager;
-use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
+use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
 
 /// Face recognition and latent computation.
 pub struct FaceRecognizer;
 
 impl FaceRecognizer {
-    /// Extract 512-dim ArcFace embedding from a face (CPU fallback path).
-    pub fn recognize(
-        manager: &mut ModelManager,
-        frame_chw: &[f32],
-        frame_h: u32,
-        frame_w: u32,
-        kps_5: &[[f32; 2]; 5],
-    ) -> anyhow::Result<Vec<f32>> {
-        let affine_mat = affine::estimate_face_affine(kps_5, &ARCFACE_DST);
-        let mut face_112 = vec![0.0f32; 3 * 112 * 112];
-        warp_affine_chw(
-            frame_chw,
-            frame_h,
-            frame_w,
-            &mut face_112,
-            112,
-            112,
-            &affine_mat,
-        );
-        for v in face_112.iter_mut() {
-            *v = (*v - 127.5) / 127.5;
-        }
-
-        let session = manager
-            .get_mut("Inswapper128ArcFace")
-            .ok_or_else(|| anyhow::anyhow!("Inswapper128ArcFace not loaded"))?;
-        let input_tensor = ort::value::Tensor::from_array(([1usize, 3, 112, 112], face_112))?;
-        let outputs = session.run(ort::inputs![input_tensor])?;
-        let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
-        Ok(data[..512].to_vec())
-    }
-
     /// GPU-native recognize via IoBinding: zero GPU→CPU roundtrip for single face.
     ///
-    /// Synchronizes after `run_binding` to prevent races on `ws.arcface_embedding`.
+    /// Provider-aware stream ordering prevents races on `ws.arcface_embedding`.
     pub fn recognize_gpu(
         manager: &mut ModelManager,
         gpu: &GpuOps,
@@ -73,6 +41,30 @@ impl FaceRecognizer {
         )
     }
 
+    /// Run ArcFace into the workspace's device-resident embedding buffer.
+    ///
+    /// Unlike the compatibility APIs, this performs no device-to-host copy.
+    pub fn recognize_gpu_into(
+        manager: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw_gpu: &CudaSlice<f32>,
+        frame_h: u32,
+        frame_w: u32,
+        kps_5: &[[f32; 2]; 5],
+        ws: &mut GpuWorkspace,
+    ) -> anyhow::Result<()> {
+        Self::recognize_gpu_into_with_similarity(
+            manager,
+            gpu,
+            frame_chw_gpu,
+            frame_h,
+            frame_w,
+            kps_5,
+            ws,
+            SimilarityType::Opal,
+        )
+    }
+
     pub fn recognize_gpu_with_similarity(
         manager: &mut ModelManager,
         gpu: &GpuOps,
@@ -83,6 +75,31 @@ impl FaceRecognizer {
         ws: &mut GpuWorkspace,
         similarity_type: SimilarityType,
     ) -> anyhow::Result<[f32; 512]> {
+        Self::recognize_gpu_into_with_similarity(
+            manager,
+            gpu,
+            frame_chw_gpu,
+            frame_h,
+            frame_w,
+            kps_5,
+            ws,
+            similarity_type,
+        )?;
+        gpu.download_into(&ws.arcface_embedding, &mut ws.host_embedding)?;
+        Ok(ws.host_embedding)
+    }
+
+    /// Similarity-mode-aware ArcFace inference that leaves output on-device.
+    pub fn recognize_gpu_into_with_similarity(
+        manager: &mut ModelManager,
+        gpu: &GpuOps,
+        frame_chw_gpu: &CudaSlice<f32>,
+        frame_h: u32,
+        frame_w: u32,
+        kps_5: &[[f32; 2]; 5],
+        ws: &mut GpuWorkspace,
+        similarity_type: SimilarityType,
+    ) -> anyhow::Result<()> {
         match similarity_type {
             SimilarityType::Pearl => {
                 let mut template = ARCFACE_DST;
@@ -121,11 +138,28 @@ impl FaceRecognizer {
         let output_shape = [1i64, 512];
         let cuda_mem_info = MemoryInfo::new(
             AllocationDevice::CUDA,
-            0,
+            manager.device_id(),
             AllocatorType::Device,
             MemoryType::Default,
         )
         .map_err(|e| anyhow::anyhow!("MemoryInfo: {e}"))?;
+
+        let (input_name, output_name) = {
+            let session = manager
+                .get("Inswapper128ArcFace")
+                .ok_or_else(|| anyhow::anyhow!("Inswapper128ArcFace not loaded"))?;
+            let input_name = session
+                .inputs()
+                .first()
+                .map(|input| input.name().to_string())
+                .unwrap_or_else(|| "input".to_string());
+            let output_name = session
+                .outputs()
+                .first()
+                .map(|output| output.name().to_string())
+                .unwrap_or_else(|| "683".to_string());
+            (input_name, output_name)
+        };
 
         {
             let (input_dev, _g1) = ws.face_112.device_ptr(&gpu.stream);
@@ -134,31 +168,16 @@ impl FaceRecognizer {
                 unsafe { create_cuda_tensor_f32(&cuda_mem_info, input_dev, &input_shape)? };
             let output_value =
                 unsafe { create_cuda_tensor_f32(&cuda_mem_info, output_dev, &output_shape)? };
-            let (session, binding) = manager.session_and_binding("Inswapper128ArcFace")?;
-            let input_name = session
-                .inputs()
-                .first()
-                .map(|i| i.name().to_string())
-                .unwrap_or_else(|| "input".to_string());
-            let output_name = session
-                .outputs()
-                .first()
-                .map(|o| o.name().to_string())
-                .unwrap_or_else(|| "683".to_string());
-            unsafe {
-                bind_input_raw(binding, &input_name, &input_value)?;
-                bind_output_raw(binding, &output_name, &output_value)?;
-            }
-            binding.synchronize_inputs()?;
-            let _ = session.run_binding(binding)?;
-            binding.synchronize_outputs()?;
-            binding.clear();
-            drop(input_value);
-            drop(output_value);
+            run_bound_values(
+                manager,
+                &gpu.stream,
+                "Inswapper128ArcFace",
+                &[(input_name.as_str(), &input_value)],
+                &[(output_name.as_str(), &output_value)],
+            )?;
         }
 
-        gpu.download_into(&ws.arcface_embedding, &mut ws.host_embedding)?;
-        Ok(ws.host_embedding)
+        Ok(())
     }
 
     /// Compute Inswapper latent from ArcFace embedding (CPU).
@@ -262,42 +281,5 @@ mod template_tests {
             recognition_template(&ARCFACE_DST, SimilarityType::Opal),
             ARCFACE_DST
         );
-    }
-}
-
-/// CPU bilinear affine warp for CHW float32 image.
-pub fn warp_affine_chw(
-    src: &[f32],
-    src_h: u32,
-    src_w: u32,
-    dst: &mut [f32],
-    dst_h: u32,
-    dst_w: u32,
-    affine: &[[f64; 3]; 2],
-) {
-    let inv = affine::invert_2x3(affine);
-    for c in 0..3u32 {
-        for dy in 0..dst_h {
-            for dx in 0..dst_w {
-                let sx = (inv[0][0] * dx as f64 + inv[0][1] * dy as f64 + inv[0][2]) as f32;
-                let sy = (inv[1][0] * dx as f64 + inv[1][1] * dy as f64 + inv[1][2]) as f32;
-                if sx < 0.0 || sy < 0.0 || sx >= (src_w - 1) as f32 || sy >= (src_h - 1) as f32 {
-                    dst[(c * dst_h * dst_w + dy * dst_w + dx) as usize] = 0.0;
-                    continue;
-                }
-                let x0 = sx as u32;
-                let y0 = sy as u32;
-                let x1 = (x0 + 1).min(src_w - 1);
-                let y1 = (y0 + 1).min(src_h - 1);
-                let fx = sx - x0 as f32;
-                let fy = sy - y0 as f32;
-                let idx = |yy: u32, xx: u32| (c * src_h * src_w + yy * src_w + xx) as usize;
-                let v = src[idx(y0, x0)] * (1.0 - fx) * (1.0 - fy)
-                    + src[idx(y0, x1)] * fx * (1.0 - fy)
-                    + src[idx(y1, x0)] * (1.0 - fx) * fy
-                    + src[idx(y1, x1)] * fx * fy;
-                dst[(c * dst_h * dst_w + dy * dst_w + dx) as usize] = v;
-            }
-        }
     }
 }

@@ -55,13 +55,13 @@ fn test_detect_faces_smoke() -> anyhow::Result<()> {
 
     // Init CUDA
     let ctx = Arc::new(CudaContext::new(0)?);
-    let stream = ctx.default_stream().clone();
+    let stream = ctx.new_stream()?;
     let gpu = GpuOps::new(&ctx, stream.clone())?;
     eprintln!("CUDA initialized");
 
     // Init model manager
     let mut manager = ModelManager::new("models");
-    manager.set_compute_stream(stream.cu_stream() as *mut ());
+    manager.set_compute_stream(stream.cu_stream() as *mut ())?;
 
     // Load detector
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;

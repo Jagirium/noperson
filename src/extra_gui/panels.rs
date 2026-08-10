@@ -5,7 +5,7 @@ use eframe::egui;
 use super::controls::{ControlKind, ControlScope, ControlSpec, ControlValue, FrontendMode};
 use super::editor::{MediaKind, MediaRole};
 use super::faces::{ARC_FACE_MODEL, EmbeddingMergeMethod};
-use super::state::{ExtraGuiPanel, ExtraGuiState};
+use super::state::{ExtraGuiPanel, ExtraGuiState, InspectorDock};
 
 fn heading(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.heading(title);
@@ -209,19 +209,63 @@ pub(super) fn inspector(ui: &mut egui::Ui, state: &mut ExtraGuiState, models_dir
     ) {
         state.active_panel = ExtraGuiPanel::Faces;
     }
-    ui.label(egui::RichText::new("INSPECTOR").strong().size(11.0));
     ui.horizontal(|ui| {
-        for panel in [
-            ExtraGuiPanel::Faces,
-            ExtraGuiPanel::Parameters,
-            ExtraGuiPanel::Settings,
-        ] {
-            if ui
-                .selectable_label(state.active_panel == panel, panel.label())
-                .clicked()
-            {
-                state.active_panel = panel;
+        ui.label(egui::RichText::new("INSPECTOR").strong().size(11.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("Hide inspector").clicked() {
+                state.inspector_open = false;
             }
+            match state.inspector_dock {
+                InspectorDock::Left => {
+                    if ui.small_button(InspectorDock::Right.label()).clicked() {
+                        state.inspector_dock = InspectorDock::Right;
+                    }
+                    if ui.small_button(InspectorDock::Floating.label()).clicked() {
+                        state.inspector_dock = InspectorDock::Floating;
+                    }
+                }
+                InspectorDock::Right => {
+                    if ui.small_button(InspectorDock::Left.label()).clicked() {
+                        state.inspector_dock = InspectorDock::Left;
+                    }
+                    if ui.small_button(InspectorDock::Floating.label()).clicked() {
+                        state.inspector_dock = InspectorDock::Floating;
+                    }
+                }
+                InspectorDock::Floating => {
+                    if ui.small_button(InspectorDock::Right.label()).clicked() {
+                        state.inspector_dock = InspectorDock::Right;
+                    }
+                    if ui.small_button(InspectorDock::Left.label()).clicked() {
+                        state.inspector_dock = InspectorDock::Left;
+                    }
+                }
+            }
+        });
+    });
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .selectable_label(state.active_panel == ExtraGuiPanel::Faces, "Faces")
+            .clicked()
+        {
+            state.active_panel = ExtraGuiPanel::Faces;
+        }
+        for (scope, label) in [
+            (ControlScope::Swapper, "Face Swap"),
+            (ControlScope::Common, "Common"),
+        ] {
+            let selected =
+                state.active_panel == ExtraGuiPanel::Parameters && state.inspector_scope == scope;
+            if ui.selectable_label(selected, label).clicked() {
+                state.active_panel = ExtraGuiPanel::Parameters;
+                state.inspector_scope = scope;
+            }
+        }
+        if ui
+            .selectable_label(state.active_panel == ExtraGuiPanel::Settings, "Settings")
+            .clicked()
+        {
+            state.active_panel = ExtraGuiPanel::Settings;
         }
     });
     ui.separator();
@@ -232,7 +276,7 @@ pub(super) fn inspector(ui: &mut egui::Ui, state: &mut ExtraGuiState, models_dir
                 .auto_shrink([false, false])
                 .show(ui, |ui| faces(ui, state));
         }
-        ExtraGuiPanel::Parameters => parameters(ui, state),
+        ExtraGuiPanel::Parameters => parameters(ui, state, state.inspector_scope),
         ExtraGuiPanel::Settings => {
             egui::ScrollArea::vertical()
                 .id_salt("extra_settings_inspector")
@@ -1073,29 +1117,34 @@ fn apply_exact_marker(state: &mut ExtraGuiState) {
     state.status = format!("Loaded marker at frame {}", state.timeline.current_frame());
 }
 
-fn parameters(ui: &mut egui::Ui, state: &mut ExtraGuiState) {
-    heading(
-        ui,
-        "Face parameters",
-        "Typed CrossSwap controls with conditional visibility per assignment.",
-    );
+fn parameters(ui: &mut egui::Ui, state: &mut ExtraGuiState, scope: ControlScope) {
+    let (title, subtitle) = match scope {
+        ControlScope::Swapper => (
+            "Face swap",
+            "Swapper, similarity, landmarks, masks, color and blend controls.",
+        ),
+        ControlScope::Common => (
+            "Common",
+            "Face restoration and shared post-processing controls.",
+        ),
+        ControlScope::Settings => unreachable!("settings have a dedicated inspector tab"),
+    };
+    heading(ui, title, subtitle);
     ui.horizontal(|ui| {
         ui.label("Filter");
         ui.add(
             egui::TextEdit::singleline(&mut state.parameter_search)
                 .hint_text("mask, color, restorer…")
-                .desired_width(260.0),
+                .desired_width(ui.available_width()),
         );
-        ui.separator();
-        let target = state.faces.selected_target().unwrap_or("swap-all defaults");
-        ui.label(egui::RichText::new(format!("Editing {target}")).weak());
     });
+    let target = state.faces.selected_target().unwrap_or("swap-all defaults");
+    ui.label(egui::RichText::new(format!("Editing {target}")).weak());
     ui.add_space(8.0);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            render_scope(ui, state, ControlScope::Common);
-            render_scope(ui, state, ControlScope::Swapper);
+            render_scope(ui, state, scope);
         });
 }
 
@@ -1135,138 +1184,202 @@ fn settings(ui: &mut egui::Ui, state: &mut ExtraGuiState, models_dir: &Path) {
 }
 
 fn render_scope(ui: &mut egui::Ui, state: &mut ExtraGuiState, scope: ControlScope) {
-    let query = state.parameter_search.trim().to_lowercase();
+    let query = state.parameter_search.trim();
+    let query = (!query.is_empty()).then(|| query.to_lowercase());
     let values = scoped_control_state(state, scope);
-    let controls: Vec<_> = state
-        .catalog
+    let catalog = std::sync::Arc::clone(&state.catalog);
+    let controls: Vec<_> = catalog
         .iter()
         .filter(|control| control.scope == scope)
-        .filter(|control| values.is_visible(&control.id, FrontendMode::Editor, &state.catalog))
+        .filter(|control| values.is_spec_visible(control, FrontendMode::Editor))
         .filter(|control| {
-            query.is_empty()
-                || control.label.to_lowercase().contains(&query)
-                || control.section.to_lowercase().contains(&query)
-                || control.id.to_lowercase().contains(&query)
+            query.as_ref().is_none_or(|query| {
+                control.label.to_lowercase().contains(query)
+                    || control.section.to_lowercase().contains(query)
+                    || control.id.to_lowercase().contains(query)
+            })
         })
-        .cloned()
         .collect();
 
     let mut start = 0;
     while start < controls.len() {
-        let section = controls[start].section.clone();
+        let section = controls[start].section.as_str();
         let end = controls[start..]
             .iter()
             .position(|control| control.section != section)
             .map_or(controls.len(), |offset| start + offset);
-        egui::CollapsingHeader::new(&section)
-            .id_salt(("extra-controls", scope as u8, &section))
-            .default_open(true)
-            .show(ui, |ui| {
-                for control in &controls[start..end] {
-                    render_control(ui, state, control);
-                }
-            });
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            egui::CollapsingHeader::new(section)
+                .id_salt(("extra-controls", scope as u8, section))
+                .default_open(query.is_some() || matches!(section, "Swapper" | "Face Similarity"))
+                .show(ui, |ui| {
+                    for control in &controls[start..end] {
+                        render_control(ui, state, control);
+                    }
+                });
+        });
+        ui.add_space(6.0);
         start = end;
     }
 }
 
 fn render_control(ui: &mut egui::Ui, state: &mut ExtraGuiState, control: &ControlSpec) {
-    ui.horizontal(|ui| {
-        if control.level > 1 {
-            ui.add_space(14.0 * f32::from(control.level - 1));
+    let indent = 14.0 * f32::from(control.level.saturating_sub(1));
+    let current = scoped_control_state(state, control.scope)
+        .get(&control.id)
+        .cloned();
+    let mut pending = None;
+
+    match (&control.kind, current) {
+        (ControlKind::Toggle { default }, Some(ControlValue::Toggle(current))) => {
+            let mut value = current;
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                let response = ui.checkbox(&mut value, &control.label);
+                if !control.help.is_empty() {
+                    response.on_hover_text(&control.help);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if reset_button(ui, value != *default) {
+                        pending = Some(ControlValue::Toggle(*default));
+                    }
+                });
+            });
+            if value != current {
+                pending = Some(ControlValue::Toggle(value));
+            }
         }
-        let label = ui.label(&control.label);
-        if !control.help.is_empty() {
-            label.on_hover_text(&control.help);
-        }
-        ui.with_layout(
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| match &control.kind {
-                ControlKind::Toggle { .. } => {
-                    let mut value = matches!(
-                        scoped_control_state(state, control.scope).get(&control.id),
-                        Some(ControlValue::Toggle(true))
-                    );
-                    if ui.checkbox(&mut value, "").changed() {
-                        apply_control(state, control, ControlValue::Toggle(value));
-                    }
-                }
-                ControlKind::Slider { min, max, step, .. } => {
-                    let Some(ControlValue::Slider(current)) =
-                        scoped_control_state(state, control.scope).get(&control.id)
-                    else {
-                        return;
-                    };
-                    let mut value = *current;
-                    let response = ui.add(
-                        egui::Slider::new(&mut value, *min..=*max)
-                            .step_by(*step)
-                            .min_decimals(slider_decimals(*step)),
-                    );
-                    let mut changed = response.changed();
-                    if scroll_changes_values(state) && response.hovered() {
-                        let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-                        if scroll != 0.0 {
-                            value = (value + scroll.signum() as f64 * *step).clamp(*min, *max);
-                            ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        apply_control(state, control, ControlValue::Slider(value));
-                    }
-                }
-                ControlKind::Choice {
-                    options, source, ..
-                } => {
-                    let choices = source
-                        .and_then(|_| state.dynamic_choices.get(&control.id))
-                        .filter(|dynamic| !dynamic.is_empty())
-                        .unwrap_or(options);
-                    let Some(ControlValue::Choice(current)) =
-                        scoped_control_state(state, control.scope).get(&control.id)
-                    else {
-                        return;
-                    };
-                    let mut value = current.clone();
-                    if choices.is_empty() {
-                        ui.add_enabled(false, egui::Button::new("No models found"));
-                        return;
-                    }
-                    let selected = if value.is_empty() {
-                        "Choose…"
-                    } else {
-                        value.as_str()
-                    };
-                    let combo = egui::ComboBox::from_id_salt(("extra-choice", &control.id))
-                        .selected_text(selected)
-                        .width(220.0)
-                        .show_ui(ui, |ui| {
-                            for option in choices {
-                                ui.selectable_value(&mut value, option.clone(), option);
-                            }
-                        });
-                    if scroll_changes_values(state) && combo.response.hovered() {
-                        let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-                        if scroll != 0.0
-                            && let Some(index) = choices.iter().position(|choice| choice == &value)
-                        {
-                            let next = if scroll > 0.0 {
-                                index.saturating_sub(1)
-                            } else {
-                                (index + 1).min(choices.len().saturating_sub(1))
-                            };
-                            value = choices[next].clone();
-                            ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
-                        }
-                    }
-                    if &value != current {
-                        apply_control(state, control, ControlValue::Choice(value));
-                    }
-                }
+        (
+            ControlKind::Slider {
+                min,
+                max,
+                default,
+                step,
             },
-        );
-    });
+            Some(ControlValue::Slider(current)),
+        ) => {
+            let mut value = current;
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                let label = ui.label(&control.label);
+                if !control.help.is_empty() {
+                    label.on_hover_text(&control.help);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if reset_button(ui, value != *default) {
+                        pending = Some(ControlValue::Slider(*default));
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                let numeric_width = 62.0;
+                let spacing = ui.spacing().item_spacing.x;
+                let slider_width = (ui.available_width() - numeric_width - spacing).max(80.0);
+                let response = ui.add_sized(
+                    [slider_width, ui.spacing().interact_size.y],
+                    egui::Slider::new(&mut value, *min..=*max)
+                        .step_by(*step)
+                        .show_value(false),
+                );
+                let numeric = ui.add_sized(
+                    [numeric_width, ui.spacing().interact_size.y],
+                    egui::DragValue::new(&mut value)
+                        .range(*min..=*max)
+                        .speed(*step)
+                        .min_decimals(slider_decimals(*step))
+                        .max_decimals(slider_decimals(*step)),
+                );
+                let mut changed = response.changed() || numeric.changed();
+                if scroll_changes_values(state) && response.hovered() {
+                    let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+                    if scroll != 0.0 {
+                        value = (value + scroll.signum() as f64 * *step).clamp(*min, *max);
+                        ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    pending = Some(ControlValue::Slider(value));
+                }
+            });
+        }
+        (
+            ControlKind::Choice {
+                options,
+                default,
+                source,
+            },
+            Some(ControlValue::Choice(current)),
+        ) => {
+            let choices = source
+                .and_then(|_| state.dynamic_choices.get(&control.id))
+                .filter(|dynamic| !dynamic.is_empty())
+                .unwrap_or(options);
+            let mut value = current.clone();
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                let label = ui.label(&control.label);
+                if !control.help.is_empty() {
+                    label.on_hover_text(&control.help);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if reset_button(ui, value != *default) {
+                        pending = Some(ControlValue::Choice(default.clone()));
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                if choices.is_empty() {
+                    ui.add_enabled(false, egui::Button::new("No models found"));
+                    return;
+                }
+                let selected = if value.is_empty() {
+                    "Choose…"
+                } else {
+                    value.as_str()
+                };
+                let combo = egui::ComboBox::from_id_salt(("extra-choice", &control.id))
+                    .selected_text(selected)
+                    .width(ui.available_width().max(120.0))
+                    .show_ui(ui, |ui| {
+                        for option in choices {
+                            ui.selectable_value(&mut value, option.clone(), option);
+                        }
+                    });
+                if scroll_changes_values(state) && combo.response.hovered() {
+                    let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+                    if scroll != 0.0
+                        && let Some(index) = choices.iter().position(|choice| choice == &value)
+                    {
+                        let next = if scroll > 0.0 {
+                            index.saturating_sub(1)
+                        } else {
+                            (index + 1).min(choices.len().saturating_sub(1))
+                        };
+                        value = choices[next].clone();
+                        ui.input_mut(|input| input.smooth_scroll_delta = egui::Vec2::ZERO);
+                    }
+                }
+            });
+            if value != current {
+                pending = Some(ControlValue::Choice(value));
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(value) = pending {
+        apply_control(state, control, value);
+    }
+    ui.add_space(3.0);
+}
+
+fn reset_button(ui: &mut egui::Ui, enabled: bool) -> bool {
+    ui.add_enabled(enabled, egui::Button::new("Reset").small())
+        .clicked()
 }
 
 fn scroll_changes_values(state: &ExtraGuiState) -> bool {

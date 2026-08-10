@@ -74,6 +74,10 @@ pub struct GpuWorkspace {
     pub dfm_rct_stats: CudaSlice<f32>,
     pub auto_color_stats: CudaSlice<f32>,
     pub color_gray_sum: CudaSlice<u32>,
+    /// Sequential two-stage reduction workspace: up to 1,024 blocks × 13 f32 fields.
+    pub reduction_partials_f32: CudaSlice<f32>,
+    /// Sequential two-stage reduction workspace: one u32 partial per launched block.
+    pub reduction_partials_u32: CudaSlice<u32>,
     pub color_noise_nonce: u32,
     pub mask_512: CudaSlice<f32>, // [512, 512] — final face mask
 
@@ -88,7 +92,7 @@ pub struct GpuWorkspace {
     // Pre-allocated host staging buffers (reused to avoid per-frame Vec alloc)
     pub host_detect_candidates: Vec<f32>, // [16800, 15]
     pub host_embedding: [f32; 512],       // ArcFace embedding
-    pub host_swap_tiles: Vec<f32>,        // [16*3*128*128]
+    pub host_swap_tiles: Vec<f32>,        // [16*512] latent staging
     pub host_color_original: Vec<f32>,    // [3*512*512], exact histogram fallback
     pub host_color_swapped: Vec<f32>,     // [3*512*512], exact histogram fallback
     pub host_color_mask: Vec<f32>,        // [512*512], exact masked histogram fallback
@@ -101,6 +105,13 @@ pub struct GpuWorkspace {
 /// Max Gaussian blur kernel taps.
 pub const MAX_BLUR_KS: usize = 201;
 
+fn swap_latent_staging_len(max_swap_dim: usize) -> usize {
+    max_swap_dim
+        .checked_mul(max_swap_dim)
+        .and_then(|tiles| tiles.checked_mul(512))
+        .expect("swap latent staging size overflow")
+}
+
 impl GpuWorkspace {
     /// Allocate all GPU buffers. Called once at startup.
     pub fn new(stream: &Arc<CudaStream>) -> Result<Self, DriverError> {
@@ -112,6 +123,7 @@ impl GpuWorkspace {
         let face_512_size = 3 * 512 * 512;
         let max_swap_tiles = MAX_SWAP_DIM * MAX_SWAP_DIM;
         let swap_batch_size = max_swap_tiles * 3 * 128 * 128;
+        let swap_latent_size = swap_latent_staging_len(MAX_SWAP_DIM);
 
         // YoloFace output: 1 * 20 * 8400 = 168000 for 640 input
         let det_output_size = 20 * 8400;
@@ -167,6 +179,8 @@ impl GpuWorkspace {
             dfm_rct_stats: stream.alloc_zeros::<f32>(12)?,
             auto_color_stats: stream.alloc_zeros::<f32>(13)?,
             color_gray_sum: stream.alloc_zeros::<u32>(1)?,
+            reduction_partials_f32: stream.alloc_zeros::<f32>(1024 * 13)?,
+            reduction_partials_u32: stream.alloc_zeros::<u32>(1024)?,
             color_noise_nonce: 0,
             mask_512: stream.alloc_zeros::<f32>(512 * 512)?,
 
@@ -178,7 +192,7 @@ impl GpuWorkspace {
 
             host_detect_candidates: vec![0.0f32; 16_800 * 15],
             host_embedding: [0.0f32; 512],
-            host_swap_tiles: vec![0.0f32; swap_batch_size],
+            host_swap_tiles: vec![0.0f32; swap_latent_size],
             host_color_original: vec![0.0f32; face_512_size],
             host_color_swapped: vec![0.0f32; face_512_size],
             host_color_mask: vec![0.0f32; 512 * 512],
@@ -293,5 +307,16 @@ impl FrameRing {
 
     pub fn capacity(&self) -> usize {
         self.slots.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SWAP_DIM, swap_latent_staging_len};
+
+    #[test]
+    fn host_swap_staging_tracks_latents_not_image_tiles() {
+        assert_eq!(swap_latent_staging_len(MAX_SWAP_DIM), 16 * 512);
+        assert!(swap_latent_staging_len(MAX_SWAP_DIM) < 16 * 3 * 128 * 128);
     }
 }

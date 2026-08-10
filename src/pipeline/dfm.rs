@@ -5,7 +5,7 @@ use ort::value::ValueType;
 
 use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
-use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
+use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
 
 pub fn rgb_to_lab(rgb: [f32; 3]) -> [f32; 3] {
@@ -271,20 +271,21 @@ impl DfmContract {
             let celeb_mask =
                 unsafe { create_cuda_tensor_f32(&memory, celeb_mask_ptr, &mask_shape)? };
 
-            let (session, binding) = manager.session_and_binding(session_name)?;
-            unsafe {
-                bind_input_raw(binding, "in_face:0", &input)?;
-                if self.has_morph_value {
-                    bind_input_raw(binding, "morph_value:0", &morph_value)?;
-                }
-                bind_output_raw(binding, "out_face_mask:0", &face_mask)?;
-                bind_output_raw(binding, "out_celeb_face:0", &face)?;
-                bind_output_raw(binding, "out_celeb_face_mask:0", &celeb_mask)?;
+            let mut inputs = vec![("in_face:0", &input)];
+            if self.has_morph_value {
+                inputs.push(("morph_value:0", &morph_value));
             }
-            binding.synchronize_inputs()?;
-            let _ = session.run_binding(binding)?;
-            binding.synchronize_outputs()?;
-            binding.clear();
+            run_bound_values(
+                manager,
+                &gpu.stream,
+                session_name,
+                &inputs,
+                &[
+                    ("out_face_mask:0", &face_mask),
+                    ("out_celeb_face:0", &face),
+                    ("out_celeb_face_mask:0", &celeb_mask),
+                ],
+            )?;
         }
 
         if rct {
@@ -293,6 +294,7 @@ impl DfmContract {
                 &workspace.face_512_scratch,
                 &workspace.parser_attribute_512,
                 &mut workspace.dfm_rct_stats,
+                &mut workspace.reduction_partials_f32,
                 pixels,
                 0.3,
             )?;

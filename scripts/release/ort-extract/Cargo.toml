@@ -1,0 +1,14 @@
+[package]
+name = "noperson-ort-extract"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+lzma-rust2 = "=0.15.8"
+tar = "=0.4.46"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

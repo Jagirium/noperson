@@ -46,3 +46,73 @@ void calc_latent_512_kernel(
     const float output_norm = sqrtf(reduction[0]);
     if (output_norm > 1e-10f) output[col] = sum / output_norm;
 }
+
+// CrossSwap assignment matcher. Sources are deliberately visited in their
+// configured order: this is a first-match operation, never an argmax.
+extern "C" __global__
+void select_first_embedding_source_kernel(
+    const float* __restrict__ query,
+    const float* __restrict__ target_bank,
+    const float* __restrict__ thresholds,
+    const unsigned int* __restrict__ target_present,
+    unsigned int source_count,
+    unsigned int* __restrict__ selected_index
+) {
+    __shared__ float dot_reduction[512];
+    __shared__ float norm_reduction[512];
+    __shared__ float query_norm;
+    __shared__ unsigned int matched;
+
+    const unsigned int lane = threadIdx.x;
+    const float query_value = query[lane];
+    dot_reduction[lane] = query_value * query_value;
+    if (lane == 0) {
+        *selected_index = 0xffffffffu;
+        matched = 0;
+    }
+    __syncthreads();
+
+    for (unsigned int stride = 256; stride > 0; stride >>= 1) {
+        if (lane < stride) dot_reduction[lane] += dot_reduction[lane + stride];
+        __syncthreads();
+    }
+    if (lane == 0) query_norm = sqrtf(dot_reduction[0]);
+    __syncthreads();
+
+    for (unsigned int source = 0; source < source_count; ++source) {
+        // `None` is an unconditional match at this exact source position.
+        if (target_present[source] == 0) {
+            if (lane == 0) *selected_index = source;
+            return;
+        }
+
+        const unsigned long long target_offset =
+            static_cast<unsigned long long>(source) * 512ull;
+        const float target_value = target_bank[target_offset + lane];
+        dot_reduction[lane] = query_value * target_value;
+        norm_reduction[lane] = target_value * target_value;
+        __syncthreads();
+
+        for (unsigned int stride = 256; stride > 0; stride >>= 1) {
+            if (lane < stride) {
+                dot_reduction[lane] += dot_reduction[lane + stride];
+                norm_reduction[lane] += norm_reduction[lane + stride];
+            }
+            __syncthreads();
+        }
+
+        if (lane == 0) {
+            const float denominator = query_norm * sqrtf(norm_reduction[0]);
+            const float cosine = denominator > 1e-8f
+                ? dot_reduction[0] / denominator
+                : 0.0f;
+            const float similarity = (1.0f + cosine) * 0.5f;
+            if (similarity >= thresholds[source]) {
+                *selected_index = source;
+                matched = 1;
+            }
+        }
+        __syncthreads();
+        if (matched != 0) return;
+    }
+}

@@ -58,33 +58,91 @@ __device__ __forceinline__ void lab_to_rgb(const float lab[3], float rgb[3]) {
     }
 }
 
+template <int Fields>
+__device__ __forceinline__ void reduce_float_fields(float values[Fields], float* partials) {
+    const unsigned int lane = threadIdx.x & 31u;
+    const unsigned int warp = threadIdx.x >> 5u;
+    __shared__ float warp_totals[8][Fields];
+
+    for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+        for (int field = 0; field < Fields; ++field) {
+            values[field] += __shfl_down_sync(0xffffffffu, values[field], offset);
+        }
+    }
+    if (lane == 0) {
+        for (int field = 0; field < Fields; ++field) {
+            warp_totals[warp][field] = values[field];
+        }
+    }
+    __syncthreads();
+
+    if (warp != 0) return;
+    for (int field = 0; field < Fields; ++field) {
+        float total = lane < 8 ? warp_totals[lane][field] : 0.0f;
+        for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+            total += __shfl_down_sync(0xffffffffu, total, offset);
+        }
+        if (lane == 0) partials[blockIdx.x * Fields + field] = total;
+    }
+}
+
+template <int Fields>
+__device__ __forceinline__ void finalize_float_fields(
+    const float* partials,
+    float* stats,
+    const unsigned int blocks
+) {
+    const unsigned int field = threadIdx.x;
+    if (field >= Fields) return;
+    float total = 0.0f;
+    for (unsigned int block = 0; block < blocks; ++block) {
+        total += partials[block * Fields + field];
+    }
+    stats[field] = total;
+}
+
 extern "C" __global__
-void dfm_rct_stats_kernel(
+void dfm_rct_stats_stage1_kernel(
     const float* __restrict__ source,
     const float* __restrict__ like,
     const float* __restrict__ mask,
-    float* __restrict__ stats,
+    float* __restrict__ partials,
     const unsigned int pixels,
     const float cutoff
 ) {
-    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pixel >= pixels || mask[pixel] < cutoff) return;
-    float source_rgb[3];
-    float like_rgb[3];
-    for (int channel = 0; channel < 3; ++channel) {
-        source_rgb[channel] = source[pixel * 3 + channel];
-        like_rgb[channel] = like[pixel * 3 + channel];
+    float values[12] = {0.0f};
+    for (unsigned long long pixel = (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x
+             + (unsigned long long)threadIdx.x;
+         pixel < (unsigned long long)pixels;
+         pixel += (unsigned long long)blockDim.x * (unsigned long long)gridDim.x) {
+        if (mask[pixel] < cutoff) continue;
+        float source_rgb[3];
+        float like_rgb[3];
+        for (int channel = 0; channel < 3; ++channel) {
+            source_rgb[channel] = source[pixel * 3ull + (unsigned long long)channel];
+            like_rgb[channel] = like[pixel * 3ull + (unsigned long long)channel];
+        }
+        float source_lab[3];
+        float like_lab[3];
+        rgb_to_lab(source_rgb, source_lab);
+        rgb_to_lab(like_rgb, like_lab);
+        for (int channel = 0; channel < 3; ++channel) {
+            values[channel] += source_lab[channel];
+            values[3 + channel] += source_lab[channel] * source_lab[channel];
+            values[6 + channel] += like_lab[channel];
+            values[9 + channel] += like_lab[channel] * like_lab[channel];
+        }
     }
-    float source_lab[3];
-    float like_lab[3];
-    rgb_to_lab(source_rgb, source_lab);
-    rgb_to_lab(like_rgb, like_lab);
-    for (int channel = 0; channel < 3; ++channel) {
-        atomicAdd(&stats[channel], source_lab[channel]);
-        atomicAdd(&stats[3 + channel], source_lab[channel] * source_lab[channel]);
-        atomicAdd(&stats[6 + channel], like_lab[channel]);
-        atomicAdd(&stats[9 + channel], like_lab[channel] * like_lab[channel]);
-    }
+    reduce_float_fields<12>(values, partials);
+}
+
+extern "C" __global__
+void dfm_rct_stats_stage2_kernel(
+    const float* __restrict__ partials,
+    float* __restrict__ stats,
+    const unsigned int blocks
+) {
+    finalize_float_fields<12>(partials, stats, blocks);
 }
 
 extern "C" __global__
@@ -129,34 +187,49 @@ void dfm_rct_apply_kernel(
 }
 
 extern "C" __global__
-void auto_color_dfl_stats_kernel(
+void auto_color_dfl_stats_stage1_kernel(
     const float* __restrict__ original_chw,
     const float* __restrict__ swapped_chw,
     const float* __restrict__ mask,
-    float* __restrict__ stats,
+    float* __restrict__ partials,
     const unsigned int pixels,
     const unsigned int use_mask
 ) {
-    unsigned int pixel = blockIdx.x * blockDim.x + threadIdx.x;
-    if (pixel >= pixels || (use_mask && mask[pixel] < 0.2f)) return;
+    float values[13] = {0.0f};
+    for (unsigned long long pixel = (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x
+             + (unsigned long long)threadIdx.x;
+         pixel < (unsigned long long)pixels;
+         pixel += (unsigned long long)blockDim.x * (unsigned long long)gridDim.x) {
+        if (use_mask && mask[pixel] < 0.2f) continue;
+        float original_rgb[3];
+        float swapped_rgb[3];
+        for (int channel = 0; channel < 3; ++channel) {
+            unsigned long long offset = (unsigned long long)channel * (unsigned long long)pixels + pixel;
+            original_rgb[channel] = original_chw[offset] / 255.0f;
+            swapped_rgb[channel] = swapped_chw[offset] / 255.0f;
+        }
+        float original_lab[3];
+        float swapped_lab[3];
+        rgb_to_lab(original_rgb, original_lab);
+        rgb_to_lab(swapped_rgb, swapped_lab);
+        for (int channel = 0; channel < 3; ++channel) {
+            values[channel] += original_lab[channel];
+            values[3 + channel] += original_lab[channel] * original_lab[channel];
+            values[6 + channel] += swapped_lab[channel];
+            values[9 + channel] += swapped_lab[channel] * swapped_lab[channel];
+        }
+        values[12] += 1.0f;
+    }
+    reduce_float_fields<13>(values, partials);
+}
 
-    float original_rgb[3];
-    float swapped_rgb[3];
-    for (int channel = 0; channel < 3; ++channel) {
-        original_rgb[channel] = original_chw[channel * pixels + pixel] / 255.0f;
-        swapped_rgb[channel] = swapped_chw[channel * pixels + pixel] / 255.0f;
-    }
-    float original_lab[3];
-    float swapped_lab[3];
-    rgb_to_lab(original_rgb, original_lab);
-    rgb_to_lab(swapped_rgb, swapped_lab);
-    for (int channel = 0; channel < 3; ++channel) {
-        atomicAdd(&stats[channel], original_lab[channel]);
-        atomicAdd(&stats[3 + channel], original_lab[channel] * original_lab[channel]);
-        atomicAdd(&stats[6 + channel], swapped_lab[channel]);
-        atomicAdd(&stats[9 + channel], swapped_lab[channel] * swapped_lab[channel]);
-    }
-    atomicAdd(&stats[12], 1.0f);
+extern "C" __global__
+void auto_color_dfl_stats_stage2_kernel(
+    const float* __restrict__ partials,
+    float* __restrict__ stats,
+    const unsigned int blocks
+) {
+    finalize_float_fields<13>(partials, stats, blocks);
 }
 
 extern "C" __global__

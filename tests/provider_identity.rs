@@ -18,14 +18,14 @@ use noperson::pipeline::workspace::GpuWorkspace;
 
 fn init_gpu() -> anyhow::Result<(Arc<CudaStream>, Arc<GpuOps>)> {
     let context = Arc::new(CudaContext::new(0)?);
-    let stream = context.default_stream().clone();
+    let stream = context.new_stream()?;
     let gpu = Arc::new(GpuOps::new(&context, stream.clone())?);
     Ok((stream, gpu))
 }
 
 fn load_cuda_reference_models(stream: &Arc<CudaStream>) -> anyhow::Result<ModelManager> {
     let mut manager = ModelManager::with_provider("models", ExecutionProvider::Cuda);
-    manager.set_compute_stream(stream.cu_stream() as *mut ());
+    manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
     manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
@@ -167,7 +167,7 @@ fn dump_rust_alignment_for_python_stage_comparison() -> anyhow::Result<()> {
     gpu.hwc_u8_to_chw_f32(&input, &mut frame, height, width)?;
 
     let mut manager = ModelManager::with_provider("models", ExecutionProvider::Cuda);
-    manager.set_compute_stream(stream.cu_stream() as *mut ());
+    manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
 
     let detector = YoloFaceDetector::new(0.5);
@@ -223,13 +223,13 @@ fn provider_stage_cosines_locate_first_identity_divergence() -> anyhow::Result<(
     gpu.hwc_u8_to_chw_f32(&input, &mut frame, height, width)?;
 
     let mut cuda_manager = ModelManager::with_provider("models", ExecutionProvider::Cuda);
-    cuda_manager.set_compute_stream(stream.cu_stream() as *mut ());
+    cuda_manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     cuda_manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     cuda_manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
     cuda_manager.load_emap(CANONICAL_SWAPPER_FILENAME)?;
 
     let mut tensorrt_manager = ModelManager::with_provider("models", ExecutionProvider::TensorRT);
-    tensorrt_manager.set_compute_stream(stream.cu_stream() as *mut ());
+    tensorrt_manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     tensorrt_manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     tensorrt_manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
     tensorrt_manager.load_emap(CANONICAL_SWAPPER_FILENAME)?;
@@ -331,7 +331,7 @@ fn raw_inswapper_provider_activations_have_the_same_direction() -> anyhow::Resul
     let cuda_output = FaceSwapper::swap(&mut cuda_manager, &crop, &latent, 1)?;
 
     let mut tensorrt_manager = ModelManager::with_provider("models", ExecutionProvider::TensorRT);
-    tensorrt_manager.set_compute_stream(stream.cu_stream() as *mut ());
+    tensorrt_manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     tensorrt_manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
     let tensorrt_output = FaceSwapper::swap(&mut tensorrt_manager, &crop, &latent, 1)?;
 
@@ -385,7 +385,7 @@ fn elon_self_swap_cuda_and_tensorrt_preserve_the_same_identity() -> anyhow::Resu
     drop(tensorrt_engine);
     gpu.sync()?;
     let mut identity_manager = ModelManager::with_provider("models", ExecutionProvider::Cuda);
-    identity_manager.set_compute_stream(stream.cu_stream() as *mut ());
+    identity_manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     identity_manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     identity_manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
 

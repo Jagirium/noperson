@@ -40,7 +40,7 @@ fn elon_self_swap_meets_photo_and_camera_quality_gates() -> anyhow::Result<()> {
 
     npp::initialize_runtime(std::path::Path::new("libs/base"))?;
     let context = Arc::new(CudaContext::new(0)?);
-    let stream = context.default_stream().clone();
+    let stream = context.new_stream()?;
     let gpu = Arc::new(GpuOps::new(&context, stream.clone())?);
 
     // Shared-memory Gaussian tiling stays numerically equivalent to the CPU oracle.
@@ -105,10 +105,12 @@ fn elon_self_swap_meets_photo_and_camera_quality_gates() -> anyhow::Result<()> {
     let mut color_gpu = gpu.upload(&color_chw)?;
     let mut color_scratch = gpu.alloc_zeros(color_chw.len())?;
     let mut gray_sum = stream.alloc_zeros::<u32>(1)?;
+    let mut gray_partials = stream.alloc_zeros::<u32>(1024)?;
     gpu.adjust_color(
         &mut color_gpu,
         &mut color_scratch,
         &mut gray_sum,
+        &mut gray_partials,
         8,
         8,
         color_params.gamma,
@@ -225,7 +227,7 @@ fn elon_self_swap_meets_photo_and_camera_quality_gates() -> anyhow::Result<()> {
     // same runtime generation before the one-shot GPU gate succeeds.
     drop(engine);
     let mut tensorrt = ModelManager::with_provider("models", ExecutionProvider::TensorRT);
-    tensorrt.set_compute_stream(stream.cu_stream() as *mut ());
+    tensorrt.set_compute_stream(stream.cu_stream() as *mut ())?;
     tensorrt.load("RuntimeCheck", "yoloface_8n.onnx")?;
     Ok(())
 }

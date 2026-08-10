@@ -193,7 +193,7 @@ impl FrameEnhancer {
     ) -> anyhow::Result<Self> {
         let registry_name = model.registry_name();
         let mut manager = ModelManager::with_execution(models_dir, provider, device_id);
-        manager.set_compute_stream(gpu.stream.cu_stream() as *mut ());
+        manager.set_compute_stream(gpu.stream.cu_stream() as *mut ())?;
         manager.load(registry_name, filename)?;
         Ok(Self {
             gpu,

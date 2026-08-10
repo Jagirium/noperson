@@ -394,7 +394,7 @@ impl App {
             return Ok(g.clone());
         }
         let ctx = Arc::new(CudaContext::new(0)?);
-        let stream = ctx.default_stream().clone();
+        let stream = ctx.new_stream()?;
         let gpu = Arc::new(GpuOps::new(&ctx, stream.clone())?);
         self.gpu = Some(gpu.clone());
         Ok(gpu)

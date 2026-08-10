@@ -118,22 +118,72 @@ fn serve(
 }
 
 fn fixture_model(primary: &'static str, fallback: &'static str, data: &[u8]) -> ModelEntry {
+    fixture_model_with_mirrors(
+        Box::leak(
+            vec![
+                ModelMirror {
+                    name: "primary",
+                    url: primary,
+                },
+                ModelMirror {
+                    name: "fallback",
+                    url: fallback,
+                },
+            ]
+            .into_boxed_slice(),
+        ),
+        data,
+    )
+}
+
+fn fixture_model_with_mirrors(mirrors: &'static [ModelMirror], data: &[u8]) -> ModelEntry {
     ModelEntry {
         name: "fixture",
         filename: "model.onnx",
         size: data.len() as u64,
         blake3: Box::leak(blake3::hash(data).to_hex().to_string().into_boxed_str()),
-        mirrors: [
-            ModelMirror {
-                name: "primary",
-                url: primary,
-            },
-            ModelMirror {
-                name: "fallback",
-                url: fallback,
-            },
-        ],
+        mirrors,
     }
+}
+
+#[tokio::test]
+async fn one_healthy_mirror_downloads_without_panicking() {
+    let data = Arc::new((0..96 * 1024).map(|index| (index % 227) as u8).collect());
+    let only = RangeServer::start(Arc::clone(&data), None, Duration::ZERO);
+    let model = fixture_model_with_mirrors(
+        Box::leak(
+            vec![ModelMirror {
+                name: "only",
+                url: only.url,
+            }]
+            .into_boxed_slice(),
+        ),
+        &data,
+    );
+    let directory = tempfile::tempdir().expect("temp model directory");
+    let progress = DownloadProgress::default();
+    let downloader = ModelDownloader::new(DownloadConfig {
+        chunk_size: 32 * 1024,
+        concurrency: 2,
+        probe_bytes: 8 * 1024,
+        min_throughput_bytes_per_second: 0,
+        ..DownloadConfig::default()
+    })
+    .expect("valid config");
+
+    let path = downloader
+        .download(
+            &model,
+            directory.path(),
+            CancellationToken::new(),
+            progress.clone(),
+        )
+        .await
+        .expect("single-mirror download");
+
+    assert_eq!(std::fs::read(path).expect("final model"), *data);
+    assert_eq!(progress.snapshot().phase, DownloadPhase::Completed);
+    assert!(only.ranges.lock().expect("range lock").len() >= 4);
 }
 
 #[tokio::test]

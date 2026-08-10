@@ -1,34 +1,22 @@
-//! Build script — compiles CUDA kernels (.cu → .ptx).
+//! Build script — validates and embeds precompiled CUDA fatbins.
 //!
-//! PTX files are loaded at runtime by gpu::ops and gpu::kernels.
+//! Kernel compilation is an explicit release-maintenance step. Ordinary Cargo
+//! builds need a C/C++ toolchain for the native bridges, but never CUDA/nvcc.
 //! NPP is loaded after the runtime bootstrap so the executable can start on a
 //! machine that only has an NVIDIA driver installed.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const FATBIN_DIRECTORY: &str = "gpu_kernels/prebuilt/cuda-12.8";
+const FATBIN_MANIFEST: &str = "gpu_kernels/prebuilt/cuda-12.8/MANIFEST_BLAKE3.txt";
+
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(noperson_static_test)");
     let kernels_dir = Path::new("gpu_kernels");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR is not set");
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let cuda_path = env::var("CUDA_HOME")
-        .or_else(|_| env::var("CUDA_PATH"))
-        .unwrap_or_else(|_| {
-            if target_os == "windows" {
-                r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8".to_owned()
-            } else {
-                "/usr/local/cuda".to_owned()
-            }
-        });
-    let nvcc = if target_os == "windows" {
-        PathBuf::from(&cuda_path).join("bin").join("nvcc.exe")
-    } else {
-        PathBuf::from(&cuda_path).join("bin").join("nvcc")
-    };
-    // Keep embedded PTX portable across the complete supported NVIDIA floor.
-    // The driver JIT specializes compute_75 PTX for Turing and every newer SM.
-    let cuda_arch = env::var("NOPERSON_CUDA_ARCH").unwrap_or_else(|_| "compute_75".to_owned());
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         let avformat = pkg_config::Config::new()
@@ -82,6 +70,7 @@ fn main() {
         println!("cargo:rerun-if-changed=native/video/nvcodec_encoder.cpp");
         println!("cargo:rerun-if-env-changed=NOPERSON_NV_CODEC_HEADERS");
         println!("cargo:rerun-if-env-changed=NOPERSON_REQUIRE_NV_CODEC_HEADERS");
+        println!("cargo:rerun-if-env-changed=NOPERSON_FFMPEG_CACHE_KEY");
         println!(
             "cargo:rerun-if-changed=.cache/dependencies/nv-codec-headers-n13.0.19.0/include/ffnvcodec/nvEncodeAPI.h"
         );
@@ -135,49 +124,110 @@ fn main() {
         println!("cargo:rerun-if-changed=native/jpeg_roundtrip.c");
     }
 
-    // Compile each .cu file to .ptx
-    let mut embedded_ptx =
-        String::from("fn embedded_ptx(name: &str) -> Option<&'static str> {\n    match name {\n");
-    if kernels_dir.exists() {
-        let mut paths = std::fs::read_dir(kernels_dir)
-            .expect("Failed to read gpu_kernels/")
-            .map(|entry| entry.expect("invalid gpu kernel entry").path())
-            .collect::<Vec<_>>();
-        paths.sort();
-        for path in paths {
-            if path.extension().is_some_and(|e| e == "cu") {
-                let stem = path.file_stem().unwrap().to_str().unwrap();
-                let ptx_out = format!("{out_dir}/{stem}.ptx");
-
-                let status = Command::new(&nvcc)
-                    .args([
-                        "--ptx",
-                        &format!("-arch={cuda_arch}"),
-                        "-O3",
-                        "-o",
-                        &ptx_out,
-                        path.to_str().unwrap(),
-                    ])
-                    .status()
-                    .unwrap_or_else(|e| panic!("Failed to run nvcc for {stem}.cu: {e}"));
-
-                assert!(status.success(), "nvcc failed for {stem}.cu");
-                embedded_ptx.push_str(&format!(
-                    "        \"{stem}\" => Some(include_str!(concat!(env!(\"OUT_DIR\"), \"/{stem}.ptx\"))),\n"
-                ));
-                println!("cargo:rerun-if-changed={}", path.display());
-            }
-        }
-    }
-    embedded_ptx.push_str("        _ => None,\n    }\n}\n");
-    std::fs::write(format!("{out_dir}/embedded_ptx.rs"), embedded_ptx)
-        .expect("failed to generate embedded PTX registry");
+    generate_embedded_fatbin_registry(kernels_dir, Path::new(&out_dir));
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=gpu_kernels/");
-    println!("cargo:rerun-if-env-changed=CUDA_HOME");
-    println!("cargo:rerun-if-env-changed=CUDA_PATH");
-    println!("cargo:rerun-if-env-changed=NOPERSON_CUDA_ARCH");
+    println!("cargo:rerun-if-changed={FATBIN_MANIFEST}");
+}
+
+fn generate_embedded_fatbin_registry(kernels_dir: &Path, out_dir: &Path) {
+    let manifest = read_blake3_manifest(Path::new(FATBIN_MANIFEST));
+    let mut sources = std::fs::read_dir(kernels_dir)
+        .expect("failed to read gpu_kernels/")
+        .map(|entry| entry.expect("invalid GPU kernel entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "cu"))
+        .collect::<Vec<_>>();
+    sources.sort();
+    assert!(!sources.is_empty(), "CUDA source inventory is empty");
+
+    let mut registry = String::from(
+        "fn embedded_fatbin(name: &str) -> Option<&'static [u8]> {\n    match name {\n",
+    );
+    let mut expected_manifest_paths = BTreeSet::new();
+    let mut expected_fatbin_paths = BTreeSet::new();
+    for source in &sources {
+        let stem = source
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("CUDA kernel filename is not valid UTF-8");
+        let source_relative = format!("gpu_kernels/{stem}.cu");
+        let fatbin_relative = format!("{FATBIN_DIRECTORY}/{stem}.fatbin");
+        verify_manifest_file(&manifest, &source_relative);
+        verify_manifest_file(&manifest, &fatbin_relative);
+        expected_manifest_paths.insert(source_relative.clone());
+        expected_manifest_paths.insert(fatbin_relative.clone());
+        expected_fatbin_paths.insert(fatbin_relative.clone());
+        registry.push_str(&format!(
+            "        \"{stem}\" => Some(include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{fatbin_relative}\"))),\n"
+        ));
+        println!("cargo:rerun-if-changed={source_relative}");
+        println!("cargo:rerun-if-changed={fatbin_relative}");
+    }
+    let manifest_paths = manifest.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        manifest_paths, expected_manifest_paths,
+        "BLAKE3 manifest contains stale or incomplete CUDA inventory"
+    );
+    let tracked_fatbin_paths = std::fs::read_dir(FATBIN_DIRECTORY)
+        .unwrap_or_else(|error| panic!("failed to read {FATBIN_DIRECTORY}: {error}"))
+        .map(|entry| entry.expect("invalid tracked fatbin entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "fatbin")
+        })
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        tracked_fatbin_paths, expected_fatbin_paths,
+        "tracked fatbin directory contains stale or incomplete CUDA inventory"
+    );
+    registry.push_str("        _ => None,\n    }\n}\n");
+    std::fs::write(out_dir.join("embedded_fatbin.rs"), registry)
+        .expect("failed to generate embedded fatbin registry");
+}
+
+fn read_blake3_manifest(path: &Path) -> BTreeMap<String, String> {
+    let body = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let mut inventory = BTreeMap::new();
+    for (index, line) in body.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') || line.contains('=') {
+            continue;
+        }
+        let (digest, relative) = line.split_once("  ").unwrap_or_else(|| {
+            panic!(
+                "invalid BLAKE3 manifest record at {}:{}",
+                path.display(),
+                index + 1
+            )
+        });
+        assert!(
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "invalid BLAKE3 digest at {}:{}",
+            path.display(),
+            index + 1
+        );
+        assert!(
+            inventory
+                .insert(relative.to_owned(), digest.to_owned())
+                .is_none(),
+            "duplicate BLAKE3 manifest path: {relative}"
+        );
+    }
+    inventory
+}
+
+fn verify_manifest_file(manifest: &BTreeMap<String, String>, relative: &str) {
+    let expected = manifest
+        .get(relative)
+        .unwrap_or_else(|| panic!("missing BLAKE3 manifest record: {relative}"));
+    let bytes = std::fs::read(relative)
+        .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"));
+    let actual = blake3::hash(&bytes).to_hex().to_string();
+    assert_eq!(
+        actual, *expected,
+        "BLAKE3 mismatch for {relative}; expected {expected}, actual {actual}"
+    );
 }
 
 fn nvcodec_include_path() -> Option<PathBuf> {

@@ -8,18 +8,20 @@ use noperson::{
 use std::fs;
 
 #[test]
-fn color_prep_accumulates_contrast_mean_without_a_second_full_image_pass() {
+fn color_prep_reduces_contrast_mean_without_a_second_full_image_pass() {
     let kernel = fs::read_to_string("gpu_kernels/color_adjust.cu").unwrap();
     let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
 
     let prep = kernel
-        .split("void color_adjust_prep_kernel")
+        .split("void color_adjust_prep_stage1_kernel")
         .nth(1)
         .expect("prep kernel exists")
         .split("extern \"C\" __global__")
         .next()
         .unwrap();
-    assert!(prep.contains("atomicAdd(gray_sum"));
+    assert!(prep.contains("__shfl_down_sync"));
+    assert!(!prep.contains("atomicAdd("));
+    assert!(kernel.contains("void color_adjust_prep_stage2_kernel"));
     assert!(!kernel.contains("void color_contrast_sum_kernel"));
     assert!(!ops.contains("color_contrast_sum_fn"));
 }

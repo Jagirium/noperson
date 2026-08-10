@@ -170,6 +170,10 @@ impl ControlState {
         let Some(control) = catalog.iter().find(|control| control.id == id) else {
             return false;
         };
+        self.is_spec_visible(control, frontend)
+    }
+
+    pub fn is_spec_visible(&self, control: &ControlSpec, frontend: FrontendMode) -> bool {
         if control.visibility.hidden_modes.contains(&frontend) {
             return false;
         }
@@ -351,4 +355,29 @@ fn validate(controls: &[ControlSpec]) -> Result<(), ControlCatalogError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visibility_can_use_a_pre_resolved_control_spec() {
+        let catalog = control_catalog().expect("catalog");
+        let mut state = ControlState::from_catalog(&catalog).expect("defaults");
+        let restorer_type = catalog
+            .iter()
+            .find(|control| control.id == "FaceRestorerTypeSelection")
+            .expect("restorer type control");
+
+        assert!(!state.is_spec_visible(restorer_type, FrontendMode::Editor));
+        state
+            .set(
+                "FaceRestorerEnableToggle",
+                ControlValue::Toggle(true),
+                &catalog,
+            )
+            .expect("enable restorer");
+        assert!(state.is_spec_visible(restorer_type, FrontendMode::Editor));
+    }
 }

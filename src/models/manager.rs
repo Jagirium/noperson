@@ -3,11 +3,42 @@
 //! Port of crosswap/app/processors/models_processor.py
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use ort::session::{IoBinding, Session};
 
 use crate::config::settings::ExecutionProvider;
+
+/// Ordering contract between caller-owned CUDA buffers and ONNX Runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingFencePolicy {
+    /// The CUDA EP and the caller use the exact same non-null stream. CUDA
+    /// stream ordering is sufficient; device-wide IoBinding fences are wasteful.
+    SameCudaStream,
+    /// The provider may consume/produce on another stream. Fence both sides.
+    FenceInputsAndOutputs,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ComputeStreamError {
+    #[error("CUDA compute stream pointer must be non-null")]
+    Null,
+    #[error("CUDA compute stream cannot change after a session or binding is loaded")]
+    RuntimeStateLoaded,
+}
+
+fn validate_compute_stream_update(
+    current: Option<NonZeroUsize>,
+    requested: *mut (),
+    runtime_state_loaded: bool,
+) -> Result<NonZeroUsize, ComputeStreamError> {
+    let requested = NonZeroUsize::new(requested as usize).ok_or(ComputeStreamError::Null)?;
+    if runtime_state_loaded && current != Some(requested) {
+        return Err(ComputeStreamError::RuntimeStateLoaded);
+    }
+    Ok(requested)
+}
 
 /// ONNX session manager — loads models on demand with CUDA EP.
 ///
@@ -31,7 +62,7 @@ pub struct ModelManager {
     /// Shared CUDA compute stream pointer — ort sessions use this so that
     /// inference is ordered with cudarc kernels in the same stream (eliminates
     /// context switch + internal cudaMemcpy overhead for IoBinding inputs).
-    compute_stream: Option<usize>,
+    compute_stream: Option<NonZeroUsize>,
 }
 
 impl ModelManager {
@@ -69,8 +100,28 @@ impl ModelManager {
 
     /// Set the shared CUDA compute stream pointer for subsequent session loads.
     /// Must be called BEFORE `load()` for the stream sharing to take effect.
-    pub fn set_compute_stream(&mut self, stream_ptr: *mut ()) {
-        self.compute_stream = Some(stream_ptr as usize);
+    pub fn set_compute_stream(&mut self, stream_ptr: *mut ()) -> Result<(), ComputeStreamError> {
+        let runtime_state_loaded = !self.sessions.is_empty() || !self.bindings.is_empty();
+        self.compute_stream = Some(validate_compute_stream_update(
+            self.compute_stream,
+            stream_ptr,
+            runtime_state_loaded,
+        )?);
+        Ok(())
+    }
+
+    /// Select the minimum safe IoBinding synchronization policy for buffers
+    /// produced and consumed on `work_stream`.
+    pub fn binding_fence_policy(&self, work_stream: *mut ()) -> BindingFencePolicy {
+        let work_stream = NonZeroUsize::new(work_stream as usize);
+        if self.provider == ExecutionProvider::Cuda
+            && work_stream.is_some()
+            && self.compute_stream == work_stream
+        {
+            BindingFencePolicy::SameCudaStream
+        } else {
+            BindingFencePolicy::FenceInputsAndOutputs
+        }
     }
 
     /// Load an ONNX model with CUDA execution provider.
@@ -96,7 +147,7 @@ impl ModelManager {
             Some(ptr) => unsafe {
                 ort::ep::CUDA::default()
                     .with_device_id(self.device_id)
-                    .with_compute_stream(ptr as *mut ())
+                    .with_compute_stream(ptr.get() as *mut ())
                     .build()
                     .error_on_failure()
             },
@@ -128,7 +179,7 @@ impl ModelManager {
                 // on one user stream are unstable in ORT rc.12.
                 .with_cuda_graph(false);
             if let Some(ptr) = self.compute_stream {
-                trt = unsafe { trt.with_compute_stream(ptr as *mut ()) };
+                trt = unsafe { trt.with_compute_stream(ptr.get() as *mut ()) };
             }
             providers.push(trt.build().error_on_failure());
         }
@@ -166,14 +217,8 @@ impl ModelManager {
     /// Get a (session, reusable binding) pair for `name`. Creates the binding on
     /// first call and caches it. Split-borrow: both fields are distinct so the
     /// borrow checker allows a simultaneous &mut to each.
-    ///
-    /// Usage pattern (hot path):
-    /// ```ignore
-    /// let (session, binding) = manager.session_and_binding("Inswapper128")?;
-    /// // Bind inputs/outputs to `binding` via low-level API
-    /// session.run_binding(binding)?;
-    /// binding.clear();
-    /// ```
+    /// The pipeline's common `run_bound_values` helper is the only hot-path
+    /// caller so binding cleanup and provider-aware ordering cannot diverge.
     pub fn session_and_binding(
         &mut self,
         name: &str,
@@ -252,5 +297,89 @@ impl ModelManager {
             "Inswapper emap not found at {}. Extract it from the swapper ONNX graph.",
             emap_path.display()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::{BindingFencePolicy, ModelManager, validate_compute_stream_update};
+    use crate::config::settings::ExecutionProvider;
+
+    fn stream(value: usize) -> *mut () {
+        value as *mut ()
+    }
+
+    #[test]
+    fn fence_policy_requires_the_exact_shared_cuda_stream() {
+        let mut manager = ModelManager::with_execution("models", ExecutionProvider::Cuda, 0);
+        manager.set_compute_stream(stream(0x1000)).unwrap();
+
+        assert_eq!(
+            manager.binding_fence_policy(stream(0x1000)),
+            BindingFencePolicy::SameCudaStream
+        );
+        assert_eq!(
+            manager.binding_fence_policy(stream(0x2000)),
+            BindingFencePolicy::FenceInputsAndOutputs
+        );
+        assert_eq!(
+            manager.binding_fence_policy(core::ptr::null_mut()),
+            BindingFencePolicy::FenceInputsAndOutputs
+        );
+    }
+
+    #[test]
+    fn cuda_without_a_configured_stream_and_tensorrt_always_fence() {
+        let cuda = ModelManager::with_execution("models", ExecutionProvider::Cuda, 0);
+        assert_eq!(
+            cuda.binding_fence_policy(stream(0x1000)),
+            BindingFencePolicy::FenceInputsAndOutputs
+        );
+
+        let mut tensorrt = ModelManager::with_execution("models", ExecutionProvider::TensorRT, 0);
+        tensorrt.set_compute_stream(stream(0x1000)).unwrap();
+        assert_eq!(
+            tensorrt.binding_fence_policy(stream(0x1000)),
+            BindingFencePolicy::FenceInputsAndOutputs
+        );
+        assert_eq!(
+            tensorrt.binding_fence_policy(stream(0x2000)),
+            BindingFencePolicy::FenceInputsAndOutputs
+        );
+    }
+
+    #[test]
+    fn tensorrt_without_a_configured_compute_stream_fences() {
+        let tensorrt = ModelManager::with_execution("models", ExecutionProvider::TensorRT, 0);
+
+        assert_eq!(
+            tensorrt.binding_fence_policy(stream(0x1000)),
+            BindingFencePolicy::FenceInputsAndOutputs
+        );
+    }
+
+    #[test]
+    fn compute_stream_update_rejects_null_and_loaded_state_changes() {
+        assert!(validate_compute_stream_update(None, core::ptr::null_mut(), false).is_err());
+
+        let first = validate_compute_stream_update(None, stream(0x1000), false).unwrap();
+        assert_eq!(first, NonZeroUsize::new(0x1000).unwrap());
+        assert!(validate_compute_stream_update(Some(first), stream(0x2000), true).is_err());
+        assert_eq!(
+            validate_compute_stream_update(Some(first), stream(0x1000), true).unwrap(),
+            first
+        );
+        assert_eq!(
+            validate_compute_stream_update(Some(first), stream(0x2000), false).unwrap(),
+            NonZeroUsize::new(0x2000).unwrap()
+        );
+    }
+
+    #[test]
+    fn public_setter_rejects_a_null_stream() {
+        let mut manager = ModelManager::new("models");
+        assert!(manager.set_compute_stream(core::ptr::null_mut()).is_err());
     }
 }

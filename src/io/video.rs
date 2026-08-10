@@ -497,7 +497,6 @@ impl FfmpegVideoSource {
     }
 
     fn open_impl(path: &Path, worker_threads: Option<usize>) -> anyhow::Result<Self> {
-        let path = path.as_ref();
         let probe = Command::new("ffprobe")
             .args([
                 "-v",

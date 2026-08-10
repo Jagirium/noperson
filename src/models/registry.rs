@@ -11,7 +11,7 @@ macro_rules! model {
             filename: $filename,
             size: $size,
             blake3: $blake3,
-            mirrors: [
+            mirrors: &[
                 ModelMirror {
                     name: "github",
                     url: concat!(

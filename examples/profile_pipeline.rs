@@ -50,10 +50,10 @@ fn main() -> anyhow::Result<()> {
 
     // Init CUDA
     let ctx = Arc::new(CudaContext::new(0)?);
-    let stream = ctx.default_stream().clone();
+    let stream = ctx.new_stream()?;
     let gpu = GpuOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
-    manager.set_compute_stream(stream.cu_stream() as *mut ());
+    manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
     manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;

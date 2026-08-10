@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui;
 
-use super::controls::{ChoiceSource, ControlSpec, ControlState, control_catalog};
+use super::controls::{ChoiceSource, ControlScope, ControlSpec, ControlState, control_catalog};
 use super::editor::{EditorTimeline, MediaId, MediaLibrary, PreviewViewport};
 use super::faces::FaceWorkspace;
 
@@ -41,8 +42,29 @@ impl ExtraGuiPanel {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum InspectorDock {
+    Left,
+    #[default]
+    Right,
+    Floating,
+}
+
+impl InspectorDock {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Dock left",
+            Self::Right => "Dock right",
+            Self::Floating => "Detach inspector",
+        }
+    }
+}
+
 pub(super) struct ExtraGuiState {
     pub active_panel: ExtraGuiPanel,
+    pub inspector_scope: ControlScope,
+    pub inspector_dock: InspectorDock,
+    pub inspector_open: bool,
     pub workspace_name: String,
     pub workspace_path: Option<PathBuf>,
     pub dirty: bool,
@@ -51,7 +73,7 @@ pub(super) struct ExtraGuiState {
     pub runtime_progress: Option<(u64, Option<u64>)>,
     pub last_output: Option<PathBuf>,
     pub output_directory: Option<PathBuf>,
-    pub catalog: Vec<ControlSpec>,
+    pub catalog: Arc<[ControlSpec]>,
     pub controls: ControlState,
     pub parameter_search: String,
     pub dynamic_choices: BTreeMap<String, Vec<String>>,
@@ -92,11 +114,13 @@ impl Default for ExtraGuiState {
 
 impl ExtraGuiState {
     pub fn new(models_dir: &Path) -> Self {
-        let catalog = control_catalog().expect("embedded extra GUI control catalog must be valid");
+        let catalog: Arc<[ControlSpec]> = control_catalog()
+            .expect("embedded extra GUI control catalog must be valid")
+            .into();
         let controls =
             ControlState::from_catalog(&catalog).expect("control defaults must match their specs");
         let mut dynamic_choices = BTreeMap::new();
-        for control in &catalog {
+        for control in catalog.iter() {
             let super::controls::ControlKind::Choice {
                 source: Some(source),
                 ..
@@ -112,6 +136,9 @@ impl ExtraGuiState {
         }
         Self {
             active_panel: ExtraGuiPanel::Media,
+            inspector_scope: ControlScope::Swapper,
+            inspector_dock: InspectorDock::Right,
+            inspector_open: true,
             workspace_name: "Untitled workspace".to_owned(),
             workspace_path: None,
             dirty: false,
@@ -178,5 +205,33 @@ fn collect_dfm_models(dir: &Path, depth: usize, models: &mut Vec<String>) {
         {
             models.push(name.to_owned());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspector_dock_defaults_to_open_on_the_right() {
+        let state = ExtraGuiState::new(Path::new("models"));
+
+        assert_eq!(state.inspector_dock, InspectorDock::Right);
+        assert!(state.inspector_open);
+    }
+
+    #[test]
+    fn inspector_dock_supports_both_sides_and_a_floating_window() {
+        assert_eq!(InspectorDock::Left.label(), "Dock left");
+        assert_eq!(InspectorDock::Right.label(), "Dock right");
+        assert_eq!(InspectorDock::Floating.label(), "Detach inspector");
+    }
+
+    #[test]
+    fn control_catalog_is_shared_instead_of_deep_cloned_for_rendering() {
+        let state = ExtraGuiState::new(Path::new("models"));
+        let catalog = state.catalog.clone();
+
+        assert!(std::sync::Arc::ptr_eq(&catalog, &state.catalog));
     }
 }

@@ -30,7 +30,7 @@ use crate::pipeline::face_recognizer::FaceRecognizer;
 use crate::pipeline::face_tracker::{TemporalFaceTracker, TrackerPolicy};
 use crate::pipeline::frame_enhancer::FrameEnhancer;
 use crate::pipeline::frame_processor::{
-    AssignmentBackend, FrameResult, SourceFace, process_frame_gpu,
+    AssignmentBackend, FrameResult, GenerationGpuState, SourceFace, process_frame_gpu_with_state,
 };
 use crate::pipeline::workspace::GpuWorkspace;
 
@@ -102,7 +102,7 @@ impl IdentityAnalyzer {
         device_id: i32,
     ) -> anyhow::Result<Self> {
         let mut manager = ModelManager::with_execution(models_dir, provider, device_id);
-        manager.set_compute_stream(gpu.stream.cu_stream() as *mut ());
+        manager.set_compute_stream(gpu.stream.cu_stream() as *mut ())?;
         let (detector_name, detector_filename) = match detector_model {
             DetectorModel::YoloFace8n => ("YoloFace8n", "yoloface_8n.onnx"),
             DetectorModel::RetinaFace => ("RetinaFace", "det_10g.onnx"),
@@ -279,6 +279,7 @@ pub struct LiveEngine {
     face_tracker: TemporalFaceTracker,
     workspace: GpuWorkspace,
     source_faces: Vec<SourceFace>,
+    generation_gpu_state: GenerationGpuState,
     params: FaceSwapParams,
     enhancer: Option<FrameEnhancer>,
     rotation_scratch: Option<CudaSlice<f32>>,
@@ -806,7 +807,7 @@ impl LiveEngine {
         }
 
         let mut manager = ModelManager::with_execution(models_dir, spec.provider, spec.device_id);
-        manager.set_compute_stream(stream.cu_stream() as *mut ());
+        manager.set_compute_stream(stream.cu_stream() as *mut ())?;
         let detector_artifact = required_artifact(spec, ModelRole::Detector)?;
         match spec.detector {
             DetectorModel::YoloFace8n => manager.load("YoloFace8n", &detector_artifact.filename)?,
@@ -981,6 +982,8 @@ impl LiveEngine {
             });
             ensure_build_active(cancellation)?;
         }
+        let generation_gpu_state = GenerationGpuState::new(&gpu, &source_faces)?;
+        ensure_build_active(cancellation)?;
         let enhancer = if spec.params.enhancer_enabled {
             let artifact = required_artifact(spec, ModelRole::Enhancer)?;
             let enhancer = FrameEnhancer::new_with_filename(
@@ -1004,6 +1007,7 @@ impl LiveEngine {
             face_tracker: TemporalFaceTracker::new(TrackerPolicy::offline_recovery()),
             workspace,
             source_faces,
+            generation_gpu_state,
             params: spec.params.clone(),
             enhancer,
             rotation_scratch: None,
@@ -1026,7 +1030,7 @@ impl LiveEngine {
             0
         };
         if turns == 0 {
-            return process_frame_gpu(
+            return process_frame_gpu_with_state(
                 &self.gpu,
                 &mut self.manager,
                 &self.detector,
@@ -1035,6 +1039,7 @@ impl LiveEngine {
                 width,
                 &mut self.workspace,
                 &self.source_faces,
+                &mut self.generation_gpu_state,
                 &self.params,
                 &mut self.face_tracker,
             );
@@ -1052,7 +1057,7 @@ impl LiveEngine {
         };
         self.gpu
             .rotate_quadrants(frame, &mut rotated, height, width, turns)?;
-        let result = process_frame_gpu(
+        let result = process_frame_gpu_with_state(
             &self.gpu,
             &mut self.manager,
             &self.detector,
@@ -1061,6 +1066,7 @@ impl LiveEngine {
             rotated_width,
             &mut self.workspace,
             &self.source_faces,
+            &mut self.generation_gpu_state,
             &self.params,
             &mut self.face_tracker,
         )?;

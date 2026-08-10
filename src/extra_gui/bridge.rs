@@ -46,6 +46,7 @@ pub struct EditorEngineRequest {
 }
 
 impl EditorRuntimeConfig {
+    #[allow(clippy::field_reassign_with_default)]
     pub fn from_controls(controls: &ControlState) -> Result<Self, ControlBridgeError> {
         let provider = match choice(controls, "ProvidersPrioritySelection")? {
             "CUDA" => ExecutionProvider::Cuda,

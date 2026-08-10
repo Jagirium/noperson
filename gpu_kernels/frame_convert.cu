@@ -118,6 +118,20 @@ unsigned char round_clamp_u8(float value) {
     return (unsigned char)__float2int_rn(fminf(fmaxf(value, 0.0f), 255.0f));
 }
 
+// Pitched external surfaces are byte-addressed. Do not cast row starts to
+// unsigned short*: an odd byte pitch makes every second row unaligned.
+__device__ __forceinline__
+void store_p010_sample(
+    unsigned char* row,
+    const unsigned int sample_index,
+    const float code_10
+) {
+    const unsigned short packed = ((unsigned short)(code_10 + 0.5f)) << 6;
+    const unsigned int byte_offset = sample_index * 2;
+    row[byte_offset] = (unsigned char)(packed & 0xffu);
+    row[byte_offset + 1] = (unsigned char)(packed >> 8);
+}
+
 // Pitch-aware NV12/P010 surface -> CHW f32 RGB [0,255]. The source pointer
 // may be owned by NVDEC; no wrapper allocation or device copy is required.
 extern "C" __global__
@@ -174,8 +188,7 @@ void nv12_to_chw_f32_kernel(
 }
 
 // CHW f32 RGB [3, src_h, src_w] in [0, 255] -> scaled NV12.
-// One thread writes one Y sample. Threads on even coordinates additionally
-// write the corresponding interleaved UV sample, so no atomics are needed.
+// One thread writes one 2x2 luma macroblock and its interleaved UV sample.
 extern "C" __global__
 void chw_f32_to_nv12_scaled_kernel(
     const float* __restrict__ chw,
@@ -199,52 +212,83 @@ void chw_f32_to_nv12_scaled_kernel(
     const float uv_offset
 ) {
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int total = dst_h * dst_w;
+    unsigned int total = (dst_h / 2) * (dst_w / 2);
     if (idx >= total) return;
 
-    unsigned int y = idx / dst_w;
-    unsigned int x = idx % dst_w;
-    float r = sample_chw_bilinear(chw, 0, src_h, src_w, y, x, dst_h, dst_w);
-    float g = sample_chw_bilinear(chw, 1, src_h, src_w, y, x, dst_h, dst_w);
-    float b = sample_chw_bilinear(chw, 2, src_h, src_w, y, x, dst_h, dst_w);
-    float y_code = yr * r + yg * g + yb * b + y_offset;
-    if (p010 != 0) {
-        unsigned short* p010_output = (unsigned short*)(nv12 + (size_t)y * pitch);
-        float code = fminf(fmaxf(y_code * 4.0f, 0.0f), 1023.0f);
-        p010_output[x] = ((unsigned short)(code + 0.5f)) << 6;
-    } else {
-        nv12[(size_t)y * pitch + x] = round_clamp_u8(y_code);
-    }
+    unsigned int macro_index = idx;
+    unsigned int macro_w = dst_w / 2;
+    unsigned int x = (macro_index % macro_w) * 2;
+    unsigned int y = (macro_index / macro_w) * 2;
 
-    if ((x & 1u) != 0u || (y & 1u) != 0u) return;
+    // Keep the sampling and accumulation order byte-identical to the former
+    // even-coordinate path: 00, 01, 10, then 11. Each RGB triplet is sampled
+    // once and retained for both luma and chroma.
+    float r00 = sample_chw_bilinear(chw, 0, src_h, src_w, y, x, dst_h, dst_w);
+    float g00 = sample_chw_bilinear(chw, 1, src_h, src_w, y, x, dst_h, dst_w);
+    float b00 = sample_chw_bilinear(chw, 2, src_h, src_w, y, x, dst_h, dst_w);
+    float r01 = sample_chw_bilinear(chw, 0, src_h, src_w, y, x + 1, dst_h, dst_w);
+    float g01 = sample_chw_bilinear(chw, 1, src_h, src_w, y, x + 1, dst_h, dst_w);
+    float b01 = sample_chw_bilinear(chw, 2, src_h, src_w, y, x + 1, dst_h, dst_w);
+    float r10 = sample_chw_bilinear(chw, 0, src_h, src_w, y + 1, x, dst_h, dst_w);
+    float g10 = sample_chw_bilinear(chw, 1, src_h, src_w, y + 1, x, dst_h, dst_w);
+    float b10 = sample_chw_bilinear(chw, 2, src_h, src_w, y + 1, x, dst_h, dst_w);
+    float r11 = sample_chw_bilinear(chw, 0, src_h, src_w, y + 1, x + 1, dst_h, dst_w);
+    float g11 = sample_chw_bilinear(chw, 1, src_h, src_w, y + 1, x + 1, dst_h, dst_w);
+    float b11 = sample_chw_bilinear(chw, 2, src_h, src_w, y + 1, x + 1, dst_h, dst_w);
+
+    float y00 = yr * r00 + yg * g00 + yb * b00 + y_offset;
+    float y01 = yr * r01 + yg * g01 + yb * b01 + y_offset;
+    float y10 = yr * r10 + yg * g10 + yb * b10 + y_offset;
+    float y11 = yr * r11 + yg * g11 + yb * b11 + y_offset;
+    if (p010 != 0) {
+        unsigned char* p010_output = nv12 + (size_t)y * pitch;
+        float y00_10 = fminf(fmaxf(y00 * 4.0f, 0.0f), 1023.0f);
+        float y01_10 = fminf(fmaxf(y01 * 4.0f, 0.0f), 1023.0f);
+        float y10_10 = fminf(fmaxf(y10 * 4.0f, 0.0f), 1023.0f);
+        float y11_10 = fminf(fmaxf(y11 * 4.0f, 0.0f), 1023.0f);
+        store_p010_sample(p010_output, x, y00_10);
+        store_p010_sample(p010_output, x + 1, y01_10);
+        unsigned char* p010_next_row = nv12 + (size_t)(y + 1) * pitch;
+        store_p010_sample(p010_next_row, x, y10_10);
+        store_p010_sample(p010_next_row, x + 1, y11_10);
+    } else {
+        unsigned char* y_row = nv12 + (size_t)y * pitch;
+        unsigned char* y_next_row = nv12 + (size_t)(y + 1) * pitch;
+        y_row[x] = round_clamp_u8(y00);
+        y_row[x + 1] = round_clamp_u8(y01);
+        y_next_row[x] = round_clamp_u8(y10);
+        y_next_row[x + 1] = round_clamp_u8(y11);
+    }
 
     // NV12 chroma represents a 2x2 luma block. Average the four resampled RGB
     // pixels before applying the selected YUV matrix and range transform.
     float sum_r = 0.0f;
     float sum_g = 0.0f;
     float sum_b = 0.0f;
-    #pragma unroll
-    for (unsigned int dy = 0; dy < 2; ++dy) {
-        #pragma unroll
-        for (unsigned int dx = 0; dx < 2; ++dx) {
-            sum_r += sample_chw_bilinear(chw, 0, src_h, src_w, y + dy, x + dx, dst_h, dst_w);
-            sum_g += sample_chw_bilinear(chw, 1, src_h, src_w, y + dy, x + dx, dst_h, dst_w);
-            sum_b += sample_chw_bilinear(chw, 2, src_h, src_w, y + dy, x + dx, dst_h, dst_w);
-        }
-    }
-    r = sum_r * 0.25f;
-    g = sum_g * 0.25f;
-    b = sum_b * 0.25f;
+    sum_r += r00;
+    sum_g += g00;
+    sum_b += b00;
+    sum_r += r01;
+    sum_g += g01;
+    sum_b += b01;
+    sum_r += r10;
+    sum_g += g10;
+    sum_b += b10;
+    sum_r += r11;
+    sum_g += g11;
+    sum_b += b11;
+    float r = sum_r * 0.25f;
+    float g = sum_g * 0.25f;
+    float b = sum_b * 0.25f;
     float u_code = ur * r + ug * g + ub * b + uv_offset;
     float v_code = vr * r + vg * g + vb * b + uv_offset;
     unsigned char* uv_plane = nv12 + (size_t)pitch * dst_h;
     if (p010 != 0) {
-        unsigned short* p010_output =
-            (unsigned short*)(uv_plane + (size_t)(y / 2) * pitch);
+        unsigned char* p010_output = uv_plane + (size_t)(y / 2) * pitch;
         float u10 = fminf(fmaxf(u_code * 4.0f, 0.0f), 1023.0f);
         float v10 = fminf(fmaxf(v_code * 4.0f, 0.0f), 1023.0f);
-        p010_output[x] = ((unsigned short)(u10 + 0.5f)) << 6;
-        p010_output[x + 1] = ((unsigned short)(v10 + 0.5f)) << 6;
+        store_p010_sample(p010_output, x, u10);
+        store_p010_sample(p010_output, x + 1, v10);
     } else {
         unsigned char* uv_row = uv_plane + (size_t)(y / 2) * pitch;
         uv_row[x] = round_clamp_u8(u_code);

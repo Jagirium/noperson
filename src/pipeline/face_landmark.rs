@@ -11,7 +11,7 @@ use crate::config::parameters::LandmarkMode;
 use crate::gpu::ops::GpuOps;
 use crate::math::affine;
 use crate::models::manager::ModelManager;
-use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
+use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
 
 /// Landmark model types.
@@ -466,19 +466,20 @@ fn run_landmark_session(
             .zip(shapes)
             .map(|(pointer, shape)| unsafe { create_cuda_tensor_f32(&memory, *pointer, shape) })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        let (session, binding) = manager.session_and_binding(model.model_name())?;
-        unsafe {
-            bind_input_raw(binding, model.input_name(), &input)?;
-            for (((name, _), _), output) in
-                model.output_specs().iter().zip(shapes).zip(outputs.iter())
-            {
-                bind_output_raw(binding, name, output)?;
-            }
-        }
-        binding.synchronize_inputs()?;
-        let _ = session.run_binding(binding)?;
-        binding.synchronize_outputs()?;
-        binding.clear();
+        let bound_outputs = model
+            .output_specs()
+            .iter()
+            .zip(shapes)
+            .zip(outputs.iter())
+            .map(|(((name, _), _), output)| (*name, output))
+            .collect::<Vec<_>>();
+        run_bound_values(
+            manager,
+            &gpu.stream,
+            model.model_name(),
+            &[(model.input_name(), &input)],
+            &bound_outputs,
+        )?;
     }
 
     for ((index, (_, length)), buffer) in model.output_specs().iter().enumerate().zip([

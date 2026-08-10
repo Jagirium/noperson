@@ -12,5 +12,5 @@ pub struct ArtifactEntry {
     pub filename: &'static str,
     pub size: u64,
     pub blake3: &'static str,
-    pub mirrors: [ArtifactMirror; 2],
+    pub mirrors: &'static [ArtifactMirror],
 }

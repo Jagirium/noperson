@@ -53,9 +53,6 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# ── Math (affine estimation on CPU — 5 points, too small for GPU) ──
-nalgebra = "0.34"
-
 # ── Byte casting ───────────────────────────────────────────────────
 bytemuck = { version = "1", features = ["derive"] }
 
@@ -92,6 +89,7 @@ egui_kittest = { version = "0.35.0", features = ["snapshot", "wgpu"] }
 tempfile = "3"
 
 [build-dependencies]
+blake3 = "1"
 cc = "1"
 pkg-config = "0.3"
 

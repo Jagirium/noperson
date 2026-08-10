@@ -10,7 +10,7 @@ use super::panels;
 use super::runtime::{
     AnalyzeRequest, EditorJobPhase, EditorJobState, EditorRuntimeEvent, EditorRuntimeHandle,
 };
-use super::state::{ExtraGuiPanel, ExtraGuiState};
+use super::state::{ExtraGuiPanel, ExtraGuiState, InspectorDock};
 use super::workspace::WorkspaceDocument;
 use super::{ControlValue, EditorRuntimeConfig};
 
@@ -20,6 +20,18 @@ pub struct ExtraGuiApp {
     last_autosave: Instant,
     runtime: EditorRuntimeHandle,
     job: EditorJobState,
+}
+
+fn runtime_repaint_interval(phase: EditorJobPhase) -> Option<Duration> {
+    matches!(
+        phase,
+        EditorJobPhase::Analyzing
+            | EditorJobPhase::Building
+            | EditorJobPhase::Previewing
+            | EditorJobPhase::Recording
+            | EditorJobPhase::Cancelling
+    )
+    .then_some(Duration::from_millis(8))
 }
 
 impl ExtraGuiApp {
@@ -1014,6 +1026,9 @@ impl ExtraGuiApp {
                 self.runtime_actions(ui);
                 ui.separator();
                 ui.label(&self.state.workspace_name);
+                if !self.state.inspector_open && ui.button("Show inspector").clicked() {
+                    self.state.inspector_open = true;
+                }
                 if self.state.dirty {
                     ui.label(egui::RichText::new("●").color(egui::Color32::from_rgb(52, 120, 246)));
                 }
@@ -1023,30 +1038,54 @@ impl ExtraGuiApp {
             });
             ui.separator();
 
-            let available = ui.available_size();
-            let left_width = 270.0_f32.min((available.x * 0.24).max(230.0));
-            let right_width = 360.0_f32.min((available.x * 0.30).max(300.0));
-            let center_width = (available.x - left_width - right_width - 16.0).max(420.0);
+            if self.state.inspector_open && self.state.inspector_dock == InspectorDock::Left {
+                egui::Panel::left("extra_inspector_left")
+                    .default_size(380.0)
+                    .size_range(300.0..=720.0)
+                    .resizable(true)
+                    .show(ui, |ui| {
+                        panels::inspector(ui, &mut self.state, &self.models_dir);
+                        ui.take_available_space();
+                    });
+            }
 
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(left_width, available.y),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| panels::media_dock(ui, &mut self.state),
-                );
-                ui.separator();
-                ui.allocate_ui_with_layout(
-                    egui::vec2(center_width, available.y),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| panels::player_workspace(ui, &mut self.state),
-                );
-                ui.separator();
-                ui.allocate_ui_with_layout(
-                    egui::vec2(right_width, available.y),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| panels::inspector(ui, &mut self.state, &self.models_dir),
-                );
+            egui::Panel::left("extra_media_dock")
+                .default_size(270.0)
+                .size_range(220.0..=480.0)
+                .resizable(true)
+                .show(ui, |ui| {
+                    panels::media_dock(ui, &mut self.state);
+                    ui.take_available_space();
+                });
+
+            if self.state.inspector_open && self.state.inspector_dock == InspectorDock::Right {
+                egui::Panel::right("extra_inspector_right")
+                    .default_size(380.0)
+                    .size_range(300.0..=720.0)
+                    .resizable(true)
+                    .show(ui, |ui| {
+                        panels::inspector(ui, &mut self.state, &self.models_dir);
+                        ui.take_available_space();
+                    });
+            }
+
+            egui::CentralPanel::default().show(ui, |ui| {
+                panels::player_workspace(ui, &mut self.state);
             });
+
+            if self.state.inspector_open && self.state.inspector_dock == InspectorDock::Floating {
+                let mut open = true;
+                egui::Window::new("Inspector")
+                    .id(egui::Id::new("extra_inspector_floating"))
+                    .default_size(egui::vec2(440.0, 760.0))
+                    .min_size(egui::vec2(300.0, 420.0))
+                    .resizable(true)
+                    .open(&mut open)
+                    .show(ui.ctx(), |ui| {
+                        panels::inspector(ui, &mut self.state, &self.models_dir);
+                    });
+                self.state.inspector_open = open;
+            }
         });
     }
 }
@@ -1066,6 +1105,9 @@ impl eframe::App for ExtraGuiApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.render_studio_shell(ui);
+        if let Some(interval) = runtime_repaint_interval(self.job.phase()) {
+            ui.ctx().request_repaint_after(interval);
+        }
     }
 }
 
@@ -1108,8 +1150,12 @@ mod tests {
             "SOURCE IDENTITIES",
             "PLAYER",
             "TIMELINE",
+            "Dock left",
+            "Detach inspector",
+            "Hide inspector",
             "Faces",
-            "Parameters",
+            "Face Swap",
+            "Common",
             "Settings",
             "Play",
             "Record",
@@ -1119,5 +1165,71 @@ mod tests {
                 "studio shell is missing {label}"
             );
         }
+    }
+
+    #[test]
+    fn parameter_inspector_exposes_visomaster_style_controls() {
+        let mut app = ExtraGuiApp::new(PathBuf::from("models"));
+        app.select_panel(ExtraGuiPanel::Parameters);
+        let harness = Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .build_ui_state(|ui, app| app.render_studio_shell(ui), app);
+
+        for label in ["Swapper Model", "Similarity Threshold"] {
+            assert!(
+                harness.query_by_label(label).is_some(),
+                "parameter inspector is missing {label}"
+            );
+        }
+        assert!(
+            harness.query_all_by_label("Reset").next().is_some(),
+            "parameter inspector is missing reset actions"
+        );
+    }
+
+    #[test]
+    fn runtime_polling_sleeps_when_idle_and_tracks_active_video_at_120_hz() {
+        assert_eq!(runtime_repaint_interval(EditorJobPhase::Idle), None);
+        assert_eq!(
+            runtime_repaint_interval(EditorJobPhase::Previewing),
+            Some(Duration::from_millis(8))
+        );
+        assert_eq!(
+            runtime_repaint_interval(EditorJobPhase::Recording),
+            Some(Duration::from_millis(8))
+        );
+    }
+
+    #[test]
+    fn inspector_can_detach_and_redock_on_either_side() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .build_ui_state(
+                |ui, app| app.render_studio_shell(ui),
+                ExtraGuiApp::new(PathBuf::from("models")),
+            );
+
+        harness.get_by_label("Detach inspector").click();
+        harness.run();
+        assert!(harness.query_by_label("Dock left").is_some());
+        assert!(harness.query_by_label("Dock right").is_some());
+
+        harness.get_by_label("Dock left").click();
+        harness.run();
+        assert!(harness.query_by_label("Dock right").is_some());
+        assert!(harness.query_by_label("Detach inspector").is_some());
+    }
+
+    #[test]
+    #[ignore = "local visual baseline is stored in ignored tests/snapshots"]
+    fn inspector_visual_snapshot() {
+        let mut app = ExtraGuiApp::new(PathBuf::from("models"));
+        app.select_panel(ExtraGuiPanel::Parameters);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .wgpu()
+            .build_ui_state(|ui, app| app.render_studio_shell(ui), app);
+
+        harness.snapshot("extra_gui_inspector");
     }
 }

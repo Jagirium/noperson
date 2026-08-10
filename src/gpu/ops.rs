@@ -14,7 +14,7 @@ use std::cell::RefCell;
 
 use crate::gpu::npp;
 
-include!(concat!(env!("OUT_DIR"), "/embedded_ptx.rs"));
+include!(concat!(env!("OUT_DIR"), "/embedded_fatbin.rs"));
 
 /// Profiling stage labels — must stay in sync with process_frame_gpu marks.
 pub const PROFILE_STAGES: &[&str] = &[
@@ -27,6 +27,29 @@ pub const PROFILE_STAGES: &[&str] = &[
     "after_mask_gen",
     "after_paste_back",
 ];
+
+const REDUCTION_THREADS: u32 = 256;
+const MAX_REDUCTION_BLOCKS: u32 = 1024;
+
+fn reduction_stage1_config(pixels: u32) -> (LaunchConfig, u32) {
+    let blocks = pixels.div_ceil(REDUCTION_THREADS).min(MAX_REDUCTION_BLOCKS);
+    (
+        LaunchConfig {
+            grid_dim: (blocks, 1, 1),
+            block_dim: (REDUCTION_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        },
+        blocks,
+    )
+}
+
+fn reduction_stage2_config(fields: u32) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (fields, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
 
 fn profiling_requested(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_some_and(|value| {
@@ -46,6 +69,7 @@ pub struct ProfilingState {
 /// All loaded GPU kernels + launch methods.
 pub struct GpuOps {
     pub stream: Arc<CudaStream>,
+    npp_stream_context: npp::NppStreamContext,
     // Kernels
     normalize_fn: CudaFunction,
     interlace_extract_fn: CudaFunction,
@@ -53,6 +77,7 @@ pub struct GpuOps {
     enhancer_pack_tiles_fn: CudaFunction,
     enhancer_scatter_tiles_fn: CudaFunction,
     calc_latent_512_fn: CudaFunction,
+    select_first_embedding_source_fn: CudaFunction,
     resize_fn: CudaFunction,
     paste_back_fn: CudaFunction,
     border_oval_mask_fn: CudaFunction,
@@ -72,11 +97,14 @@ pub struct GpuOps {
     anchor_face_compact_fn: CudaFunction,
     chw_rgb_to_nhwc_bgr_unit_fn: CudaFunction,
     nhwc_bgr_unit_to_chw_rgb_fn: CudaFunction,
-    dfm_rct_stats_fn: CudaFunction,
+    dfm_rct_stats_stage1_fn: CudaFunction,
+    dfm_rct_stats_stage2_fn: CudaFunction,
     dfm_rct_apply_fn: CudaFunction,
-    auto_color_dfl_stats_fn: CudaFunction,
+    auto_color_dfl_stats_stage1_fn: CudaFunction,
+    auto_color_dfl_stats_stage2_fn: CudaFunction,
     auto_color_dfl_apply_fn: CudaFunction,
-    color_adjust_prep_fn: CudaFunction,
+    color_adjust_prep_stage1_fn: CudaFunction,
+    color_adjust_prep_stage2_fn: CudaFunction,
     color_contrast_saturation_fn: CudaFunction,
     color_sharpness_hue_noise_fn: CudaFunction,
     // Mask kernels
@@ -94,14 +122,18 @@ pub struct GpuOps {
     parser_class_mask_fn: CudaFunction,
     parser_makeup_fn: CudaFunction,
     mask_invert_fn: CudaFunction,
+    morphology_mask_horizontal_fn: CudaFunction,
+    morphology_mask_vertical_fn: CudaFunction,
     restore_ellipse_mask_fn: CudaFunction,
     fake_diff_mask_fn: CudaFunction,
     fake_diff_composite_fn: CudaFunction,
     fake_diff_composite_direct_fn: CudaFunction,
-    semantic_region_mask_fn: CudaFunction,
+    semantic_region_mask_stage1_fn: CudaFunction,
+    semantic_region_mask_stage2_fn: CudaFunction,
     semantic_temporal_mask_fn: CudaFunction,
     semantic_mark_valid_fn: CudaFunction,
-    semantic_region_stats_fn: CudaFunction,
+    semantic_region_stats_stage1_fn: CudaFunction,
+    semantic_region_stats_stage2_fn: CudaFunction,
     semantic_composite_fn: CudaFunction,
     // Profiling (cell for interior mutability — methods only take &self)
     profiling: Option<RefCell<ProfilingState>>,
@@ -117,26 +149,28 @@ unsafe impl Send for GpuOps {}
 unsafe impl Sync for GpuOps {}
 
 impl GpuOps {
-    /// Load all PTX kernels. Panics if any kernel fails to load.
+    /// Load all embedded CUDA fatbins. Panics if any kernel fails to load.
     pub fn new(ctx: &Arc<CudaContext>, stream: Arc<CudaStream>) -> Result<Self, DriverError> {
-        unsafe {
-            npp::set_npp_stream(stream.cu_stream() as *mut std::ffi::c_void).map_err(|e| {
-                tracing::error!("nppSetStream failed: {e}");
-                DriverError(CUresult::CUDA_ERROR_UNKNOWN)
-            })?;
-        }
+        let npp_stream_context = unsafe {
+            npp::capture_stream_context(stream.cu_stream() as *mut std::ffi::c_void).map_err(
+                |e| {
+                    tracing::error!("NPP stream-context capture failed: {e}");
+                    DriverError(CUresult::CUDA_ERROR_UNKNOWN)
+                },
+            )?
+        };
 
         // Several source files expose multiple entry points. Loading the same
-        // PTX once per function makes CUDA re-JIT and retain duplicate modules,
+        // fatbin once per function makes CUDA retain duplicate modules,
         // which is especially expensive when constructing a shadow generation.
         let mut modules = HashMap::new();
         let mut load = |name: &str, entry: &str| -> CudaFunction {
             let module = modules.entry(name.to_owned()).or_insert_with(|| {
-                let source = embedded_ptx(name)
-                    .unwrap_or_else(|| panic!("PTX module was not embedded: {name}"));
-                let ptx = Ptx::from_src(source);
+                let image = embedded_fatbin(name)
+                    .unwrap_or_else(|| panic!("fatbin module was not embedded: {name}"));
+                let ptx = Ptx::from_binary(image.to_vec());
                 ctx.load_module(ptx)
-                    .unwrap_or_else(|e| panic!("Failed to load {name}.ptx: {e}"))
+                    .unwrap_or_else(|e| panic!("Failed to load {name}.fatbin: {e}"))
             });
             module
                 .load_function(entry)
@@ -164,6 +198,7 @@ impl GpuOps {
 
         Ok(Self {
             stream,
+            npp_stream_context,
             normalize_fn: load("normalize", "normalize_kernel"),
             interlace_extract_fn: load("interlace", "interlace_extract_normalized_kernel"),
             interlace_scatter_fn: load("interlace", "interlace_scatter_denormalized_kernel"),
@@ -190,14 +225,21 @@ impl GpuOps {
             anchor_face_compact_fn: load("detector_decode", "anchor_face_compact_kernel"),
             chw_rgb_to_nhwc_bgr_unit_fn: load("layout_convert", "chw_rgb_to_nhwc_bgr_unit_kernel"),
             nhwc_bgr_unit_to_chw_rgb_fn: load("layout_convert", "nhwc_bgr_unit_to_chw_rgb_kernel"),
-            dfm_rct_stats_fn: load("dfm_color", "dfm_rct_stats_kernel"),
+            dfm_rct_stats_stage1_fn: load("dfm_color", "dfm_rct_stats_stage1_kernel"),
+            dfm_rct_stats_stage2_fn: load("dfm_color", "dfm_rct_stats_stage2_kernel"),
             dfm_rct_apply_fn: load("dfm_color", "dfm_rct_apply_kernel"),
-            auto_color_dfl_stats_fn: load("dfm_color", "auto_color_dfl_stats_kernel"),
+            auto_color_dfl_stats_stage1_fn: load("dfm_color", "auto_color_dfl_stats_stage1_kernel"),
+            auto_color_dfl_stats_stage2_fn: load("dfm_color", "auto_color_dfl_stats_stage2_kernel"),
             auto_color_dfl_apply_fn: load("dfm_color", "auto_color_dfl_apply_kernel"),
-            color_adjust_prep_fn: load("color_adjust", "color_adjust_prep_kernel"),
+            color_adjust_prep_stage1_fn: load("color_adjust", "color_adjust_prep_stage1_kernel"),
+            color_adjust_prep_stage2_fn: load("color_adjust", "color_adjust_prep_stage2_kernel"),
             color_contrast_saturation_fn: load("color_adjust", "color_contrast_saturation_kernel"),
             color_sharpness_hue_noise_fn: load("color_adjust", "color_sharpness_hue_noise_kernel"),
             calc_latent_512_fn: load("matmul_512", "calc_latent_512_kernel"),
+            select_first_embedding_source_fn: load(
+                "matmul_512",
+                "select_first_embedding_source_kernel",
+            ),
             blur_h_fn: load("gaussian_blur", "gaussian_blur_h_kernel"),
             blur_v_fn: load("gaussian_blur", "gaussian_blur_v_kernel"),
             blur_chw_h_fn: load("gaussian_blur", "gaussian_blur_chw_h_kernel"),
@@ -212,6 +254,14 @@ impl GpuOps {
             parser_class_mask_fn: load("mask_postprocess", "parser_class_mask_kernel"),
             parser_makeup_fn: load("mask_postprocess", "parser_makeup_kernel"),
             mask_invert_fn: load("mask_postprocess", "mask_invert_kernel"),
+            morphology_mask_horizontal_fn: load(
+                "mask_postprocess",
+                "morphology_mask_horizontal_kernel",
+            ),
+            morphology_mask_vertical_fn: load(
+                "mask_postprocess",
+                "morphology_mask_vertical_kernel",
+            ),
             restore_ellipse_mask_fn: load("mask_postprocess", "restore_ellipse_mask_kernel"),
             fake_diff_mask_fn: load("mask_postprocess", "fake_diff_mask_kernel"),
             fake_diff_composite_fn: load("mask_postprocess", "fake_diff_composite_kernel"),
@@ -219,10 +269,24 @@ impl GpuOps {
                 "mask_postprocess",
                 "fake_diff_composite_direct_kernel",
             ),
-            semantic_region_mask_fn: load("mask_postprocess", "semantic_region_mask_kernel"),
+            semantic_region_mask_stage1_fn: load(
+                "mask_postprocess",
+                "semantic_region_mask_stage1_kernel",
+            ),
+            semantic_region_mask_stage2_fn: load(
+                "mask_postprocess",
+                "semantic_region_mask_stage2_kernel",
+            ),
             semantic_temporal_mask_fn: load("mask_postprocess", "semantic_temporal_mask_kernel"),
             semantic_mark_valid_fn: load("mask_postprocess", "semantic_mark_valid_kernel"),
-            semantic_region_stats_fn: load("mask_postprocess", "semantic_region_stats_kernel"),
+            semantic_region_stats_stage1_fn: load(
+                "mask_postprocess",
+                "semantic_region_stats_stage1_kernel",
+            ),
+            semantic_region_stats_stage2_fn: load(
+                "mask_postprocess",
+                "semantic_region_stats_stage2_kernel",
+            ),
             semantic_composite_fn: load("mask_postprocess", "semantic_composite_kernel"),
             profiling,
         })
@@ -413,6 +477,41 @@ impl GpuOps {
         b.arg(output);
         unsafe {
             b.launch(LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (512, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }?;
+        Ok(())
+    }
+
+    /// Select the first source whose target meets its own CrossSwap threshold.
+    /// The kernel writes `u32::MAX` when no source matches.
+    pub fn select_first_embedding_source(
+        &self,
+        query: &CudaSlice<f32>,
+        target_bank: &CudaSlice<f32>,
+        thresholds: &CudaSlice<f32>,
+        target_present: &CudaSlice<u32>,
+        source_count: u32,
+        selected_index: &mut CudaSlice<u32>,
+    ) -> Result<(), DriverError> {
+        debug_assert!(query.len() >= 512);
+        debug_assert!(target_bank.len() >= source_count as usize * 512);
+        debug_assert!(thresholds.len() >= source_count as usize);
+        debug_assert!(target_present.len() >= source_count as usize);
+        debug_assert!(!selected_index.is_empty());
+        let mut launch = self
+            .stream
+            .launch_builder(&self.select_first_embedding_source_fn);
+        launch.arg(query);
+        launch.arg(target_bank);
+        launch.arg(thresholds);
+        launch.arg(target_present);
+        launch.arg(&source_count);
+        launch.arg(selected_index);
+        unsafe {
+            launch.launch(LaunchConfig {
                 grid_dim: (1, 1, 1),
                 block_dim: (512, 1, 1),
                 shared_mem_bytes: 0,
@@ -669,7 +768,7 @@ impl GpuOps {
             ],
             (ColorMatrix::Unspecified, _) => unreachable!(),
         };
-        let total = dst_h * dst_w;
+        let total = (dst_h / 2) * (dst_w / 2);
         let mut b = self.stream.launch_builder(&self.chw_f32_to_nv12_scaled_fn);
         b.arg(src);
         b.arg(&dst_device_ptr);
@@ -740,7 +839,7 @@ impl GpuOps {
     }
 
     /// NPP-accelerated affine warp for CHW f32 planar images. Uses
-    /// `nppiWarpAffine_32f_P3R` which internally leverages CUDA texture
+    /// `nppiWarpAffine_32f_P3R_Ctx` which internally leverages CUDA texture
     /// memory — ~5× faster than the naive custom kernel.
     ///
     /// `fwd_affine` is a FORWARD matrix (src → dst), same convention as
@@ -767,6 +866,7 @@ impl GpuOps {
                 dst_w as i32,
                 dst_h as i32,
                 fwd_affine,
+                &self.npp_stream_context,
             )
             .map_err(|e| {
                 tracing::error!("NPP warp_affine failed: {e}");
@@ -796,6 +896,7 @@ impl GpuOps {
                 dst_ptr as *mut f32,
                 dst_w as i32,
                 dst_h as i32,
+                &self.npp_stream_context,
             )
             .map_err(|e| {
                 tracing::error!("NPP resize failed: {e}");
@@ -869,18 +970,25 @@ impl GpuOps {
         like_nhwc: &CudaSlice<f32>,
         mask: &CudaSlice<f32>,
         stats: &mut CudaSlice<f32>,
+        partials: &mut CudaSlice<f32>,
         pixels: u32,
         cutoff: f32,
     ) -> Result<(), DriverError> {
-        self.stream.memcpy_htod(&[0.0f32; 12], stats)?;
-        let mut reduce = self.stream.launch_builder(&self.dfm_rct_stats_fn);
+        let (stage1, blocks) = reduction_stage1_config(pixels);
+        let mut reduce = self.stream.launch_builder(&self.dfm_rct_stats_stage1_fn);
         reduce.arg(&*source_nhwc);
         reduce.arg(like_nhwc);
         reduce.arg(mask);
-        reduce.arg(&mut *stats);
+        reduce.arg(&mut *partials);
         reduce.arg(&pixels);
         reduce.arg(&cutoff);
-        unsafe { reduce.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        unsafe { reduce.launch(stage1) }?;
+
+        let mut finalize = self.stream.launch_builder(&self.dfm_rct_stats_stage2_fn);
+        finalize.arg(&*partials);
+        finalize.arg(&mut *stats);
+        finalize.arg(&blocks);
+        unsafe { finalize.launch(reduction_stage2_config(12)) }?;
 
         let mut apply = self.stream.launch_builder(&self.dfm_rct_apply_fn);
         apply.arg(source_nhwc);
@@ -896,20 +1004,31 @@ impl GpuOps {
         swapped_chw: &mut CudaSlice<f32>,
         mask: &CudaSlice<f32>,
         stats: &mut CudaSlice<f32>,
+        partials: &mut CudaSlice<f32>,
         pixels: u32,
         use_mask: bool,
         blend: f32,
     ) -> Result<(), DriverError> {
-        self.stream.memcpy_htod(&[0.0f32; 13], stats)?;
         let use_mask = u32::from(use_mask);
-        let mut reduce = self.stream.launch_builder(&self.auto_color_dfl_stats_fn);
+        let (stage1, blocks) = reduction_stage1_config(pixels);
+        let mut reduce = self
+            .stream
+            .launch_builder(&self.auto_color_dfl_stats_stage1_fn);
         reduce.arg(original_chw);
         reduce.arg(&*swapped_chw);
         reduce.arg(mask);
-        reduce.arg(&mut *stats);
+        reduce.arg(&mut *partials);
         reduce.arg(&pixels);
         reduce.arg(&use_mask);
-        unsafe { reduce.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        unsafe { reduce.launch(stage1) }?;
+
+        let mut finalize = self
+            .stream
+            .launch_builder(&self.auto_color_dfl_stats_stage2_fn);
+        finalize.arg(&*partials);
+        finalize.arg(&mut *stats);
+        finalize.arg(&blocks);
+        unsafe { finalize.launch(reduction_stage2_config(13)) }?;
 
         let mut apply = self.stream.launch_builder(&self.auto_color_dfl_apply_fn);
         apply.arg(swapped_chw);
@@ -926,6 +1045,7 @@ impl GpuOps {
         image: &mut CudaSlice<f32>,
         scratch: &mut CudaSlice<f32>,
         gray_sum: &mut CudaSlice<u32>,
+        partials: &mut CudaSlice<u32>,
         width: u32,
         height: u32,
         gamma: f32,
@@ -939,17 +1059,27 @@ impl GpuOps {
         seed: u32,
     ) -> Result<(), DriverError> {
         let pixels = width * height;
-        self.stream.memcpy_htod(&[0u32], gray_sum)?;
-        let mut prep = self.stream.launch_builder(&self.color_adjust_prep_fn);
+        let (stage1, blocks) = reduction_stage1_config(pixels);
+        let mut prep = self
+            .stream
+            .launch_builder(&self.color_adjust_prep_stage1_fn);
         prep.arg(&mut *image);
-        prep.arg(&mut *gray_sum);
+        prep.arg(&mut *partials);
         prep.arg(&pixels);
         prep.arg(&gamma);
         prep.arg(&offsets[0]);
         prep.arg(&offsets[1]);
         prep.arg(&offsets[2]);
         prep.arg(&brightness);
-        unsafe { prep.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        unsafe { prep.launch(stage1) }?;
+
+        let mut finalize = self
+            .stream
+            .launch_builder(&self.color_adjust_prep_stage2_fn);
+        finalize.arg(&*partials);
+        finalize.arg(&mut *gray_sum);
+        finalize.arg(&blocks);
+        unsafe { finalize.launch(reduction_stage2_config(1)) }?;
 
         let mut color = self
             .stream
@@ -1479,17 +1609,28 @@ impl GpuOps {
         classes: &CudaSlice<u8>,
         mask: &mut CudaSlice<f32>,
         count: &mut CudaSlice<u32>,
+        partials: &mut CudaSlice<u32>,
         region: u32,
     ) -> Result<(), DriverError> {
         let pixels = 512 * 512u32;
-        self.stream.memcpy_htod(&[0u32], count)?;
-        let mut b = self.stream.launch_builder(&self.semantic_region_mask_fn);
+        let (stage1, blocks) = reduction_stage1_config(pixels);
+        let mut b = self
+            .stream
+            .launch_builder(&self.semantic_region_mask_stage1_fn);
         b.arg(classes);
         b.arg(mask);
-        b.arg(count);
+        b.arg(&mut *partials);
         b.arg(&pixels);
         b.arg(&region);
-        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        unsafe { b.launch(stage1) }?;
+
+        let mut finalize = self
+            .stream
+            .launch_builder(&self.semantic_region_mask_stage2_fn);
+        finalize.arg(&*partials);
+        finalize.arg(&mut *count);
+        finalize.arg(&blocks);
+        unsafe { finalize.launch(reduction_stage2_config(1)) }?;
         Ok(())
     }
 
@@ -1609,16 +1750,27 @@ impl GpuOps {
         original: &CudaSlice<f32>,
         mask: &CudaSlice<f32>,
         stats: &mut CudaSlice<f32>,
+        partials: &mut CudaSlice<f32>,
     ) -> Result<(), DriverError> {
         let pixels = 512 * 512u32;
-        self.stream.memcpy_htod(&[0.0f32; 8], stats)?;
-        let mut b = self.stream.launch_builder(&self.semantic_region_stats_fn);
+        let (stage1, blocks) = reduction_stage1_config(pixels);
+        let mut b = self
+            .stream
+            .launch_builder(&self.semantic_region_stats_stage1_fn);
         b.arg(swapped);
         b.arg(original);
         b.arg(mask);
-        b.arg(stats);
+        b.arg(&mut *partials);
         b.arg(&pixels);
-        unsafe { b.launch(LaunchConfig::for_num_elems(pixels)) }?;
+        unsafe { b.launch(stage1) }?;
+
+        let mut finalize = self
+            .stream
+            .launch_builder(&self.semantic_region_stats_stage2_fn);
+        finalize.arg(&*partials);
+        finalize.arg(&mut *stats);
+        finalize.arg(&blocks);
+        unsafe { finalize.launch(reduction_stage2_config(8)) }?;
         Ok(())
     }
 
@@ -1649,7 +1801,7 @@ impl GpuOps {
         Ok(())
     }
 
-    /// Repeat CrossSwap's radius-N max-pool morphology using NPP 3x3 passes.
+    /// Reference-exact radius-N CrossSwap morphology using two separable max passes.
     pub fn morphology_mask(
         &self,
         mask: &mut CudaSlice<f32>,
@@ -1658,61 +1810,46 @@ impl GpuOps {
         height: u32,
         amount: i32,
     ) -> Result<(), DriverError> {
-        let iterations = amount.unsigned_abs().min(100);
-        for iteration in 0..iterations {
-            let result = if iteration.is_multiple_of(2) {
-                let (src_ptr, _src_guard) = mask.device_ptr(&self.stream);
-                let (dst_ptr, _dst_guard) = tmp.device_ptr_mut(&self.stream);
-                if amount > 0 {
-                    unsafe {
-                        npp::dilate_3x3_f32_c1(
-                            src_ptr as *const f32,
-                            dst_ptr as *mut f32,
-                            width as i32,
-                            height as i32,
-                        )
-                    }
-                } else {
-                    unsafe {
-                        npp::erode_3x3_f32_c1(
-                            src_ptr as *const f32,
-                            dst_ptr as *mut f32,
-                            width as i32,
-                            height as i32,
-                        )
-                    }
-                }
-            } else {
-                let (src_ptr, _src_guard) = tmp.device_ptr(&self.stream);
-                let (dst_ptr, _dst_guard) = mask.device_ptr_mut(&self.stream);
-                if amount > 0 {
-                    unsafe {
-                        npp::dilate_3x3_f32_c1(
-                            src_ptr as *const f32,
-                            dst_ptr as *mut f32,
-                            width as i32,
-                            height as i32,
-                        )
-                    }
-                } else {
-                    unsafe {
-                        npp::erode_3x3_f32_c1(
-                            src_ptr as *const f32,
-                            dst_ptr as *mut f32,
-                            width as i32,
-                            height as i32,
-                        )
-                    }
-                }
-            };
-            result.map_err(|error| {
-                tracing::error!("NPP mask morphology failed: {error}");
-                DriverError(cudarc::driver::sys::CUresult::CUDA_ERROR_UNKNOWN)
-            })?;
+        if amount == 0 {
+            return Ok(());
         }
-        if !iterations.is_multiple_of(2) {
-            self.stream.memcpy_dtod(tmp, mask)?;
-        }
+        let radius = amount.unsigned_abs().min(100);
+        let negative = u32::from(amount < 0);
+        let grid = (width.div_ceil(32), height.div_ceil(8), 1);
+
+        let mut horizontal = self
+            .stream
+            .launch_builder(&self.morphology_mask_horizontal_fn);
+        horizontal.arg(&*mask);
+        horizontal.arg(&mut *tmp);
+        horizontal.arg(&height);
+        horizontal.arg(&width);
+        horizontal.arg(&radius);
+        horizontal.arg(&negative);
+        unsafe {
+            horizontal.launch(LaunchConfig {
+                grid_dim: grid,
+                block_dim: (32, 8, 1),
+                shared_mem_bytes: (32 + 2 * radius) * 8 * 4,
+            })
+        }?;
+
+        let mut vertical = self
+            .stream
+            .launch_builder(&self.morphology_mask_vertical_fn);
+        vertical.arg(&*tmp);
+        vertical.arg(&mut *mask);
+        vertical.arg(&height);
+        vertical.arg(&width);
+        vertical.arg(&radius);
+        vertical.arg(&negative);
+        unsafe {
+            vertical.launch(LaunchConfig {
+                grid_dim: grid,
+                block_dim: (32, 8, 1),
+                shared_mem_bytes: 32 * (8 + 2 * radius) * 4,
+            })
+        }?;
         Ok(())
     }
 

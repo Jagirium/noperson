@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use crate::config::settings::DetectorModel;
 use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
-use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
+use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
 
 /// Detected face with bounding box and 5-point landmarks.
@@ -300,15 +300,13 @@ impl YoloFaceDetector {
             let output_value =
                 unsafe { create_cuda_tensor_f32(&cuda_mem_info, output_dev, &output_shape)? };
 
-            let (session, binding) = mgr.session_and_binding("YoloFace8n")?;
-            unsafe {
-                bind_input_raw(binding, "images", &input_value)?;
-                bind_output_raw(binding, "output0", &output_value)?;
-            }
-            binding.synchronize_inputs()?;
-            let _ = session.run_binding(binding)?;
-            binding.synchronize_outputs()?;
-            binding.clear();
+            run_bound_values(
+                mgr,
+                &gpu.stream,
+                "YoloFace8n",
+                &[("images", &input_value)],
+                &[("output0", &output_value)],
+            )?;
 
             drop(input_value);
             drop(output_value);
@@ -579,17 +577,18 @@ impl AnchorDetector {
                 AnchorDetectorKind::RetinaFace => "RetinaFace",
                 AnchorDetectorKind::Scrfd => "SCRFD2.5g",
             };
-            let (session, binding) = mgr.session_and_binding(model_name)?;
-            unsafe {
-                bind_input_raw(binding, self.kind.input_name(), &input)?;
-                for (name, output) in self.kind.output_names().into_iter().zip(outputs.iter()) {
-                    bind_output_raw(binding, name, output)?;
-                }
-            }
-            binding.synchronize_inputs()?;
-            let _ = session.run_binding(binding)?;
-            binding.synchronize_outputs()?;
-            binding.clear();
+            let output_names = self.kind.output_names();
+            let bound_outputs = output_names
+                .into_iter()
+                .zip(outputs.iter())
+                .collect::<Vec<_>>();
+            run_bound_values(
+                mgr,
+                &gpu.stream,
+                model_name,
+                &[(self.kind.input_name(), &input)],
+                &bound_outputs,
+            )?;
         }
 
         gpu.compact_anchor_faces(

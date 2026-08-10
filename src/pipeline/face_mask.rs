@@ -790,6 +790,7 @@ fn restore_semantic_region(
         &ws.parser_classes,
         &mut ws.parser_attribute_512,
         &mut ws.semantic_count,
+        &mut ws.reduction_partials_u32,
         region_code,
     )?;
     gpu.morphology_mask(
@@ -844,6 +845,7 @@ fn restore_semantic_region(
         &ws.face_512_original,
         &ws.parser_attribute_512,
         &mut ws.semantic_stats,
+        &mut ws.reduction_partials_f32,
     )?;
     gpu.semantic_composite(
         &mut ws.face_512,
@@ -1035,101 +1037,4 @@ pub(crate) fn prepare_blur_kernel(
         ws.blur_sigma_current = sigma;
     }
     Ok(ks)
-}
-
-/// Paste swapped face back into frame using mask.
-///
-/// `frame_chw` — full frame [3, H, W] in [0, 255], MODIFIED in place.
-/// `swap_chw` — swapped face [3, face_size, face_size] in [0, 255].
-/// `mask` — face mask [face_size, face_size] where 1.0 = swap, 0.0 = keep original.
-/// `affine` — 2×3 affine matrix (face coords → frame coords).
-pub fn paste_back(
-    frame_chw: &mut [f32],
-    frame_h: u32,
-    frame_w: u32,
-    swap_chw: &[f32],
-    mask: &[f32],
-    face_size: u32,
-    affine: &[[f64; 3]; 2],
-) {
-    // affine maps frame_kps → face_template (src→dst).
-    // To paste back: iterate frame pixels, use FORWARD affine to find face pixel.
-    // affine(frame_pixel) → face_pixel (sample from swap).
-    let a = affine;
-    let fs = face_size as f32;
-
-    // Compute bounding box of the face in frame space using inverse transform
-    let inv = crate::math::affine::invert_2x3(affine);
-    let corners = [
-        (0.0, 0.0),
-        (fs as f64, 0.0),
-        (0.0, fs as f64),
-        (fs as f64, fs as f64),
-    ];
-    let mut min_x = f64::MAX;
-    let mut min_y = f64::MAX;
-    let mut max_x = f64::MIN;
-    let mut max_y = f64::MIN;
-    for (cx, cy) in corners {
-        let fx = inv[0][0] * cx + inv[0][1] * cy + inv[0][2];
-        let fy = inv[1][0] * cx + inv[1][1] * cy + inv[1][2];
-        min_x = min_x.min(fx);
-        min_y = min_y.min(fy);
-        max_x = max_x.max(fx);
-        max_y = max_y.max(fy);
-    }
-
-    let left = (min_x.floor() as i32).max(0) as u32;
-    let top = (min_y.floor() as i32).max(0) as u32;
-    let right = (max_x.ceil() as i32).min(frame_w as i32) as u32;
-    let bottom = (max_y.ceil() as i32).min(frame_h as i32) as u32;
-
-    // Inverse mapping: for each frame pixel in bbox, find face pixel via forward affine
-    for fy in top..bottom {
-        for fx in left..right {
-            // Forward affine: frame → face
-            let sx = (a[0][0] * fx as f64 + a[0][1] * fy as f64 + a[0][2]) as f32;
-            let sy = (a[1][0] * fx as f64 + a[1][1] * fy as f64 + a[1][2]) as f32;
-
-            // Check bounds in face space
-            if sx < 0.0 || sy < 0.0 || sx >= fs - 1.0 || sy >= fs - 1.0 {
-                continue;
-            }
-
-            // Bilinear sample from swap face and mask
-            let x0 = sx as u32;
-            let y0 = sy as u32;
-            let x1 = x0 + 1;
-            let y1 = y0 + 1;
-            let wx = sx - x0 as f32;
-            let wy = sy - y0 as f32;
-
-            let face_idx = |yy: u32, xx: u32| (yy * face_size + xx) as usize;
-
-            // Sample mask
-            let m = mask[face_idx(y0, x0)] * (1.0 - wx) * (1.0 - wy)
-                + mask[face_idx(y0, x1)] * wx * (1.0 - wy)
-                + mask[face_idx(y1, x0)] * (1.0 - wx) * wy
-                + mask[face_idx(y1, x1)] * wx * wy;
-
-            if m < 0.001 {
-                continue;
-            }
-
-            for c in 0..3u32 {
-                let cidx =
-                    |yy: u32, xx: u32| (c * face_size * face_size + yy * face_size + xx) as usize;
-
-                // Bilinear sample from swap
-                let sv = swap_chw[cidx(y0, x0)] * (1.0 - wx) * (1.0 - wy)
-                    + swap_chw[cidx(y0, x1)] * wx * (1.0 - wy)
-                    + swap_chw[cidx(y1, x0)] * (1.0 - wx) * wy
-                    + swap_chw[cidx(y1, x1)] * wx * wy;
-
-                let frame_idx = (c * frame_h * frame_w + fy * frame_w + fx) as usize;
-                let orig = frame_chw[frame_idx];
-                frame_chw[frame_idx] = sv * m + orig * (1.0 - m);
-            }
-        }
-    }
 }

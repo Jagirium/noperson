@@ -79,10 +79,12 @@ pub fn build_plan(options: &HeadlessOptions) -> anyhow::Result<HeadlessPlan> {
         512 => SwapDim::Dim4,
         value => anyhow::bail!("unsupported swap resolution {value}"),
     };
-    let mut params = FaceSwapParams::default();
-    params.dim = dim;
-    params.detector_score = options.face_detector_score;
-    params.max_faces = options.max_faces;
+    let params = FaceSwapParams {
+        dim,
+        detector_score: options.face_detector_score,
+        max_faces: options.max_faces,
+        ..FaceSwapParams::default()
+    };
     Ok(HeadlessPlan {
         workflow,
         source_path: options.source_path.clone(),
@@ -166,7 +168,7 @@ fn engine_request(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<Edit
 fn process_image(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<()> {
     let request = engine_request(plan, models_dir)?;
     let context = Arc::new(CudaContext::new(plan.device_id as usize)?);
-    let stream = context.default_stream().clone();
+    let stream = context.new_stream()?;
     let gpu = Arc::new(GpuOps::new(&context, Arc::clone(&stream))?);
     let builder = LiveShadowBuilder::new(gpu, models_dir.to_path_buf(), stream);
     let mut engine =

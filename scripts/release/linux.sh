@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-RUST_TOOLCHAIN=1.97.1
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+# shellcheck source=scripts/release/bootstrap.sh
+source "$script_dir/bootstrap.sh"
+
 APT_SNAPSHOT=20250701T000000Z
-FFMPEG_VERSION=8.1.2
-FFMPEG_SHA256=464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c
-NV_CODEC_HEADERS_VERSION=n13.0.19.0
-NV_CODEC_HEADERS_SHA256=86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116
-FFMPEG_RUNTIME_CACHE_VERSION=1
 
 die() {
     printf 'release: %s\n' "$*" >&2
@@ -30,76 +28,6 @@ verify_ort_cuda12() {
     case "$needed" in *'libcublasLt.so.12'*) ;; *) die 'ORT provider does not target cuBLAS 12' ;; esac
     case "$needed" in *'libcudart.so.12'*) ;; *) die 'ORT provider does not target CUDA runtime 12' ;; esac
     case "$needed" in *'.so.13'*) die 'CUDA 13 dependency leaked into CUDA 12 release' ;; esac
-}
-
-download_verified() {
-    local url=$1
-    local output=$2
-    local expected_sha256=$3
-    local partial="${output}.part"
-    if test -f "$output" \
-        && printf '%s  %s\n' "$expected_sha256" "$output" | sha256sum -c --status; then
-        return
-    fi
-    if ! curl -fL --retry 3 --continue-at - "$url" -o "$partial"; then
-        curl -fL --retry 3 "$url" -o "$partial"
-    fi
-    printf '%s  %s\n' "$expected_sha256" "$partial" | sha256sum -c -
-    mv -f -- "$partial" "$output"
-}
-
-build_native_video_dependencies() {
-    local root=$1
-    local ffmpeg_archive="$root/ffmpeg-${FFMPEG_VERSION}.tar.xz"
-    local headers_archive="$root/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz"
-    mkdir -p "$root"
-    download_verified \
-        "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
-        "$ffmpeg_archive" "$FFMPEG_SHA256"
-    download_verified \
-        "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/${NV_CODEC_HEADERS_VERSION}.tar.gz" \
-        "$headers_archive" "$NV_CODEC_HEADERS_SHA256"
-    ffmpeg_source="$root/ffmpeg-${FFMPEG_VERSION}"
-    ffmpeg_prefix="$root/ffmpeg-runtime-v${FFMPEG_RUNTIME_CACHE_VERSION}"
-    nv_codec_headers="$root/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}/include"
-    if ! test -f "$ffmpeg_source/configure"; then
-        tar -xf "$ffmpeg_archive" -C "$root"
-    fi
-    if ! test -f "$nv_codec_headers/ffnvcodec/nvEncodeAPI.h"; then
-        tar -xf "$headers_archive" -C "$root"
-    fi
-    if test -f "$ffmpeg_prefix/.complete" \
-        && test -f "$ffmpeg_prefix/lib/pkgconfig/libavformat.pc"; then
-        printf 'release: using cached minimal FFmpeg runtime\n'
-        return
-    fi
-    (
-        cd "$ffmpeg_source"
-        ./configure \
-            --prefix="$ffmpeg_prefix" \
-            --disable-static \
-            --enable-shared \
-            --disable-gpl \
-            --disable-nonfree \
-            --disable-programs \
-            --disable-doc \
-            --disable-debug \
-            --disable-x86asm \
-            --disable-network \
-            --disable-avdevice \
-            --disable-avfilter \
-            --disable-swscale \
-            --disable-swresample \
-            --disable-encoders \
-            --disable-decoders \
-            --disable-hwaccels \
-            --disable-filters \
-            --disable-devices
-        printf 'release: building minimal FFmpeg runtime\n'
-        make -s -j"$(nproc)"
-        make -s install
-        touch "$ffmpeg_prefix/.complete"
-    )
 }
 
 stage_native_video_dependencies() {
@@ -139,6 +67,7 @@ verify_native_video_bundle() {
 
 mode=
 dev_mode=false
+orchestrated=false
 for argument in "$@"; do
     case "$argument" in
         --docker|--native)
@@ -149,9 +78,14 @@ for argument in "$@"; do
         --dev)
             dev_mode=true
             ;;
-        *) die 'usage: scripts/release/linux.sh [--docker|--native] [--dev]' ;;
+        --orchestrated)
+            orchestrated=true
+            ;;
+        *) die 'usage: scripts/release/linux.sh --orchestrated [--docker|--native] [--dev]' ;;
     esac
 done
+test "$orchestrated" = true || test "${NOPERSON_INTERNAL_RELEASE_TEST:-}" = 1 \
+    || die 'internal packager; use scripts/release.sh'
 mode=${mode:---docker}
 
 repo_root=$(git rev-parse --show-toplevel)
@@ -177,7 +111,8 @@ commit=$(git rev-parse HEAD)
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}
 export SOURCE_DATE_EPOCH
 
-work_dir=$(mktemp -d "${TMPDIR:-/tmp}/noperson-release.XXXXXXXX")
+mkdir -p -- "$NOPERSON_RELEASE_CACHE/work"
+work_dir=$(mktemp -d "$NOPERSON_RELEASE_CACHE/work/.linux.XXXXXXXX")
 archive_tmp=
 checksum_tmp=
 cleanup() {
@@ -193,6 +128,10 @@ git archive --format=tar HEAD | tar -xf - -C "$source_dir"
 host_uid=$(id -u)
 host_gid=$(id -g)
 artifact="noperson-v${version}-linux-${artifact_arch}"
+kernel_manifest_blake3=$(
+    "${B3SUM:-b3sum}" gpu_kernels/prebuilt/cuda-12.8/MANIFEST_BLAKE3.txt | awk '{print $1}'
+)
+test -n "$kernel_manifest_blake3" || die 'could not hash the CUDA kernel manifest'
 
 if test "$mode" = --native; then
     command -v rustup >/dev/null || die 'rustup is required for native build'
@@ -207,32 +146,26 @@ if test "$mode" = --native; then
         *'release 12.8'*) ;;
         *) die 'CUDA Toolkit release 12.8 is required' ;;
     esac
-    if test "$dev_mode" = true \
-        && rustup run "$RUST_TOOLCHAIN" rustc --version >/dev/null 2>&1; then
-        printf 'release: using cached Rust toolchain %s\n' "$RUST_TOOLCHAIN"
-    else
-        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-    fi
+    rustup run "$RUST_TOOLCHAIN" rustc --version >/dev/null 2>&1 \
+        || die "orchestrator did not prepare Rust $RUST_TOOLCHAIN"
     export CUDA_HOME="$cuda_root"
     export ORT_CUDA_VERSION=12
     export CARGO_INCREMENTAL=0
     export CARGO_PROFILE_RELEASE_LTO=true
-    export NOPERSON_CUDA_ARCH=compute_75
     export CARGO_BUILD_JOBS=2
-    dependency_root=$work_dir
-    if test "$dev_mode" = true; then
-        dependency_root="$repo_root/.cache/release/linux-${artifact_arch}"
-        release_target_dir="$dependency_root/cargo-target"
-    else
-        release_target_dir="$work_dir/cargo-target"
+    dependency_root=${NOPERSON_RELEASE_DEPENDENCY_ROOT:?orchestrator dependency cache is missing}
+    release_target_dir=${NOPERSON_RELEASE_TARGET_DIR:?orchestrator Cargo target is missing}
+    if ! test -f "${NOPERSON_RELEASE_FFMPEG_PREFIX:-}/.complete" \
+        || ! test -f "${NOPERSON_RELEASE_NV_CODEC_HEADERS:-}/ffnvcodec/nvEncodeAPI.h"; then
+        build_native_video_dependencies "$dependency_root"
     fi
-    build_native_video_dependencies "$dependency_root"
+    ffmpeg_source=$NOPERSON_RELEASE_FFMPEG_SOURCE
+    ffmpeg_prefix=$NOPERSON_RELEASE_FFMPEG_PREFIX
+    nv_codec_headers=$NOPERSON_RELEASE_NV_CODEC_HEADERS
     export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig"
     export NOPERSON_NV_CODEC_HEADERS="$nv_codec_headers"
     export NOPERSON_REQUIRE_NV_CODEC_HEADERS=1
-    if test "$dev_mode" != true; then
-        export RUSTFLAGS="--remap-path-prefix=${repo_root}=. -C link-arg=-Wl,--build-id=none"
-    fi
+    export RUSTFLAGS="--remap-path-prefix=${repo_root}=. -C link-arg=-Wl,--build-id=none"
     CARGO_TARGET_DIR="$release_target_dir" \
         cargo "+$RUST_TOOLCHAIN" build --locked --release
     verify_ort_cuda12 "$release_target_dir/release"
@@ -250,6 +183,8 @@ if test "$mode" = --native; then
         printf 'cargo=%s\n' "$(cargo "+$RUST_TOOLCHAIN" --version)"
         printf 'nvcc=%s\n' "$("$nvcc" --version | tail -1)"
         printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | awk '{print $1}')"
+        printf 'kernel_manifest_blake3=%s\n' \
+            "$kernel_manifest_blake3"
     } >"$stage/BUILD-MANIFEST"
     find "$stage" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +
     archive="$repo_root/dist/${artifact}.tar.zst"
@@ -305,6 +240,7 @@ fi
     -e "FFMPEG_SHA256=$FFMPEG_SHA256" \
     -e "NV_CODEC_HEADERS_VERSION=$NV_CODEC_HEADERS_VERSION" \
     -e "NV_CODEC_HEADERS_SHA256=$NV_CODEC_HEADERS_SHA256" \
+    -e "KERNEL_MANIFEST_BLAKE3=$kernel_manifest_blake3" \
     -v "$source_dir:/input:ro" \
     -v "$repo_root/dist:/dist" \
     "$cuda_image" bash -Eeuo pipefail -s <<'BUILD'
@@ -334,7 +270,6 @@ export CUDA_HOME=/usr/local/cuda
 export ORT_CUDA_VERSION=12
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_RELEASE_LTO=true
-export NOPERSON_CUDA_ARCH=compute_75
 export CARGO_BUILD_JOBS=2
 export RUSTFLAGS="--remap-path-prefix=/build/source=. -C link-arg=-Wl,--build-id=none"
 
@@ -355,16 +290,19 @@ tar -xf "/build/dependencies/nv-codec-headers-${NV_CODEC_HEADERS_VERSION}.tar.gz
 ffmpeg_source="/build/dependencies/ffmpeg-${FFMPEG_VERSION}"
 ffmpeg_prefix=/build/dependencies/ffmpeg-runtime
 cd "$ffmpeg_source"
+ffmpeg_build_log=/tmp/noperson-ffmpeg-build.log
 ./configure \
     --prefix="$ffmpeg_prefix" \
     --disable-static --enable-shared --disable-gpl --disable-nonfree \
     --disable-programs --disable-doc --disable-debug --disable-x86asm --disable-network \
     --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample \
     --disable-encoders --disable-decoders --disable-hwaccels \
-    --disable-filters --disable-devices
+    --disable-filters --disable-devices >"$ffmpeg_build_log" 2>&1
 printf 'release: building minimal FFmpeg runtime\n'
-make -s -j"$(nproc)"
-make -s install
+make -s -j"$(nproc)" >>"$ffmpeg_build_log" 2>&1 \
+    || { tail -80 "$ffmpeg_build_log" >&2; exit 1; }
+make -s install >>"$ffmpeg_build_log" 2>&1 \
+    || { tail -80 "$ffmpeg_build_log" >&2; exit 1; }
 
 cd /build/source
 export PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig"
@@ -415,6 +353,8 @@ install -m 0644 LICENSE README.md "$stage/"
     printf 'cargo=%s\n' "$(cargo --version)"
     printf 'nvcc=%s\n' "$(nvcc --version | tail -1)"
     printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | awk '{print $1}')"
+    printf 'kernel_manifest_blake3=%s\n' \
+        "$KERNEL_MANIFEST_BLAKE3"
 } >"$stage/BUILD-MANIFEST"
 
 find "$stage" -exec touch -h -d "@${SOURCE_DATE_EPOCH}" {} +

@@ -138,6 +138,72 @@ void mask_invert_kernel(
     mask[idx] = 1.0f - mask[idx];
 }
 
+__device__ __forceinline__ int morphology_clamp_index(const int index, const int length) {
+    return index < 0 ? 0 : (index >= length ? length - 1 : index);
+}
+
+// A radius-N 3x3 max-pool sequence is a separable square max filter. The
+// horizontal pass also complements erosion inputs so both signs share max logic.
+extern "C" __global__
+void morphology_mask_horizontal_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    const unsigned int height,
+    const unsigned int width,
+    const unsigned int radius,
+    const unsigned int negative
+) {
+    extern __shared__ float tile[];
+    const unsigned int tile_width = blockDim.x + 2 * radius;
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int origin_x = (int)(blockIdx.x * blockDim.x) - (int)radius;
+    for (unsigned int local_x = threadIdx.x; local_x < tile_width; local_x += blockDim.x) {
+        const int source_x = morphology_clamp_index(origin_x + (int)local_x, (int)width);
+        float value = y < height ? src[y * width + (unsigned int)source_x] : 0.0f;
+        tile[threadIdx.y * tile_width + local_x] = negative != 0 ? 1.0f - value : value;
+    }
+    __syncthreads();
+    if (x >= width || y >= height) return;
+    float maximum = 0.0f;
+    for (unsigned int offset = 0; offset <= 2 * radius; ++offset) {
+        maximum = fmaxf(maximum, tile[threadIdx.y * tile_width + threadIdx.x + offset]);
+    }
+    dst[y * width + x] = maximum;
+}
+
+extern "C" __global__
+void morphology_mask_vertical_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    const unsigned int height,
+    const unsigned int width,
+    const unsigned int radius,
+    const unsigned int negative
+) {
+    extern __shared__ float tile[];
+    const unsigned int tile_height = blockDim.y + 2 * radius;
+    const unsigned int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const unsigned int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int origin_y = (int)(blockIdx.y * blockDim.y) - (int)radius;
+    const unsigned int threads = blockDim.x * blockDim.y;
+    const unsigned int lane = threadIdx.y * blockDim.x + threadIdx.x;
+    for (unsigned int local = lane; local < tile_height * blockDim.x; local += threads) {
+        const unsigned int local_y = local / blockDim.x;
+        const unsigned int local_x = local % blockDim.x;
+        const unsigned int source_x = blockIdx.x * blockDim.x + local_x;
+        const int source_y = morphology_clamp_index(origin_y + (int)local_y, (int)height);
+        tile[local] = source_x < width ? src[(unsigned int)source_y * width + source_x] : 0.0f;
+    }
+    __syncthreads();
+    if (x >= width || y >= height) return;
+    float maximum = 0.0f;
+    for (unsigned int offset = 0; offset <= 2 * radius; ++offset) {
+        maximum = fmaxf(maximum, tile[(threadIdx.y + offset) * blockDim.x + threadIdx.x]);
+    }
+    dst[y * width + x] = negative != 0 ? 1.0f - maximum : maximum;
+}
+
 extern "C" __global__
 void restore_ellipse_mask_kernel(
     float* __restrict__ mask,
@@ -221,21 +287,52 @@ void fake_diff_composite_direct_kernel(
 }
 
 extern "C" __global__
-void semantic_region_mask_kernel(
+void semantic_region_mask_stage1_kernel(
     const unsigned char* __restrict__ classes,
     float* __restrict__ mask,
-    unsigned int* __restrict__ count,
+    unsigned int* __restrict__ partials,
     const unsigned int pixels,
     const unsigned int region
 ) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= pixels) return;
-    unsigned int actual = (unsigned int)classes[idx];
-    bool selected = region == 0
-        ? (actual == 4 || actual == 5)
-        : (actual == 11 || actual == 12 || actual == 13);
-    mask[idx] = selected ? 1.0f : 0.0f;
-    if (selected) atomicAdd(count, 1u);
+    unsigned int value = 0u;
+    for (unsigned long long idx = (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x
+             + (unsigned long long)threadIdx.x;
+         idx < (unsigned long long)pixels;
+         idx += (unsigned long long)blockDim.x * (unsigned long long)gridDim.x) {
+        unsigned int actual = (unsigned int)classes[idx];
+        bool selected = region == 0
+            ? (actual == 4 || actual == 5)
+            : (actual == 11 || actual == 12 || actual == 13);
+        mask[idx] = selected ? 1.0f : 0.0f;
+        value += selected ? 1u : 0u;
+    }
+
+    const unsigned int lane = threadIdx.x & 31u;
+    const unsigned int warp = threadIdx.x >> 5u;
+    __shared__ unsigned int warp_totals[8];
+    for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(0xffffffffu, value, offset);
+    }
+    if (lane == 0) warp_totals[warp] = value;
+    __syncthreads();
+    if (warp != 0) return;
+    value = lane < 8 ? warp_totals[lane] : 0u;
+    for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_down_sync(0xffffffffu, value, offset);
+    }
+    if (lane == 0) partials[blockIdx.x] = value;
+}
+
+extern "C" __global__
+void semantic_region_mask_stage2_kernel(
+    const unsigned int* __restrict__ partials,
+    unsigned int* __restrict__ count,
+    const unsigned int blocks
+) {
+    if (threadIdx.x != 0) return;
+    unsigned int total = 0u;
+    for (unsigned int block = 0; block < blocks; ++block) total += partials[block];
+    *count = total;
 }
 
 extern "C" __global__
@@ -268,24 +365,62 @@ void semantic_mark_valid_kernel(
 }
 
 extern "C" __global__
-void semantic_region_stats_kernel(
+void semantic_region_stats_stage1_kernel(
     const float* __restrict__ swapped,
     const float* __restrict__ original,
     const float* __restrict__ mask,
-    float* __restrict__ stats,
+    float* __restrict__ partials,
     const unsigned int pixels
 ) {
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= pixels) return;
-    float region = mask[idx];
-    float surround = fminf(fmaxf(1.0f - region, 0.0f), 1.0f);
-    atomicAdd(&stats[0], surround);
-    atomicAdd(&stats[1], region);
-    for (unsigned int channel = 0; channel < 3; ++channel) {
-        unsigned int offset = channel * pixels + idx;
-        atomicAdd(&stats[2 + channel], swapped[offset] * surround);
-        atomicAdd(&stats[5 + channel], original[offset] * region);
+    float values[8] = {0.0f};
+    for (unsigned long long idx = (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x
+             + (unsigned long long)threadIdx.x;
+         idx < (unsigned long long)pixels;
+         idx += (unsigned long long)blockDim.x * (unsigned long long)gridDim.x) {
+        float region = mask[idx];
+        float surround = fminf(fmaxf(1.0f - region, 0.0f), 1.0f);
+        values[0] += surround;
+        values[1] += region;
+        for (unsigned int channel = 0; channel < 3; ++channel) {
+            unsigned long long offset = (unsigned long long)channel * (unsigned long long)pixels + idx;
+            values[2 + channel] += swapped[offset] * surround;
+            values[5 + channel] += original[offset] * region;
+        }
     }
+
+    const unsigned int lane = threadIdx.x & 31u;
+    const unsigned int warp = threadIdx.x >> 5u;
+    __shared__ float warp_totals[8][8];
+    for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+        for (unsigned int field = 0; field < 8; ++field) {
+            values[field] += __shfl_down_sync(0xffffffffu, values[field], offset);
+        }
+    }
+    if (lane == 0) {
+        for (unsigned int field = 0; field < 8; ++field) warp_totals[warp][field] = values[field];
+    }
+    __syncthreads();
+    if (warp != 0) return;
+    for (unsigned int field = 0; field < 8; ++field) {
+        float total = lane < 8 ? warp_totals[lane][field] : 0.0f;
+        for (unsigned int offset = 16; offset > 0; offset >>= 1) {
+            total += __shfl_down_sync(0xffffffffu, total, offset);
+        }
+        if (lane == 0) partials[blockIdx.x * 8 + field] = total;
+    }
+}
+
+extern "C" __global__
+void semantic_region_stats_stage2_kernel(
+    const float* __restrict__ partials,
+    float* __restrict__ stats,
+    const unsigned int blocks
+) {
+    const unsigned int field = threadIdx.x;
+    if (field >= 8) return;
+    float total = 0.0f;
+    for (unsigned int block = 0; block < blocks; ++block) total += partials[block * 8 + field];
+    stats[field] = total;
 }
 
 extern "C" __global__

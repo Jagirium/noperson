@@ -1,4 +1,13 @@
-use std::fs;
+use std::{collections::BTreeSet, fs, path::Path};
+
+fn build_enforces_blake3(source: &str) -> bool {
+    let compact = source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    compact.contains("letactual=blake3::hash(&bytes).to_hex().to_string();")
+        && compact.contains("assert_eq!(actual,*expected,")
+}
 
 #[test]
 fn latent_projection_normalizes_and_projects_in_one_cuda_launch() {
@@ -32,15 +41,77 @@ fn detector_compaction_is_parallel_but_preserves_anchor_order() {
 }
 
 #[test]
-fn release_binary_embeds_every_ptx_module_instead_of_reading_target_dir() {
+fn release_binary_embeds_every_fatbin_module_instead_of_reading_target_dir() {
     let build = fs::read_to_string("build.rs").unwrap();
+    let compact_build = build
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
     let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let generator = fs::read_to_string("scripts/kernels/build-fatbins.sh").unwrap();
 
-    assert!(build.contains("embedded_ptx.rs"));
-    assert!(build.contains("include_str!"));
-    assert!(ops.contains("include!(concat!(env!(\"OUT_DIR\"), \"/embedded_ptx.rs\"))"));
-    assert!(ops.contains("Ptx::from_src"));
+    assert!(build.contains("embedded_fatbin.rs"));
+    assert!(build.contains("include_bytes!"));
+    assert!(build.contains("verify_manifest_file(&manifest, &source_relative)"));
+    assert!(build.contains("verify_manifest_file(&manifest, &fatbin_relative)"));
+    assert!(build_enforces_blake3(&build));
+    assert!(build.contains("expected_manifest_paths"));
+    assert!(build.contains("tracked_fatbin_paths"));
+    assert!(compact_build.contains("assert_eq!(manifest_paths,expected_manifest_paths"));
+    assert!(compact_build.contains("assert_eq!(tracked_fatbin_paths,expected_fatbin_paths"));
+    assert!(!build.contains("Command::new(&nvcc)"));
+    assert!(!build.contains("Command::new(\"nvcc\")"));
+    assert!(ops.contains("include!(concat!(env!(\"OUT_DIR\"), \"/embedded_fatbin.rs\"))"));
+    assert!(ops.contains("Ptx::from_binary"));
     assert!(!ops.contains("Ptx::from_file"));
+
+    for target in ["75", "80", "86", "89", "90", "100", "120"] {
+        assert!(
+            generator.contains(&format!("arch=compute_{target},code=sm_{target}")),
+            "missing sm_{target} fatbin target"
+        );
+    }
+    assert!(generator.contains("sm_$architecture"));
+    assert!(generator.contains("arch=compute_75,code=compute_75"));
+    assert!(generator.contains("sm_75.ptx"));
+
+    let source_paths = fs::read_dir("gpu_kernels")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "cu"))
+        .map(|path| path.strip_prefix(".").unwrap_or(&path).to_path_buf())
+        .collect::<BTreeSet<_>>();
+    let fatbin_paths = fs::read_dir("gpu_kernels/prebuilt/cuda-12.8")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "fatbin")
+        })
+        .collect::<BTreeSet<_>>();
+    let manifest_paths =
+        fs::read_to_string(Path::new("gpu_kernels/prebuilt/cuda-12.8").join("MANIFEST_BLAKE3.txt"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                line.split_once("  ")
+                    .map(|(_, path)| Path::new(path).to_path_buf())
+            })
+            .collect::<BTreeSet<_>>();
+    let expected_manifest_paths = source_paths
+        .iter()
+        .cloned()
+        .chain(fatbin_paths.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(manifest_paths, expected_manifest_paths);
+    assert_eq!(source_paths.len(), fatbin_paths.len());
+}
+
+#[test]
+fn fatbin_contract_rejects_a_noop_blake3_verifier() {
+    let build = fs::read_to_string("build.rs").unwrap();
+    let mutated = build.replace("blake3::hash", "disabled_blake3::hash");
+    assert!(!build_enforces_blake3(&mutated));
 }
 
 #[test]

@@ -19,11 +19,47 @@ use noperson::models::manager::ModelManager;
 use noperson::pipeline::face_detector::YoloFaceDetector;
 use noperson::pipeline::face_mask;
 use noperson::pipeline::face_recognizer::FaceRecognizer;
-use noperson::pipeline::face_recognizer::warp_affine_chw;
 use noperson::pipeline::face_swapper::FaceSwapper;
 use noperson::pipeline::workspace::GpuWorkspace;
 
 type DetectedFrame = (cudarc::driver::CudaSlice<f32>, [[f32; 2]; 5], u32, u32);
+
+/// CPU oracle kept local to the CUDA parity test.
+fn warp_affine_chw_reference(
+    src: &[f32],
+    src_h: u32,
+    src_w: u32,
+    dst: &mut [f32],
+    dst_h: u32,
+    dst_w: u32,
+    affine: &[[f64; 3]; 2],
+) {
+    let inv = noperson::math::affine::invert_2x3(affine);
+    for c in 0..3u32 {
+        for dy in 0..dst_h {
+            for dx in 0..dst_w {
+                let sx = (inv[0][0] * dx as f64 + inv[0][1] * dy as f64 + inv[0][2]) as f32;
+                let sy = (inv[1][0] * dx as f64 + inv[1][1] * dy as f64 + inv[1][2]) as f32;
+                if sx < 0.0 || sy < 0.0 || sx >= (src_w - 1) as f32 || sy >= (src_h - 1) as f32 {
+                    dst[(c * dst_h * dst_w + dy * dst_w + dx) as usize] = 0.0;
+                    continue;
+                }
+                let x0 = sx as u32;
+                let y0 = sy as u32;
+                let x1 = (x0 + 1).min(src_w - 1);
+                let y1 = (y0 + 1).min(src_h - 1);
+                let fx = sx - x0 as f32;
+                let fy = sy - y0 as f32;
+                let idx = |yy: u32, xx: u32| (c * src_h * src_w + yy * src_w + xx) as usize;
+                let value = src[idx(y0, x0)] * (1.0 - fx) * (1.0 - fy)
+                    + src[idx(y0, x1)] * fx * (1.0 - fy)
+                    + src[idx(y1, x0)] * (1.0 - fx) * fy
+                    + src[idx(y1, x1)] * fx * fy;
+                dst[(c * dst_h * dst_w + dy * dst_w + dx) as usize] = value;
+            }
+        }
+    }
+}
 
 /// Initialize tracing subscriber exactly once (tests run in parallel).
 static TRACING_INIT: std::sync::Once = std::sync::Once::new();
@@ -37,10 +73,10 @@ fn init_tracing() {
 /// Helper: init CUDA + GpuOps + ModelManager + load the canonical swap model.
 fn init_pipeline() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager)> {
     let ctx = Arc::new(CudaContext::new(0)?);
-    let stream = ctx.default_stream().clone();
+    let stream = ctx.new_stream()?;
     let gpu = GpuOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
-    manager.set_compute_stream(stream.cu_stream() as *mut ());
+    manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
     manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
@@ -51,10 +87,10 @@ fn init_pipeline() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager)> {
 /// Minimal canonical stack without fixed B4/B9/B16 derivative models.
 fn init_pipeline_dim1() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager)> {
     let ctx = Arc::new(CudaContext::new(0)?);
-    let stream = ctx.default_stream().clone();
+    let stream = ctx.new_stream()?;
     let gpu = GpuOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
-    manager.set_compute_stream(stream.cu_stream() as *mut ());
+    manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
     manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
@@ -122,7 +158,7 @@ fn test_npp_affine_matches_cpu_reference() -> anyhow::Result<()> {
     let transform = affine::estimate_face_affine(&kps, &template);
 
     let mut cpu = vec![0.0f32; 3 * 128 * 128];
-    warp_affine_chw(&frame_chw, h, w, &mut cpu, 128, 128, &transform);
+    warp_affine_chw_reference(&frame_chw, h, w, &mut cpu, 128, 128, &transform);
 
     let mut gpu_crop = gpu.alloc_zeros(3 * 128 * 128)?;
     gpu.warp_affine_npp(&d_frame_chw, &mut gpu_crop, h, w, 128, 128, &transform)?;
@@ -150,7 +186,7 @@ fn test_npp_affine_matches_cpu_reference() -> anyhow::Result<()> {
 #[ignore = "requires CUDA"]
 fn test_default_gpu_border_mask_has_soft_pixel_edges() -> anyhow::Result<()> {
     let ctx = Arc::new(CudaContext::new(0)?);
-    let stream = ctx.default_stream().clone();
+    let stream = ctx.new_stream()?;
     let gpu = GpuOps::new(&ctx, stream.clone())?;
     let mut ws = GpuWorkspace::new(&stream)?;
     let params = FaceSwapParams::default();

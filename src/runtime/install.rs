@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::models::download::{DownloadConfig, DownloadPhase, DownloadProgress, ModelDownloader};
 
-use super::registry::{GENERATION, artifacts_for};
+use super::registry::{RuntimePlatform, artifacts_for, generation_name_for};
 use super::{RuntimeLayout, TensorRtShard};
 
 #[derive(Debug, thiserror::Error)]
@@ -44,12 +44,8 @@ pub async fn ensure_runtime(
     runtime_root: &Path,
     shard: TensorRtShard,
 ) -> Result<RuntimeLayout, RuntimeInstallError> {
-    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        return Err(RuntimeInstallError::UnsupportedPlatform(
-            std::env::consts::OS,
-        ));
-    }
-    let generation_name = format!("{}-{}", GENERATION, shard.directory());
+    let platform = platform_for(std::env::consts::OS, std::env::consts::ARCH)?;
+    let generation_name = generation_name_for(platform, shard);
     let final_root = runtime_root.join("generations").join(&generation_name);
     let layout = RuntimeLayout::new(final_root.clone(), shard);
     if layout.is_complete() {
@@ -60,6 +56,7 @@ pub async fn ensure_runtime(
     let lock_path = runtime_root.join("install.lock");
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)?;
@@ -72,7 +69,7 @@ pub async fn ensure_runtime(
     let downloads = runtime_tmp_directory(runtime_root)?;
     let downloader = ModelDownloader::new(DownloadConfig::default())?;
     let mut archives = Vec::new();
-    for artifact in artifacts_for(shard) {
+    for artifact in artifacts_for(platform, shard) {
         tracing::info!(
             "Preparing GPU runtime artifact: {} ({:.1} MiB)",
             artifact.filename,
@@ -153,6 +150,17 @@ pub async fn ensure_runtime(
         }
     }
     Ok(RuntimeLayout::new(final_root, shard))
+}
+
+fn platform_for(
+    os: &'static str,
+    architecture: &'static str,
+) -> Result<RuntimePlatform, RuntimeInstallError> {
+    match (os, architecture) {
+        ("linux", "x86_64") => Ok(RuntimePlatform::LinuxX86_64),
+        ("windows", "x86_64") => Ok(RuntimePlatform::WindowsX86_64),
+        _ => Err(RuntimeInstallError::UnsupportedPlatform(os)),
+    }
 }
 
 fn runtime_tmp_directory(runtime_root: &Path) -> io::Result<PathBuf> {
@@ -270,5 +278,27 @@ mod tests {
         let progress = runtime_progress_bar(1024, false);
         assert!(progress.is_hidden());
         assert_eq!(progress.length(), Some(1024));
+    }
+
+    #[test]
+    fn only_published_platform_architecture_pairs_are_accepted() {
+        assert_eq!(
+            platform_for("linux", "x86_64").unwrap(),
+            RuntimePlatform::LinuxX86_64
+        );
+        assert_eq!(
+            platform_for("windows", "x86_64").unwrap(),
+            RuntimePlatform::WindowsX86_64
+        );
+        for (os, arch) in [
+            ("linux", "aarch64"),
+            ("windows", "aarch64"),
+            ("macos", "x86_64"),
+        ] {
+            assert!(matches!(
+                platform_for(os, arch),
+                Err(RuntimeInstallError::UnsupportedPlatform(value)) if value == os
+            ));
+        }
     }
 }

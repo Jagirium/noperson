@@ -13,7 +13,7 @@ use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 
 use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
-use crate::pipeline::ort_binding::{bind_input_raw, bind_output_raw, create_cuda_tensor_f32};
+use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
 
 /// Face swapper using the canonical dynamic-batch Inswapper128 model.
@@ -152,36 +152,15 @@ impl FaceSwapper {
             )?;
         }
 
-        let cuda_mem_info = MemoryInfo::new(
-            AllocationDevice::CUDA,
-            0,
-            AllocatorType::Device,
-            MemoryType::Default,
-        )
-        .map_err(|error| anyhow::anyhow!("MemoryInfo: {error}"))?;
-        {
-            let target_shape = [n_tiles as i64, 3, tile_size as i64, tile_size as i64];
-            let source_shape = [n_tiles as i64, 512];
-            let (target_dev, _target_guard) = ws.swap_batch_in.device_ptr(&gpu.stream);
-            let (source_dev, _source_guard) = ws.swap_latent_gpu.device_ptr(&gpu.stream);
-            let (output_dev, _output_guard) = ws.swap_batch_out.device_ptr_mut(&gpu.stream);
-            let target_value =
-                unsafe { create_cuda_tensor_f32(&cuda_mem_info, target_dev, &target_shape)? };
-            let source_value =
-                unsafe { create_cuda_tensor_f32(&cuda_mem_info, source_dev, &source_shape)? };
-            let output_value =
-                unsafe { create_cuda_tensor_f32(&cuda_mem_info, output_dev, &target_shape)? };
-            let (session, binding) = manager.session_and_binding("Inswapper128")?;
-            unsafe {
-                bind_input_raw(binding, "target", &target_value)?;
-                bind_input_raw(binding, "source", &source_value)?;
-                bind_output_raw(binding, "output", &output_value)?;
-            }
-            binding.synchronize_inputs()?;
-            let _ = session.run_binding(binding)?;
-            binding.synchronize_outputs()?;
-            binding.clear();
-        }
+        Self::run_swap_binding(
+            manager,
+            gpu,
+            &ws.swap_batch_in,
+            &ws.swap_latent_gpu,
+            &mut ws.swap_batch_out,
+            n_tiles,
+            tile_size,
+        )?;
 
         {
             let batch_ptr: *const CudaSlice<f32> = &ws.swap_batch_out;
@@ -189,6 +168,103 @@ impl FaceSwapper {
             unsafe {
                 gpu.interlace_scatter_denormalized(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Repeat a swap pass using a generation-owned device latent.
+    ///
+    /// `latent_batch` contains sixteen replicated 512-value tiles. The ORT
+    /// tensor binds only the `dim * dim * 512` prefix required by this pass.
+    pub fn swap_gpu_cached_device(
+        manager: &mut ModelManager,
+        gpu: &GpuOps,
+        ws: &mut GpuWorkspace,
+        latent_batch: &CudaSlice<f32>,
+        dim: u32,
+        input_from_scratch: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!((1..=4).contains(&dim), "unsupported swap dim: {dim}");
+        let tile_size = 128u32;
+        let n_tiles = (dim as usize)
+            .checked_mul(dim as usize)
+            .ok_or_else(|| anyhow::anyhow!("swap tile count overflow"))?;
+        let latent_values = n_tiles
+            .checked_mul(512)
+            .ok_or_else(|| anyhow::anyhow!("swap latent prefix size overflow"))?;
+        anyhow::ensure!(
+            latent_batch.len() >= latent_values,
+            "resident latent has {} values, needs {latent_values}",
+            latent_batch.len()
+        );
+
+        {
+            let face_ptr: *const CudaSlice<f32> = if input_from_scratch {
+                &ws.face_512_scratch
+            } else {
+                &ws.face_256
+            };
+            let batch_ptr: *mut CudaSlice<f32> = &mut ws.swap_batch_in;
+            unsafe {
+                gpu.interlace_extract_normalized(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
+            }
+        }
+
+        Self::run_swap_binding(
+            manager,
+            gpu,
+            &ws.swap_batch_in,
+            latent_batch,
+            &mut ws.swap_batch_out,
+            n_tiles,
+            tile_size,
+        )?;
+
+        {
+            let batch_ptr: *const CudaSlice<f32> = &ws.swap_batch_out;
+            let face_ptr: *mut CudaSlice<f32> = &mut ws.face_256;
+            unsafe {
+                gpu.interlace_scatter_denormalized(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn run_swap_binding(
+        manager: &mut ModelManager,
+        gpu: &GpuOps,
+        swap_batch_in: &CudaSlice<f32>,
+        latent_batch: &CudaSlice<f32>,
+        swap_batch_out: &mut CudaSlice<f32>,
+        n_tiles: usize,
+        tile_size: u32,
+    ) -> anyhow::Result<()> {
+        let cuda_mem_info = MemoryInfo::new(
+            AllocationDevice::CUDA,
+            manager.device_id(),
+            AllocatorType::Device,
+            MemoryType::Default,
+        )
+        .map_err(|error| anyhow::anyhow!("MemoryInfo: {error}"))?;
+        {
+            let target_shape = [n_tiles as i64, 3, tile_size as i64, tile_size as i64];
+            let source_shape = [n_tiles as i64, 512];
+            let (target_dev, _target_guard) = swap_batch_in.device_ptr(&gpu.stream);
+            let (source_dev, _source_guard) = latent_batch.device_ptr(&gpu.stream);
+            let (output_dev, _output_guard) = swap_batch_out.device_ptr_mut(&gpu.stream);
+            let target_value =
+                unsafe { create_cuda_tensor_f32(&cuda_mem_info, target_dev, &target_shape)? };
+            let source_value =
+                unsafe { create_cuda_tensor_f32(&cuda_mem_info, source_dev, &source_shape)? };
+            let output_value =
+                unsafe { create_cuda_tensor_f32(&cuda_mem_info, output_dev, &target_shape)? };
+            run_bound_values(
+                manager,
+                &gpu.stream,
+                "Inswapper128",
+                &[("target", &target_value), ("source", &source_value)],
+                &[("output", &output_value)],
+            )?;
         }
         Ok(())
     }
@@ -240,7 +316,7 @@ impl FaceSwapper {
         {
             let cuda_mem_info = MemoryInfo::new(
                 AllocationDevice::CUDA,
-                0,
+                manager.device_id(),
                 AllocatorType::Device,
                 MemoryType::Default,
             )
@@ -257,20 +333,13 @@ impl FaceSwapper {
                 unsafe { create_cuda_tensor_f32(&cuda_mem_info, source_dev, &source_shape)? };
             let output_value =
                 unsafe { create_cuda_tensor_f32(&cuda_mem_info, output_dev, &target_shape)? };
-            let (session, binding) = manager.session_and_binding(model_name)?;
-            unsafe {
-                bind_input_raw(binding, "target", &target_value)?;
-                bind_input_raw(binding, "source", &source_value)?;
-                bind_output_raw(binding, "output", &output_value)?;
-            }
-            // TensorRT may execute on an internal stream even when the CUDA EP
-            // shares ours. Explicit IoBinding fences are required; otherwise
-            // the first frame can read the crop late and scatter a partially
-            // written output, producing the characteristic double-face ghost.
-            binding.synchronize_inputs()?;
-            let _ = session.run_binding(binding)?;
-            binding.synchronize_outputs()?;
-            binding.clear();
+            run_bound_values(
+                manager,
+                &gpu.stream,
+                model_name,
+                &[("target", &target_value), ("source", &source_value)],
+                &[("output", &output_value)],
+            )?;
         }
 
         // 8. Denormalize + scatter back into face_256
