@@ -9,10 +9,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use cudarc::driver::CudaContext;
 use image::GenericImageView;
+use noperson::backend::ComputeContext;
 
-use noperson::gpu::ops::GpuOps;
+use noperson::backend::ComputeOps;
 use noperson::models::manager::ModelManager;
 use noperson::pipeline::face_detector::YoloFaceDetector;
 use noperson::pipeline::workspace::GpuWorkspace;
@@ -33,11 +33,11 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("Image: {}x{}", width, height);
 
     // Init CUDA
-    let ctx = Arc::new(CudaContext::new(0)?);
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
     tracing::info!("CUDA context initialized on device 0");
 
-    let gpu = GpuOps::new(&ctx, stream.clone())?;
+    let gpu = ComputeOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
     manager.set_compute_stream(stream.cu_stream() as *mut ())?;
 

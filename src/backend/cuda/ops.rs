@@ -12,7 +12,11 @@ use cudarc::driver::{
 use cudarc::nvrtc::Ptx;
 use std::cell::RefCell;
 
-use crate::gpu::npp;
+use crate::backend::cuda::{CudaInitializationError, npp, query_device_capabilities};
+use crate::backend::{
+    ComputeBackendKind, DeviceCapabilities, KernelArtifactDescriptor, KernelTarget, LaunchGeometry,
+    SubgroupRequirement, SubgroupWidth, Toolchain,
+};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_fatbin.rs"));
 
@@ -67,8 +71,9 @@ pub struct ProfilingState {
 }
 
 /// All loaded GPU kernels + launch methods.
-pub struct GpuOps {
+pub struct CudaOps {
     pub stream: Arc<CudaStream>,
+    capabilities: DeviceCapabilities,
     npp_stream_context: npp::NppStreamContext,
     // Kernels
     normalize_fn: CudaFunction,
@@ -139,18 +144,34 @@ pub struct GpuOps {
     profiling: Option<RefCell<ProfilingState>>,
 }
 
-// SAFETY: `GpuOps` holds a `RefCell<ProfilingState>` which is `!Sync` by default.
+// SAFETY: `CudaOps` holds a `RefCell<ProfilingState>` which is `!Sync` by default.
 // The profiling state is only accessed from the worker thread that owns the
-// CUDA stream — there is no cross-thread mutation. `Arc<GpuOps>` is shared
+// CUDA stream — there is no cross-thread mutation. `Arc<CudaOps>` is shared
 // between the UI thread (which never touches profiling) and the worker thread
 // (which owns the stream + profiling). Marking `Sync` is safe under this
 // single-worker invariant.
-unsafe impl Send for GpuOps {}
-unsafe impl Sync for GpuOps {}
+unsafe impl Send for CudaOps {}
+unsafe impl Sync for CudaOps {}
 
-impl GpuOps {
+impl CudaOps {
     /// Load all embedded CUDA fatbins. Panics if any kernel fails to load.
-    pub fn new(ctx: &Arc<CudaContext>, stream: Arc<CudaStream>) -> Result<Self, DriverError> {
+    pub fn new(
+        ctx: &Arc<CudaContext>,
+        stream: Arc<CudaStream>,
+    ) -> Result<Self, CudaInitializationError> {
+        let device = query_device_capabilities(ctx)?;
+        KernelArtifactDescriptor {
+            name: "embedded-cuda-fatbins",
+            backend: ComputeBackendKind::Cuda,
+            toolchain: Toolchain::Cuda {
+                major: 12,
+                minor: 8,
+            },
+            target: KernelTarget::NvidiaFatbin { minimum_sm: 75 },
+            subgroup: SubgroupRequirement::Exact(SubgroupWidth::WAVE32),
+        }
+        .validate_for(&device, LaunchGeometry::new([256, 1, 1], 0))?;
+
         let npp_stream_context = unsafe {
             npp::capture_stream_context(stream.cu_stream() as *mut std::ffi::c_void).map_err(
                 |e| {
@@ -198,6 +219,7 @@ impl GpuOps {
 
         Ok(Self {
             stream,
+            capabilities: device,
             npp_stream_context,
             normalize_fn: load("normalize", "normalize_kernel"),
             interlace_extract_fn: load("interlace", "interlace_extract_normalized_kernel"),
@@ -290,6 +312,10 @@ impl GpuOps {
             semantic_composite_fn: load("mask_postprocess", "semantic_composite_kernel"),
             profiling,
         })
+    }
+
+    pub fn capabilities(&self) -> &DeviceCapabilities {
+        &self.capabilities
     }
 
     // ── Profiling ───────────────────────────────────────────────────

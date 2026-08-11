@@ -129,8 +129,8 @@ fn scalar_oracle_matches_literal_clamped_reference_fixtures() {
 
 #[test]
 fn morphology_uses_two_dynamic_shared_memory_custom_launches() {
-    let kernels = fs::read_to_string("gpu_kernels/mask_postprocess.cu").unwrap();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let kernels = fs::read_to_string("gpu_kernels/nvidia/mask_postprocess.cu").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
     let morphology = morphology_source(&ops);
 
     assert!(kernels.contains("void morphology_mask_horizontal_kernel"));
@@ -151,8 +151,8 @@ fn morphology_uses_two_dynamic_shared_memory_custom_launches() {
 
 #[test]
 fn morphology_has_no_npp_or_repeated_pass_or_parity_copy_path() {
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
-    let npp = fs::read_to_string("src/gpu/npp.rs").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
+    let npp = fs::read_to_string("src/backend/cuda/npp.rs").unwrap();
     let morphology = morphology_source(&ops);
 
     assert!(!morphology.contains("npp::dilate"));

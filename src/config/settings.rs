@@ -2,17 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::backend::CompiledCapabilities;
+pub use crate::backend::InferenceProvider as ExecutionProvider;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DetectorModel {
     YoloFace8n,
     RetinaFace,
     Scrfd2_5g,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExecutionProvider {
-    Cuda,
-    TensorRT,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,7 +32,7 @@ impl Default for PipelineSettings {
     fn default() -> Self {
         Self {
             detector: DetectorModel::YoloFace8n,
-            provider: ExecutionProvider::Cuda,
+            provider: CompiledCapabilities::current().inference_providers[0],
             device_id: 0,
             detect_threshold: 0.5,
             max_faces: 20,

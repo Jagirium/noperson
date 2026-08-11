@@ -129,7 +129,7 @@ host_uid=$(id -u)
 host_gid=$(id -g)
 artifact="noperson-v${version}-linux-${artifact_arch}"
 kernel_manifest_blake3=$(
-    "${B3SUM:-b3sum}" gpu_kernels/prebuilt/cuda-12.8/MANIFEST_BLAKE3.txt | awk '{print $1}'
+    "${B3SUM:-b3sum}" gpu_kernels/prebuilt/nvidia/cuda-12.8/MANIFEST_BLAKE3.txt | awk '{print $1}'
 )
 test -n "$kernel_manifest_blake3" || die 'could not hash the CUDA kernel manifest'
 

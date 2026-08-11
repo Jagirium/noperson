@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use ort::session::{IoBinding, Session};
 
+use crate::backend::inference::{InferenceSessionConfig, execution_providers};
 use crate::config::settings::ExecutionProvider;
 
 /// Ordering contract between caller-owned CUDA buffers and ONNX Runtime.
@@ -142,48 +143,12 @@ impl ModelManager {
             model_path.display()
         );
 
-        // Build CUDA EP. If a user compute stream was set, bind ort to it.
-        let cuda_ep = match self.compute_stream {
-            Some(ptr) => unsafe {
-                ort::ep::CUDA::default()
-                    .with_device_id(self.device_id)
-                    .with_compute_stream(ptr.get() as *mut ())
-                    .build()
-                    .error_on_failure()
-            },
-            None => ort::ep::CUDA::default()
-                .with_device_id(self.device_id)
-                .build()
-                .error_on_failure(),
-        };
-
-        let mut providers = Vec::new();
-        if self.provider == ExecutionProvider::TensorRT {
-            // Keep this namespace separate from engines built while Rust
-            // forced TensorRT FP16. Cache entries do not encode every provider
-            // option, so the old ghosted-face engine must never be reused.
-            let cache_path = self.models_dir.join("trt-cache-fp32-parity");
-            std::fs::create_dir_all(&cache_path)?;
-            let mut trt = ort::ep::TensorRT::default()
-                .with_device_id(self.device_id)
-                .with_engine_cache(true)
-                .with_engine_cache_path(cache_path.to_string_lossy())
-                .with_timing_cache(true)
-                .with_timing_cache_path(cache_path.to_string_lossy())
-                // Match Crosswap: do not force global FP16, and keep
-                // normalization layers in FP32 when TensorRT lowers the graph.
-                .with_layer_norm_fp32_fallback(true)
-                .with_builder_optimization_level(5)
-                // GPEN uses a cached engine and stable zero-copy buffers; CUDA
-                // graph capture remains disabled because multiple TRT sessions
-                // on one user stream are unstable in ORT rc.12.
-                .with_cuda_graph(false);
-            if let Some(ptr) = self.compute_stream {
-                trt = unsafe { trt.with_compute_stream(ptr.get() as *mut ()) };
-            }
-            providers.push(trt.build().error_on_failure());
-        }
-        providers.push(cuda_ep);
+        let providers = execution_providers(InferenceSessionConfig {
+            provider: self.provider,
+            device_id: self.device_id,
+            compute_stream: self.compute_stream,
+            cache_root: &self.models_dir,
+        })?;
 
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -338,7 +303,7 @@ mod tests {
             BindingFencePolicy::FenceInputsAndOutputs
         );
 
-        let mut tensorrt = ModelManager::with_execution("models", ExecutionProvider::TensorRT, 0);
+        let mut tensorrt = ModelManager::with_execution("models", ExecutionProvider::TensorRt, 0);
         tensorrt.set_compute_stream(stream(0x1000)).unwrap();
         assert_eq!(
             tensorrt.binding_fence_policy(stream(0x1000)),
@@ -352,7 +317,7 @@ mod tests {
 
     #[test]
     fn tensorrt_without_a_configured_compute_stream_fences() {
-        let tensorrt = ModelManager::with_execution("models", ExecutionProvider::TensorRT, 0);
+        let tensorrt = ModelManager::with_execution("models", ExecutionProvider::TensorRt, 0);
 
         assert_eq!(
             tensorrt.binding_fence_policy(stream(0x1000)),

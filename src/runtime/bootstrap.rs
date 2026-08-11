@@ -4,9 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cudarc::driver::CudaContext;
-
-use crate::gpu::npp;
+use crate::backend::{ComputeContext, cuda::npp};
 
 use super::{ComputeCapability, RuntimeLayout, ensure_runtime};
 
@@ -97,11 +95,11 @@ fn stage_launch_directory(layout: &RuntimeLayout, executable: &Path) -> io::Resu
     let launch = layout.launch_dir();
     std::fs::create_dir_all(&launch)?;
 
-    for provider in [
-        layout.ort_shared_provider(),
-        layout.ort_cuda_provider(),
-        layout.ort_tensorrt_provider(),
-    ] {
+    let mut providers = vec![layout.ort_shared_provider(), layout.ort_cuda_provider()];
+    if cfg!(feature = "tensorrt") {
+        providers.push(layout.ort_tensorrt_provider());
+    }
+    for provider in providers {
         let filename = provider.file_name().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "provider path has no filename")
         })?;
@@ -140,7 +138,7 @@ fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 }
 
 fn detect_compute_capability() -> anyhow::Result<ComputeCapability> {
-    let context = CudaContext::new(0)?;
+    let context = ComputeContext::new(0)?;
     let (major, minor) = context.compute_capability()?;
     Ok(ComputeCapability { major, minor })
 }

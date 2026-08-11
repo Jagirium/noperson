@@ -2,8 +2,8 @@
 
 use crate::pipeline::dfm::{lab_to_rgb, rgb_to_lab};
 use crate::{
+    backend::ComputeOps,
     config::parameters::{AutoColorMode, ColorAdjustParams, FaceSwapParams, MakeupParams},
-    gpu::ops::GpuOps,
     pipeline::workspace::GpuWorkspace,
 };
 
@@ -36,7 +36,7 @@ pub fn apply_makeup_reference(
 }
 
 pub fn apply_makeup_gpu(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<()> {
@@ -238,7 +238,7 @@ fn hsv_to_rgb(hsv: [f32; 3]) -> [f32; 3] {
 }
 
 pub fn apply_auto_color_gpu(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     params: &FaceSwapParams,
     has_face_mask: bool,
@@ -280,7 +280,7 @@ pub fn apply_auto_color_gpu(
 }
 
 pub fn apply_color_adjust_gpu(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<()> {
@@ -311,7 +311,7 @@ pub fn apply_color_adjust_gpu(
 }
 
 pub fn apply_final_blur_gpu(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<()> {
@@ -333,7 +333,7 @@ pub fn apply_final_blur_gpu(
 }
 
 pub fn apply_jpeg_compression(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<()> {
@@ -360,7 +360,7 @@ pub fn apply_jpeg_compression(
 }
 
 fn apply_histogram_gpu_fallback(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     use_mask: bool,
     blend: f32,

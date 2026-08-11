@@ -32,7 +32,7 @@ fn linux_release_builder_pins_inputs_and_emits_deterministic_archive() {
         "container did not export archive",
         "container did not export checksum",
         "kernel_manifest_blake3=",
-        "gpu_kernels/prebuilt/cuda-12.8/MANIFEST_BLAKE3.txt",
+        "gpu_kernels/prebuilt/nvidia/cuda-12.8/MANIFEST_BLAKE3.txt",
     ] {
         assert!(
             script.contains(required),
@@ -405,9 +405,9 @@ fn cargo_and_runtime_logging_pin_the_compatible_ort_contract() {
         );
     }
 
-    let manager = fs::read_to_string("src/models/manager.rs").unwrap();
+    let provider = fs::read_to_string("src/backend/cuda/inference.rs").unwrap();
     assert!(
-        manager.matches("error_on_failure()").count() >= 3,
+        provider.matches("error_on_failure()").count() >= 3,
         "GPU-only sessions must never fall back silently to CPU"
     );
 }
@@ -561,10 +561,10 @@ fn kernel_generator_emits_every_supported_sm_and_a_portable_ptx_fallback() {
 
 #[test]
 fn every_cuda_source_has_one_tracked_fatbin_and_manifest_entry() {
-    let output_dir = Path::new("gpu_kernels/prebuilt/cuda-12.8");
+    let output_dir = Path::new("gpu_kernels/prebuilt/nvidia/cuda-12.8");
     let manifest = fs::read_to_string(output_dir.join("MANIFEST_BLAKE3.txt"))
         .expect("fatbin BLAKE3 manifest exists");
-    let mut sources = fs::read_dir("gpu_kernels")
+    let mut sources = fs::read_dir("gpu_kernels/nvidia")
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "cu"))
@@ -574,8 +574,8 @@ fn every_cuda_source_has_one_tracked_fatbin_and_manifest_entry() {
     assert!(!sources.is_empty(), "CUDA source inventory is empty");
     for source in sources {
         let stem = source.file_stem().unwrap().to_str().unwrap();
-        let source_path = format!("gpu_kernels/{stem}.cu");
-        let fatbin_path = format!("gpu_kernels/prebuilt/cuda-12.8/{stem}.fatbin");
+        let source_path = format!("gpu_kernels/nvidia/{stem}.cu");
+        let fatbin_path = format!("gpu_kernels/prebuilt/nvidia/cuda-12.8/{stem}.fatbin");
         assert!(output_dir.join(format!("{stem}.fatbin")).is_file());
         assert_eq!(
             manifest

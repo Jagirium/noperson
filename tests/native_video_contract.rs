@@ -132,7 +132,7 @@ fn nvenc_receives_a_pointer_to_the_cuda_stream_handle() {
 
 #[test]
 fn nv12_cuda_color_coefficients_use_the_kernel_float_abi() {
-    let ops = std::fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let ops = std::fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
     assert!(ops.contains("let (rv, gu, gv, bu): (f32, f32, f32, f32)"));
     assert!(ops.contains("let coefficients: [f32; 11]"));
 }
@@ -389,9 +389,9 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
     use std::sync::Arc;
 
     use anyhow::Context;
-    use cudarc::driver::CudaContext;
-    use noperson::gpu::npp;
-    use noperson::gpu::ops::GpuOps;
+    use noperson::backend::ComputeContext;
+    use noperson::backend::ComputeOps;
+    use noperson::backend::cuda::npp;
 
     let directory = tempfile::tempdir()?;
     let input = directory.path().join("input.mp4");
@@ -449,9 +449,9 @@ fn nvcodec_decodes_and_encodes_device_resident_frames() -> anyhow::Result<()> {
 
     npp::initialize_runtime(std::path::Path::new("libs/base"))
         .context("initialize the local NPP runtime")?;
-    let context = Arc::new(CudaContext::new(0).context("create CUDA context")?);
+    let context = Arc::new(ComputeContext::new(0).context("create CUDA context")?);
     let stream = context.new_stream()?;
-    let gpu = GpuOps::new(&context, stream.clone()).context("initialize GPU kernels")?;
+    let gpu = ComputeOps::new(&context, stream.clone()).context("initialize GPU kernels")?;
     let mut source = NativeDemuxer::open(&input)?;
     let source_info = source.video_stream().clone();
     let mut decoder = unsafe {

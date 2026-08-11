@@ -24,13 +24,13 @@ fn live_frame_contract_accepts_photo_and_camera_rgb_frames() {
 fn elon_self_swap_meets_photo_and_camera_quality_gates() -> anyhow::Result<()> {
     use std::sync::Arc;
 
-    use cudarc::driver::CudaContext;
     use image::GenericImageView;
+    use noperson::backend::ComputeContext;
+    use noperson::backend::{ComputeOps, cuda::npp};
     use noperson::config::{
         parameters::{ColorAdjustParams, FaceSwapParams},
         settings::ExecutionProvider,
     };
-    use noperson::gpu::{npp, ops::GpuOps};
     use noperson::live::LiveEngine;
     use noperson::models::manager::ModelManager;
     use noperson::pipeline::{
@@ -39,9 +39,9 @@ fn elon_self_swap_meets_photo_and_camera_quality_gates() -> anyhow::Result<()> {
     use noperson::quality::compare_rgb;
 
     npp::initialize_runtime(std::path::Path::new("libs/base"))?;
-    let context = Arc::new(CudaContext::new(0)?);
+    let context = Arc::new(ComputeContext::new(0)?);
     let stream = context.new_stream()?;
-    let gpu = Arc::new(GpuOps::new(&context, stream.clone())?);
+    let gpu = Arc::new(ComputeOps::new(&context, stream.clone())?);
 
     // Shared-memory Gaussian tiling stays numerically equivalent to the CPU oracle.
     let mut gaussian_expected: Vec<f32> = (0..49)
@@ -226,7 +226,7 @@ fn elon_self_swap_meets_photo_and_camera_quality_gates() -> anyhow::Result<()> {
     // TensorRT must at least build a real production detector session from the
     // same runtime generation before the one-shot GPU gate succeeds.
     drop(engine);
-    let mut tensorrt = ModelManager::with_provider("models", ExecutionProvider::TensorRT);
+    let mut tensorrt = ModelManager::with_provider("models", ExecutionProvider::TensorRt);
     tensorrt.set_compute_stream(stream.cu_stream() as *mut ())?;
     tensorrt.load("RuntimeCheck", "yoloface_8n.onnx")?;
     Ok(())

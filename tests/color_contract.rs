@@ -9,8 +9,8 @@ use std::fs;
 
 #[test]
 fn color_prep_reduces_contrast_mean_without_a_second_full_image_pass() {
-    let kernel = fs::read_to_string("gpu_kernels/color_adjust.cu").unwrap();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let kernel = fs::read_to_string("gpu_kernels/nvidia/color_adjust.cu").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
 
     let prep = kernel
         .split("void color_adjust_prep_stage1_kernel")

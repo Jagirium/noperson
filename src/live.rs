@@ -11,14 +11,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream};
 use image::GenericImageView;
 use thiserror::Error;
 
+use crate::backend::{Buffer, ComputeOps, ComputeStream};
 use crate::config::parameters::{FaceSwapParams, RestorerSize, SwapperModel};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 use crate::engine::{BuildCancellation, EngineSpec, ModelArtifact, ModelRole};
-use crate::gpu::ops::GpuOps;
 use crate::models::digest::file_blake3;
 use crate::models::live_catalog::{CANONICAL_SWAPPER_FILENAME, validate_model_file};
 use crate::models::manager::ModelManager;
@@ -85,7 +84,7 @@ pub struct AnalyzedIdentity {
 }
 
 pub struct IdentityAnalyzer {
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     manager: ModelManager,
     detector: FaceDetector,
     workspace: GpuWorkspace,
@@ -94,7 +93,7 @@ pub struct IdentityAnalyzer {
 
 impl IdentityAnalyzer {
     pub fn new(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: &Path,
         params: FaceSwapParams,
         provider: ExecutionProvider,
@@ -237,7 +236,7 @@ fn rotate_analysis_image(image: image::RgbImage, enabled: bool, angle: u16) -> i
 }
 
 pub fn analyze_image_identities(
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     models_dir: &Path,
     image_path: &Path,
     params: &FaceSwapParams,
@@ -273,7 +272,7 @@ fn crop_bbox(image: &image::RgbImage, bbox: [f32; 4]) -> (Vec<u8>, u32, u32) {
 }
 
 pub struct LiveEngine {
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     manager: ModelManager,
     detector: FaceDetector,
     face_tracker: TemporalFaceTracker,
@@ -282,11 +281,11 @@ pub struct LiveEngine {
     generation_gpu_state: GenerationGpuState,
     params: FaceSwapParams,
     enhancer: Option<FrameEnhancer>,
-    rotation_scratch: Option<CudaSlice<f32>>,
-    rgb_input_scratch: Option<CudaSlice<u8>>,
-    frame_scratch: Option<CudaSlice<f32>>,
-    enhanced_scratch: Option<CudaSlice<f32>>,
-    rgb_output_scratch: Option<CudaSlice<u8>>,
+    rotation_scratch: Option<Buffer<f32>>,
+    rgb_input_scratch: Option<Buffer<u8>>,
+    frame_scratch: Option<Buffer<f32>>,
+    enhanced_scratch: Option<Buffer<f32>>,
+    rgb_output_scratch: Option<Buffer<u8>>,
 }
 
 pub(crate) struct ResolvedFaceAssignment {
@@ -570,7 +569,7 @@ fn identity_embedding_gpu(
     path: &Path,
     detector: &FaceDetector,
     manager: &mut ModelManager,
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<Vec<f32>> {
@@ -621,7 +620,7 @@ fn resolved_identity_embedding(
     identity: &ResolvedIdentity,
     detector: &FaceDetector,
     manager: &mut ModelManager,
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<Vec<f32>> {
@@ -665,11 +664,11 @@ impl LiveEngine {
     }
 
     pub fn new(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: &Path,
         identity_path: &Path,
         params: FaceSwapParams,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<ComputeStream>,
     ) -> anyhow::Result<Self> {
         Self::new_with_provider(
             gpu,
@@ -682,12 +681,12 @@ impl LiveEngine {
     }
 
     pub fn new_with_provider(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: &Path,
         identity_path: &Path,
         params: FaceSwapParams,
         provider: ExecutionProvider,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<ComputeStream>,
     ) -> anyhow::Result<Self> {
         Self::new_configured(
             gpu,
@@ -702,14 +701,14 @@ impl LiveEngine {
     }
 
     pub fn new_configured(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: &Path,
         identity_path: &Path,
         params: FaceSwapParams,
         provider: ExecutionProvider,
         detector_model: DetectorModel,
         device_id: i32,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<ComputeStream>,
     ) -> anyhow::Result<Self> {
         let spec = build_live_spec(
             models_dir,
@@ -725,11 +724,11 @@ impl LiveEngine {
 
     /// Build a fully content-verified generation before it becomes eligible for activation.
     pub fn new_from_spec(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: &Path,
         identity_path: &Path,
         spec: &EngineSpec,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<ComputeStream>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             spec.assignments.is_empty(),
@@ -740,12 +739,12 @@ impl LiveEngine {
     }
 
     pub(crate) fn new_from_spec_assignments_cancellable(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: &Path,
         identity: &ResolvedIdentity,
         assignments: &[ResolvedFaceAssignment],
         spec: &EngineSpec,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<ComputeStream>,
         cancellation: &BuildCancellation,
     ) -> anyhow::Result<Self> {
         Self::new_from_spec_inner(
@@ -761,12 +760,12 @@ impl LiveEngine {
     }
 
     fn new_from_spec_inner(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: &Path,
         identity: &ResolvedIdentity,
         assignments: &[ResolvedFaceAssignment],
         spec: &EngineSpec,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<ComputeStream>,
         verify_files: bool,
         cancellation: Option<&BuildCancellation>,
     ) -> anyhow::Result<Self> {
@@ -1020,7 +1019,7 @@ impl LiveEngine {
 
     pub fn process_chw(
         &mut self,
-        frame: &mut CudaSlice<f32>,
+        frame: &mut Buffer<f32>,
         height: u32,
         width: u32,
     ) -> anyhow::Result<FrameResult> {
@@ -1085,7 +1084,7 @@ impl LiveEngine {
     /// image directly into an NVENC-compatible pitch-linear NV12/P010 surface.
     pub fn process_chw_to_pitched_nv12(
         &mut self,
-        frame: &mut CudaSlice<f32>,
+        frame: &mut Buffer<f32>,
         height: u32,
         width: u32,
         output_device_ptr: u64,

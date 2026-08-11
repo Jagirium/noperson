@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaStream};
 use image::GenericImageView;
+use noperson::backend::{Buffer, ComputeContext, ComputeStream};
 
+use noperson::backend::ComputeOps;
 use noperson::config::parameters::FaceSwapParams;
-use noperson::gpu::ops::GpuOps;
 use noperson::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
 use noperson::models::manager::ModelManager;
 use noperson::pipeline::face_detector::YoloFaceDetector;
@@ -22,7 +22,7 @@ use noperson::pipeline::face_recognizer::FaceRecognizer;
 use noperson::pipeline::face_swapper::FaceSwapper;
 use noperson::pipeline::workspace::GpuWorkspace;
 
-type DetectedFrame = (cudarc::driver::CudaSlice<f32>, [[f32; 2]; 5], u32, u32);
+type DetectedFrame = (Buffer<f32>, [[f32; 2]; 5], u32, u32);
 
 /// CPU oracle kept local to the CUDA parity test.
 fn warp_affine_chw_reference(
@@ -70,11 +70,11 @@ fn init_tracing() {
     });
 }
 
-/// Helper: init CUDA + GpuOps + ModelManager + load the canonical swap model.
-fn init_pipeline() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager)> {
-    let ctx = Arc::new(CudaContext::new(0)?);
+/// Helper: init CUDA + ComputeOps + ModelManager + load the canonical swap model.
+fn init_pipeline() -> anyhow::Result<(Arc<ComputeStream>, ComputeOps, ModelManager)> {
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
-    let gpu = GpuOps::new(&ctx, stream.clone())?;
+    let gpu = ComputeOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
     manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
@@ -85,10 +85,10 @@ fn init_pipeline() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager)> {
 }
 
 /// Minimal canonical stack without fixed B4/B9/B16 derivative models.
-fn init_pipeline_dim1() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager)> {
-    let ctx = Arc::new(CudaContext::new(0)?);
+fn init_pipeline_dim1() -> anyhow::Result<(Arc<ComputeStream>, ComputeOps, ModelManager)> {
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
-    let gpu = GpuOps::new(&ctx, stream.clone())?;
+    let gpu = ComputeOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
     manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
@@ -100,9 +100,9 @@ fn init_pipeline_dim1() -> anyhow::Result<(Arc<CudaStream>, GpuOps, ModelManager
 
 /// Helper: load face.jpg, detect face, return (frame_chw_gpu, kps_5, height, width).
 fn load_and_detect(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
-    stream: &Arc<CudaStream>,
+    stream: &Arc<ComputeStream>,
 ) -> anyhow::Result<DetectedFrame> {
     let img = image::open("assets/photos/face.jpg")?;
     let (width, height) = img.dimensions();
@@ -185,9 +185,9 @@ fn test_npp_affine_matches_cpu_reference() -> anyhow::Result<()> {
 #[test]
 #[ignore = "requires CUDA"]
 fn test_default_gpu_border_mask_has_soft_pixel_edges() -> anyhow::Result<()> {
-    let ctx = Arc::new(CudaContext::new(0)?);
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
-    let gpu = GpuOps::new(&ctx, stream.clone())?;
+    let gpu = ComputeOps::new(&ctx, stream.clone())?;
     let mut ws = GpuWorkspace::new(&stream)?;
     let params = FaceSwapParams::default();
     let blur_ks = params.border_blur * 2 + 1;

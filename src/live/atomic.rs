@@ -3,16 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use cudarc::driver::{CudaSlice, CudaStream};
-
 use super::{LiveEngine, ProcessedRgb, ResolvedFaceAssignment, ResolvedIdentity, blake3_file};
+use crate::backend::{Buffer, ComputeOps, ComputeStream};
 use crate::config::parameters::FaceSwapParams;
 use crate::engine::{
     ActivationError, ActivationOutcome, BuildCancellation, BuildRequestOutcome, BuildSnapshot,
     EngineGeneration, EngineSpec, FaceAssignmentSpec, FrameOutcome, OwnedEngineSupervisor,
     ShadowBuild, ShadowBuildQueue, SupervisorPhase, SupervisorSnapshot,
 };
-use crate::gpu::ops::GpuOps;
 use crate::pipeline::frame_processor::FrameResult;
 
 #[derive(Debug, Clone)]
@@ -115,14 +113,14 @@ impl IdentityCatalog {
 
 /// Concrete whole-engine builder used by the latest-request-wins queue.
 pub struct LiveShadowBuilder {
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     models_dir: PathBuf,
-    stream: Arc<CudaStream>,
+    stream: Arc<ComputeStream>,
     identities: Arc<IdentityCatalog>,
 }
 
 impl LiveShadowBuilder {
-    pub fn new(gpu: Arc<GpuOps>, models_dir: PathBuf, stream: Arc<CudaStream>) -> Self {
+    pub fn new(gpu: Arc<ComputeOps>, models_dir: PathBuf, stream: Arc<ComputeStream>) -> Self {
         Self {
             gpu,
             models_dir,
@@ -333,7 +331,7 @@ impl AtomicLiveEngine {
 
     pub fn process_chw(
         &mut self,
-        frame: &mut CudaSlice<f32>,
+        frame: &mut Buffer<f32>,
         height: u32,
         width: u32,
     ) -> anyhow::Result<FrameResult> {
@@ -352,7 +350,7 @@ impl AtomicLiveEngine {
 
     pub fn process_chw_to_pitched_nv12(
         &mut self,
-        frame: &mut CudaSlice<f32>,
+        frame: &mut Buffer<f32>,
         height: u32,
         width: u32,
         output_device_ptr: u64,

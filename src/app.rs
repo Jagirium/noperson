@@ -17,7 +17,6 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
-use cudarc::driver::CudaContext;
 use eframe::egui::Color32;
 use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use eframe::egui::{FontData, FontFamily};
@@ -27,9 +26,11 @@ use elegance::{
     IndicatorState, SegmentedControl, SegmentedSize, StatusPill, Switch,
 };
 
+use crate::backend::{
+    CompiledCapabilities, ComputeBackendKind, ComputeContext, ComputeOps, ComputeStream,
+};
 use crate::config::parameters::{FaceSwapParams, RestorerMode, SwapDim};
 use crate::config::settings::ExecutionProvider;
-use crate::gpu::ops::GpuOps;
 use crate::io::{VirtualCamera, send_virtual_camera_frame};
 use crate::live::LiveEngine;
 use crate::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
@@ -270,7 +271,7 @@ pub struct App {
     models_loaded: bool,
     params: FaceSwapParams,
     /// Lazily-initialized GPU context (lives for the app's lifetime once created).
-    gpu: Option<Arc<GpuOps>>,
+    gpu: Option<Arc<ComputeOps>>,
     #[cfg(target_os = "linux")]
     gpu_preview: Option<Arc<crate::gpu_preview::LinuxPreviewBridge>>,
     #[cfg(target_os = "linux")]
@@ -316,7 +317,7 @@ impl App {
             output_viewport: OutputViewport::default(),
             image_picker_history: ImagePickerHistory::default(),
             output_dest: OutputDest::VirtualCamera(10),
-            provider: ExecutionProvider::Cuda,
+            provider: CompiledCapabilities::current().inference_providers[0],
             running: false,
             fps: 0.0,
             face_count: 0,
@@ -389,13 +390,13 @@ impl App {
     }
 
     /// Lazily initialize the GPU context + stream. Done once, reused.
-    fn ensure_gpu(&mut self) -> anyhow::Result<Arc<GpuOps>> {
+    fn ensure_gpu(&mut self) -> anyhow::Result<Arc<ComputeOps>> {
         if let Some(g) = &self.gpu {
             return Ok(g.clone());
         }
-        let ctx = Arc::new(CudaContext::new(0)?);
+        let ctx = Arc::new(ComputeContext::new(0)?);
         let stream = ctx.new_stream()?;
-        let gpu = Arc::new(GpuOps::new(&ctx, stream.clone())?);
+        let gpu = Arc::new(ComputeOps::new(&ctx, stream.clone())?);
         self.gpu = Some(gpu.clone());
         Ok(gpu)
     }
@@ -806,7 +807,9 @@ impl App {
                             IndicatorState::Connecting,
                             match self.provider {
                                 ExecutionProvider::Cuda => "NATIVE CUDA · LOCAL",
-                                ExecutionProvider::TensorRT => "TENSORRT · LOCAL",
+                                ExecutionProvider::TensorRt => "TENSORRT · LOCAL",
+                                ExecutionProvider::Rocm => "ROCM · LOCAL",
+                                ExecutionProvider::MiGraphX => "MIGRAPHX · LOCAL",
                             }
                             .to_owned(),
                         )
@@ -968,22 +971,33 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Provider").color(TEXT_DIM));
                     ui.add_enabled_ui(!self.running, |ui| {
-                        let mut provider = match self.provider {
-                            ExecutionProvider::Cuda => 0,
-                            ExecutionProvider::TensorRT => 1,
-                        };
-                        if ui
-                            .add(
-                                SegmentedControl::new(&mut provider, ["Native CUDA", "TensorRT"])
-                                    .size(SegmentedSize::Small),
-                            )
-                            .changed()
-                        {
-                            self.provider = if provider == 0 {
-                                ExecutionProvider::Cuda
-                            } else {
-                                ExecutionProvider::TensorRT
+                        let compiled = CompiledCapabilities::current();
+                        if compiled.inference_providers.len() == 1 {
+                            self.provider = compiled.inference_providers[0];
+                            ui.label(self.provider.display_name());
+                        } else {
+                            let (primary, secondary, labels) = match compiled.compute_backend {
+                                ComputeBackendKind::Cuda => (
+                                    ExecutionProvider::Cuda,
+                                    ExecutionProvider::TensorRt,
+                                    ["Native CUDA", "TensorRT"],
+                                ),
+                                ComputeBackendKind::Rocm => (
+                                    ExecutionProvider::Rocm,
+                                    ExecutionProvider::MiGraphX,
+                                    ["ROCm", "MIGraphX"],
+                                ),
                             };
+                            let mut provider = usize::from(self.provider == secondary);
+                            if ui
+                                .add(
+                                    SegmentedControl::new(&mut provider, labels)
+                                        .size(SegmentedSize::Small),
+                                )
+                                .changed()
+                            {
+                                self.provider = if provider == 0 { primary } else { secondary };
+                            }
                         }
                     });
                     ui.separator();
@@ -1339,7 +1353,7 @@ fn labeled_u32_slider(ui: &mut egui::Ui, label: &str, value: &mut u32, min: u32,
 
 /// Photo path: load source image → swap once → send result back for preview.
 fn run_photo_swap(
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     models_dir: PathBuf,
     source_path: PathBuf,
     target_path: PathBuf,
@@ -1347,7 +1361,7 @@ fn run_photo_swap(
     provider: ExecutionProvider,
     output_dest: OutputDest,
     tx: mpsc::SyncSender<WorkerMsg>,
-    stream: Arc<cudarc::driver::CudaStream>,
+    stream: Arc<ComputeStream>,
 ) -> anyhow::Result<()> {
     use image::GenericImageView;
     let _ = tx.send(WorkerMsg::Status("Setting up target face".into()));
@@ -1485,7 +1499,7 @@ fn run_webcam_preview_loop(
 
 /// Webcam live path: open webcam → loop frames → swap each → vcam + preview.
 fn run_webcam_loop(
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     models_dir: PathBuf,
     webcam_idx: usize,
     webcam_width: u32,
@@ -1497,7 +1511,7 @@ fn run_webcam_loop(
     output_dest: OutputDest,
     tx: mpsc::SyncSender<WorkerMsg>,
     ctx: egui::Context,
-    stream: Arc<cudarc::driver::CudaStream>,
+    stream: Arc<ComputeStream>,
     stop_flag: Arc<AtomicBool>,
     #[cfg(target_os = "linux")] gpu_preview: Option<Arc<crate::gpu_preview::LinuxPreviewBridge>>,
 ) -> anyhow::Result<()> {

@@ -70,10 +70,7 @@ pub(super) fn fit_image_size(image: egui::Vec2, available: egui::Vec2) -> egui::
 }
 
 fn provider_label(provider: ExecutionProvider) -> &'static str {
-    match provider {
-        ExecutionProvider::Cuda => "Native CUDA",
-        ExecutionProvider::TensorRT => "TensorRT",
-    }
+    provider.display_name()
 }
 
 pub(super) fn render_content(ui: &mut egui::Ui, snapshot: &RealtimePreviewSnapshot) {
@@ -354,7 +351,7 @@ mod tests {
                         texture: Some(egui::load::SizedTexture::from_handle(&texture)),
                         fps: 27.4,
                         face_count: 1,
-                        provider: ExecutionProvider::TensorRT,
+                        provider: ExecutionProvider::TensorRt,
                         status: "Running".to_owned(),
                     },
                 );
@@ -380,7 +377,7 @@ mod tests {
                         texture: Some(egui::load::SizedTexture::from_handle(&texture)),
                         fps: 27.4,
                         face_count: 1,
-                        provider: ExecutionProvider::TensorRT,
+                        provider: ExecutionProvider::TensorRt,
                         status: "Running".to_owned(),
                     },
                 );

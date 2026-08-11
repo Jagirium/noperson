@@ -1,12 +1,10 @@
 //! Per-frame processing orchestrator (GPU-native).
 //!
 //! Coordinates: detect → recognize → swap → restore → mask → blend.
-//! Everything runs on a persistent CudaSlice<f32> frame buffer — no CPU loops.
+//! Everything runs on a persistent Buffer<f32> frame buffer — no CPU loops.
 
-use cudarc::driver::CudaSlice;
-
+use crate::backend::{Buffer, ComputeOps};
 use crate::config::parameters::{FaceSwapParams, RestorerAlignment, RestorerSize};
-use crate::gpu::ops::GpuOps;
 use crate::math::affine;
 use crate::models::manager::ModelManager;
 use crate::pipeline::dfm::DfmContract;
@@ -125,17 +123,17 @@ impl AssignmentMatchPlan {
 /// once while the shadow generation is built. The hot path downloads only the
 /// selected source index.
 pub struct GenerationGpuState {
-    target_bank: CudaSlice<f32>,
-    thresholds: CudaSlice<f32>,
-    target_present: CudaSlice<u32>,
-    selected_index: CudaSlice<u32>,
-    resident_latents: Vec<Option<CudaSlice<f32>>>,
+    target_bank: Buffer<f32>,
+    thresholds: Buffer<f32>,
+    target_present: Buffer<u32>,
+    selected_index: Buffer<u32>,
+    resident_latents: Vec<Option<Buffer<f32>>>,
     source_count: u32,
     host_selected: [u32; 1],
 }
 
 impl GenerationGpuState {
-    pub fn new(gpu: &GpuOps, sources: &[SourceFace]) -> anyhow::Result<Self> {
+    pub fn new(gpu: &ComputeOps, sources: &[SourceFace]) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !sources.is_empty(),
             "a live generation requires at least one source assignment"
@@ -185,8 +183,8 @@ impl GenerationGpuState {
 
     pub fn select_first_source(
         &mut self,
-        gpu: &GpuOps,
-        query: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        query: &Buffer<f32>,
     ) -> anyhow::Result<Option<usize>> {
         anyhow::ensure!(
             query.len() >= IDENTITY_EMBEDDING_LEN,
@@ -215,7 +213,7 @@ impl GenerationGpuState {
     }
 
     /// Return the generation-owned latent for an Inswapper assignment.
-    pub fn resident_latent(&self, source_index: usize) -> anyhow::Result<Option<&CudaSlice<f32>>> {
+    pub fn resident_latent(&self, source_index: usize) -> anyhow::Result<Option<&Buffer<f32>>> {
         self.resident_latents
             .get(source_index)
             .map(Option::as_ref)
@@ -257,10 +255,10 @@ pub struct FrameResult {
 /// `frame_chw` holds the current frame [3, H, W] in [0, 255] and is mutated
 /// in place to contain the swapped frame.
 pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
     detector: &D,
-    frame_chw: &mut CudaSlice<f32>,
+    frame_chw: &mut Buffer<f32>,
     frame_h: u32,
     frame_w: u32,
     ws: &mut GpuWorkspace,
@@ -275,10 +273,10 @@ pub fn process_frame_gpu<D: FaceDetectorBackend + ?Sized>(
 
 /// Production frame path with generation-owned matcher inputs and latents.
 pub fn process_frame_gpu_with_state<D: FaceDetectorBackend + ?Sized>(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
     detector: &D,
-    frame_chw: &mut CudaSlice<f32>,
+    frame_chw: &mut Buffer<f32>,
     frame_h: u32,
     frame_w: u32,
     ws: &mut GpuWorkspace,
@@ -308,10 +306,10 @@ pub fn process_frame_gpu_with_state<D: FaceDetectorBackend + ?Sized>(
 
 #[allow(clippy::too_many_arguments)]
 fn process_frame_gpu_inner<D: FaceDetectorBackend + ?Sized>(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
     detector: &D,
-    frame_chw: &mut CudaSlice<f32>,
+    frame_chw: &mut Buffer<f32>,
     frame_h: u32,
     frame_w: u32,
     ws: &mut GpuWorkspace,
@@ -790,7 +788,7 @@ fn blend_restorer_affine() -> [[f64; 3]; 2] {
 }
 
 fn restorer_alignment_plan(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
     ws: &mut GpuWorkspace,
     alignment: RestorerAlignment,
@@ -811,7 +809,7 @@ fn restorer_alignment_plan(
 }
 
 fn apply_restorer_gpu(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
     ws: &mut GpuWorkspace,
     session_name: &str,
@@ -1040,8 +1038,10 @@ mod tests {
 
     #[test]
     fn generation_gpu_match_plan_selects_disabled_source_before_pipeline_skip() {
-        let mut disabled = FaceSwapParams::default();
-        disabled.enabled = false;
+        let disabled = FaceSwapParams {
+            enabled: false,
+            ..FaceSwapParams::default()
+        };
         let mut first = source(Some(basis(0)), 1.0);
         first.params = Some(disabled);
         let sources = vec![first, source(Some(basis(0)), 1.0)];

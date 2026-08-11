@@ -1,9 +1,8 @@
-use cudarc::driver::{DevicePtr, DevicePtrMut};
+use crate::backend::{ComputeOps, DevicePtr, DevicePtrMut};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::Session;
 use ort::value::ValueType;
 
-use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
 use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
@@ -225,7 +224,7 @@ impl DfmContract {
     pub fn convert_gpu(
         self,
         manager: &mut ModelManager,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         workspace: &mut GpuWorkspace,
         session_name: &str,
         morph: f32,

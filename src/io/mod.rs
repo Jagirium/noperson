@@ -5,6 +5,8 @@ pub mod nvjpeg;
 pub mod video;
 pub mod webcam;
 
+use crate::backend::{Buffer, ComputeOps};
+
 /// The backend implementation lives in the standalone `virtualcam` crate.
 #[cfg(target_os = "linux")]
 pub mod vcam_linux;
@@ -23,8 +25,8 @@ pub use vcam_windows::VirtualCamera;
 #[cfg(target_os = "windows")]
 pub fn send_virtual_camera_frame(
     camera: &mut VirtualCamera,
-    gpu: &crate::gpu::ops::GpuOps,
-    chw: &cudarc::driver::CudaSlice<f32>,
+    gpu: &ComputeOps,
+    chw: &Buffer<f32>,
     _rgb: &[u8],
     width: u32,
     height: u32,
@@ -35,8 +37,8 @@ pub fn send_virtual_camera_frame(
 #[cfg(target_os = "linux")]
 pub fn send_virtual_camera_frame(
     camera: &mut VirtualCamera,
-    _gpu: &crate::gpu::ops::GpuOps,
-    _chw: &cudarc::driver::CudaSlice<f32>,
+    _gpu: &ComputeOps,
+    _chw: &Buffer<f32>,
     rgb: &[u8],
     _width: u32,
     _height: u32,

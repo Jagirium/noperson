@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaSlice, CudaStream, DriverError, PinnedHostSlice};
+use crate::backend::{Buffer, ComputeContext, ComputeError, ComputeStream, PinnedHostBuffer};
 
 /// Default frame-ring dimensions for callers without a negotiated source.
 pub const MAX_WIDTH: usize = 1920;
@@ -17,77 +17,77 @@ pub const MAX_SWAP_DIM: usize = 4;
 /// workspace so we can borrow them independently from the scratch buffers.
 pub struct GpuWorkspace {
     // Detection (YoloFace input: 640×640, 0..1 normalized)
-    pub detect_input: CudaSlice<f32>, // [1, 3, 640, 640]
+    pub detect_input: Buffer<f32>, // [1, 3, 640, 640]
     /// YoloFace output: [1, 20, 8400] for 640 input — 4 bbox + 1 score + 15 kps
-    pub detect_output: CudaSlice<f32>, // [1, 20, 8400]
-    pub detect_candidates: CudaSlice<f32>, // [16800, bbox4+kps10+score]
-    pub detect_candidate_count: CudaSlice<u32>,
-    pub anchor_output: CudaSlice<f32>, // packed RetinaFace/SCRFD outputs
+    pub detect_output: Buffer<f32>, // [1, 20, 8400]
+    pub detect_candidates: Buffer<f32>, // [16800, bbox4+kps10+score]
+    pub detect_candidate_count: Buffer<u32>,
+    pub anchor_output: Buffer<f32>, // packed RetinaFace/SCRFD outputs
 
-    pub landmark_input: CudaSlice<f32>,
-    pub landmark_output_a: CudaSlice<f32>,
-    pub landmark_output_b: CudaSlice<f32>,
-    pub landmark_output_c: CudaSlice<f32>,
+    pub landmark_input: Buffer<f32>,
+    pub landmark_output_a: Buffer<f32>,
+    pub landmark_output_b: Buffer<f32>,
+    pub landmark_output_c: Buffer<f32>,
     pub host_landmark_a: Vec<f32>,
     pub host_landmark_b: Vec<f32>,
     pub host_landmark_c: Vec<f32>,
 
     // Per-face buffers (reused)
-    pub face_112: CudaSlice<f32>,          // ArcFace input [3, 112, 112]
-    pub face_128: CudaSlice<f32>,          // Pearl ArcFace intermediate [3, 128, 128]
-    pub face_256: CudaSlice<f32>,          // swap face [3, dim*128, dim*128] (max 512)
-    pub face_512: CudaSlice<f32>,          // Pipeline face [3, 512, 512]
-    pub face_512_original: CudaSlice<f32>, // Original aligned crop for learned masks
-    pub face_512_pre_restorer: CudaSlice<f32>, // Swapped crop before restoration/parser
-    pub face_512_scratch: CudaSlice<f32>,  // Scratch for upscaled swap [3, 512, 512]
-    pub restorer_256_input: CudaSlice<f32>,
-    pub restorer_256_output: CudaSlice<f32>,
+    pub face_112: Buffer<f32>,              // ArcFace input [3, 112, 112]
+    pub face_128: Buffer<f32>,              // Pearl ArcFace intermediate [3, 128, 128]
+    pub face_256: Buffer<f32>,              // swap face [3, dim*128, dim*128] (max 512)
+    pub face_512: Buffer<f32>,              // Pipeline face [3, 512, 512]
+    pub face_512_original: Buffer<f32>,     // Original aligned crop for learned masks
+    pub face_512_pre_restorer: Buffer<f32>, // Swapped crop before restoration/parser
+    pub face_512_scratch: Buffer<f32>,      // Scratch for upscaled swap [3, 512, 512]
+    pub restorer_256_input: Buffer<f32>,
+    pub restorer_256_output: Buffer<f32>,
     /// Current GPEN output in aligned 512-space.
-    pub restorer_cache: CudaSlice<f32>,
+    pub restorer_cache: Buffer<f32>,
 
     // ArcFace output: [1, 512] — pre-allocated for IoBinding path
-    pub arcface_embedding: CudaSlice<f32>, // [1, 512]
+    pub arcface_embedding: Buffer<f32>, // [1, 512]
 
     // Swap (batched dim=1..4 → up to 16 tiles)
-    pub swap_batch_in: CudaSlice<f32>,   // [16, 3, 128, 128]
-    pub swap_batch_out: CudaSlice<f32>,  // [16, 3, 128, 128]
-    pub swap_latent_gpu: CudaSlice<f32>, // [16, 512] — replicated latent for IoBinding input
+    pub swap_batch_in: Buffer<f32>,   // [16, 3, 128, 128]
+    pub swap_batch_out: Buffer<f32>,  // [16, 3, 128, 128]
+    pub swap_latent_gpu: Buffer<f32>, // [16, 512] — replicated latent for IoBinding input
 
     // Masks
-    pub mask_128: CudaSlice<f32>,                // [128, 128]
-    pub mask_128_tmp: CudaSlice<f32>,            // [128, 128] blur scratch
-    pub mask_256: CudaSlice<f32>,                // [256, 256] — Occluder output
-    pub mask_256_tmp: CudaSlice<f32>,            // [256, 256] morphology scratch
-    pub mask_learned_128: CudaSlice<f32>,        // [128, 128] learned-mask composition
-    pub parser_logits: CudaSlice<f32>,           // [19, 512, 512]
-    pub parser_classes: CudaSlice<u8>,           // [512, 512]
-    pub parser_mask_512: CudaSlice<f32>,         // Final parser mask
-    pub parser_attribute_512: CudaSlice<f32>,    // Current class mask
-    pub parser_tmp_512: CudaSlice<f32>,          // Morphology/blur scratch
-    pub semantic_previous_eyes: CudaSlice<f32>,  // Temporal eye mask
-    pub semantic_previous_mouth: CudaSlice<f32>, // Temporal mouth mask
-    pub semantic_stats: CudaSlice<f32>,          // Mask and RGB reduction totals
-    pub semantic_count: CudaSlice<u32>,          // Raw selected-class pixel count
-    pub semantic_eyes_valid: CudaSlice<u32>,
-    pub semantic_mouth_valid: CudaSlice<u32>,
-    pub dfm_morph: CudaSlice<f32>,
-    pub dfm_rct_stats: CudaSlice<f32>,
-    pub auto_color_stats: CudaSlice<f32>,
-    pub color_gray_sum: CudaSlice<u32>,
+    pub mask_128: Buffer<f32>,                // [128, 128]
+    pub mask_128_tmp: Buffer<f32>,            // [128, 128] blur scratch
+    pub mask_256: Buffer<f32>,                // [256, 256] — Occluder output
+    pub mask_256_tmp: Buffer<f32>,            // [256, 256] morphology scratch
+    pub mask_learned_128: Buffer<f32>,        // [128, 128] learned-mask composition
+    pub parser_logits: Buffer<f32>,           // [19, 512, 512]
+    pub parser_classes: Buffer<u8>,           // [512, 512]
+    pub parser_mask_512: Buffer<f32>,         // Final parser mask
+    pub parser_attribute_512: Buffer<f32>,    // Current class mask
+    pub parser_tmp_512: Buffer<f32>,          // Morphology/blur scratch
+    pub semantic_previous_eyes: Buffer<f32>,  // Temporal eye mask
+    pub semantic_previous_mouth: Buffer<f32>, // Temporal mouth mask
+    pub semantic_stats: Buffer<f32>,          // Mask and RGB reduction totals
+    pub semantic_count: Buffer<u32>,          // Raw selected-class pixel count
+    pub semantic_eyes_valid: Buffer<u32>,
+    pub semantic_mouth_valid: Buffer<u32>,
+    pub dfm_morph: Buffer<f32>,
+    pub dfm_rct_stats: Buffer<f32>,
+    pub auto_color_stats: Buffer<f32>,
+    pub color_gray_sum: Buffer<u32>,
     /// Sequential two-stage reduction workspace: up to 1,024 blocks × 13 f32 fields.
-    pub reduction_partials_f32: CudaSlice<f32>,
+    pub reduction_partials_f32: Buffer<f32>,
     /// Sequential two-stage reduction workspace: one u32 partial per launched block.
-    pub reduction_partials_u32: CudaSlice<u32>,
+    pub reduction_partials_u32: Buffer<u32>,
     pub color_noise_nonce: u32,
-    pub mask_512: CudaSlice<f32>, // [512, 512] — final face mask
+    pub mask_512: Buffer<f32>, // [512, 512] — final face mask
 
     // Blur kernel weights (uploaded once per param change)
-    pub blur_kernel: CudaSlice<f32>, // [MAX_KS]
+    pub blur_kernel: Buffer<f32>, // [MAX_KS]
     pub blur_ks_current: u32,
     pub blur_sigma_current: f32,
 
     // Pre-computed
-    pub emap: CudaSlice<f32>, // [512*512]
+    pub emap: Buffer<f32>, // [512*512]
 
     // Pre-allocated host staging buffers (reused to avoid per-frame Vec alloc)
     pub host_detect_candidates: Vec<f32>, // [16800, 15]
@@ -114,7 +114,7 @@ fn swap_latent_staging_len(max_swap_dim: usize) -> usize {
 
 impl GpuWorkspace {
     /// Allocate all GPU buffers. Called once at startup.
-    pub fn new(stream: &Arc<CudaStream>) -> Result<Self, DriverError> {
+    pub fn new(stream: &Arc<ComputeStream>) -> Result<Self, ComputeError> {
         let detect_size = 3 * 640 * 640;
         let face_112_size = 3 * 112 * 112;
         let face_128_size = 3 * 128 * 128;
@@ -206,10 +206,10 @@ impl GpuWorkspace {
 /// One slot in the live-frame ring. Device addresses never change, which is
 /// required for stable I/O binding and future CUDA Graph capture.
 pub struct FrameSlot {
-    pub u8_in: CudaSlice<u8>,
-    pub chw: CudaSlice<f32>,
-    pub u8_out: CudaSlice<u8>,
-    pub host_out: PinnedHostSlice<u8>,
+    pub u8_in: Buffer<u8>,
+    pub chw: Buffer<f32>,
+    pub u8_out: Buffer<u8>,
+    pub host_out: PinnedHostBuffer<u8>,
 }
 
 /// Triple-buffered live path. Slots rotate instead of allocating CUDA and
@@ -258,16 +258,16 @@ impl FrameRing {
     pub const DEFAULT_CAPACITY: usize = 3;
 
     pub fn new(
-        ctx: &Arc<CudaContext>,
-        stream: &Arc<CudaStream>,
+        ctx: &Arc<ComputeContext>,
+        stream: &Arc<ComputeStream>,
         capacity: usize,
     ) -> anyhow::Result<Self> {
         Self::new_for_dimensions(ctx, stream, capacity, MAX_WIDTH as u32, MAX_HEIGHT as u32)
     }
 
     pub fn new_for_dimensions(
-        ctx: &Arc<CudaContext>,
-        stream: &Arc<CudaStream>,
+        ctx: &Arc<ComputeContext>,
+        stream: &Arc<ComputeStream>,
         capacity: usize,
         width: u32,
         height: u32,

@@ -8,10 +8,9 @@
 //! ONNX inputs:  "target" [N, 3, 128, 128], "source" [N, 512]
 //! ONNX outputs: "output" [N, 3, 128, 128]
 
-use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
+use crate::backend::{Buffer, ComputeOps, DevicePtr, DevicePtrMut};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 
-use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
 use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
@@ -99,7 +98,7 @@ impl FaceSwapper {
     ///   3. upload latent       host → swap_latent_gpu (replicated per tile)
     ///   4. SYNC our stream so the buffers are ready before ort begins
     ///   5. CreateTensorWithDataAsOrtValue × 3   (target/source/output)
-    ///      — all three point to OUR CudaSlice device pointers, zero-copy
+    ///      — all three point to OUR Buffer device pointers, zero-copy
     ///   6. BindInput target / BindInput source / BindOutput output
     ///   7. RunWithBinding — ort writes inference output directly into
     ///      ws.swap_batch_out, no internal copies, no allocator overhead
@@ -107,7 +106,7 @@ impl FaceSwapper {
     ///   9. denormalize + interlace_scatter → face_256
     pub fn swap_gpu(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         ws: &mut GpuWorkspace,
         latent: &[f32],
         dim: u32,
@@ -118,7 +117,7 @@ impl FaceSwapper {
     /// Repeat a strength pass while retaining the invariant latent on-device.
     pub(crate) fn swap_gpu_cached(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         ws: &mut GpuWorkspace,
         latent: &[f32],
         dim: u32,
@@ -131,12 +130,12 @@ impl FaceSwapper {
         let n_tiles = (dim * dim) as usize;
 
         {
-            let face_ptr: *const CudaSlice<f32> = if input_from_scratch {
+            let face_ptr: *const Buffer<f32> = if input_from_scratch {
                 &ws.face_512_scratch
             } else {
                 &ws.face_256
             };
-            let batch_ptr: *mut CudaSlice<f32> = &mut ws.swap_batch_in;
+            let batch_ptr: *mut Buffer<f32> = &mut ws.swap_batch_in;
             unsafe {
                 gpu.interlace_extract_normalized(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
             }
@@ -163,8 +162,8 @@ impl FaceSwapper {
         )?;
 
         {
-            let batch_ptr: *const CudaSlice<f32> = &ws.swap_batch_out;
-            let face_ptr: *mut CudaSlice<f32> = &mut ws.face_256;
+            let batch_ptr: *const Buffer<f32> = &ws.swap_batch_out;
+            let face_ptr: *mut Buffer<f32> = &mut ws.face_256;
             unsafe {
                 gpu.interlace_scatter_denormalized(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
             }
@@ -178,9 +177,9 @@ impl FaceSwapper {
     /// tensor binds only the `dim * dim * 512` prefix required by this pass.
     pub fn swap_gpu_cached_device(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         ws: &mut GpuWorkspace,
-        latent_batch: &CudaSlice<f32>,
+        latent_batch: &Buffer<f32>,
         dim: u32,
         input_from_scratch: bool,
     ) -> anyhow::Result<()> {
@@ -199,12 +198,12 @@ impl FaceSwapper {
         );
 
         {
-            let face_ptr: *const CudaSlice<f32> = if input_from_scratch {
+            let face_ptr: *const Buffer<f32> = if input_from_scratch {
                 &ws.face_512_scratch
             } else {
                 &ws.face_256
             };
-            let batch_ptr: *mut CudaSlice<f32> = &mut ws.swap_batch_in;
+            let batch_ptr: *mut Buffer<f32> = &mut ws.swap_batch_in;
             unsafe {
                 gpu.interlace_extract_normalized(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
             }
@@ -221,8 +220,8 @@ impl FaceSwapper {
         )?;
 
         {
-            let batch_ptr: *const CudaSlice<f32> = &ws.swap_batch_out;
-            let face_ptr: *mut CudaSlice<f32> = &mut ws.face_256;
+            let batch_ptr: *const Buffer<f32> = &ws.swap_batch_out;
+            let face_ptr: *mut Buffer<f32> = &mut ws.face_256;
             unsafe {
                 gpu.interlace_scatter_denormalized(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
             }
@@ -232,10 +231,10 @@ impl FaceSwapper {
 
     fn run_swap_binding(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
-        swap_batch_in: &CudaSlice<f32>,
-        latent_batch: &CudaSlice<f32>,
-        swap_batch_out: &mut CudaSlice<f32>,
+        gpu: &ComputeOps,
+        swap_batch_in: &Buffer<f32>,
+        latent_batch: &Buffer<f32>,
+        swap_batch_out: &mut Buffer<f32>,
         n_tiles: usize,
         tile_size: u32,
     ) -> anyhow::Result<()> {
@@ -272,7 +271,7 @@ impl FaceSwapper {
     /// GPU swap with explicit model name (for batch-specific models).
     pub fn swap_gpu_named(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         ws: &mut GpuWorkspace,
         latent: &[f32],
         dim: u32,
@@ -285,8 +284,8 @@ impl FaceSwapper {
 
         // 1. Interlace extract: face_256 → swap_batch_in
         {
-            let face_ptr: *const CudaSlice<f32> = &ws.face_256;
-            let batch_ptr: *mut CudaSlice<f32> = &mut ws.swap_batch_in;
+            let face_ptr: *const Buffer<f32> = &ws.face_256;
+            let batch_ptr: *mut Buffer<f32> = &mut ws.swap_batch_in;
             unsafe {
                 gpu.interlace_extract_normalized(&*face_ptr, &mut *batch_ptr, dim, tile_size)?;
             }
@@ -344,8 +343,8 @@ impl FaceSwapper {
 
         // 8. Denormalize + scatter back into face_256
         {
-            let batch_ptr: *const CudaSlice<f32> = &ws.swap_batch_out;
-            let face_ptr: *mut CudaSlice<f32> = &mut ws.face_256;
+            let batch_ptr: *const Buffer<f32> = &ws.swap_batch_out;
+            let face_ptr: *mut Buffer<f32> = &mut ws.face_256;
             unsafe {
                 gpu.interlace_scatter_denormalized(&*batch_ptr, &mut *face_ptr, dim, tile_size)?;
             }

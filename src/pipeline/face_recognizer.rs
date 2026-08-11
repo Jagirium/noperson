@@ -2,11 +2,10 @@
 //!
 //! Port of crosswap/app/processors/face_swappers.py (recognize + calc_inswapper_latent)
 
-use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut, DriverError};
+use crate::backend::{Buffer, ComputeError, ComputeOps, DevicePtr, DevicePtrMut};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 
 use crate::config::parameters::SimilarityType;
-use crate::gpu::ops::GpuOps;
 use crate::math::affine;
 use crate::math::constants::{ARCFACE_DST, ARCFACE_MAP_TEMPLATES};
 use crate::models::manager::ModelManager;
@@ -22,8 +21,8 @@ impl FaceRecognizer {
     /// Provider-aware stream ordering prevents races on `ws.arcface_embedding`.
     pub fn recognize_gpu(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw_gpu: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw_gpu: &Buffer<f32>,
         frame_h: u32,
         frame_w: u32,
         kps_5: &[[f32; 2]; 5],
@@ -46,8 +45,8 @@ impl FaceRecognizer {
     /// Unlike the compatibility APIs, this performs no device-to-host copy.
     pub fn recognize_gpu_into(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw_gpu: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw_gpu: &Buffer<f32>,
         frame_h: u32,
         frame_w: u32,
         kps_5: &[[f32; 2]; 5],
@@ -67,8 +66,8 @@ impl FaceRecognizer {
 
     pub fn recognize_gpu_with_similarity(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw_gpu: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw_gpu: &Buffer<f32>,
         frame_h: u32,
         frame_w: u32,
         kps_5: &[[f32; 2]; 5],
@@ -92,8 +91,8 @@ impl FaceRecognizer {
     /// Similarity-mode-aware ArcFace inference that leaves output on-device.
     pub fn recognize_gpu_into_with_similarity(
         manager: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw_gpu: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw_gpu: &Buffer<f32>,
         frame_h: u32,
         frame_w: u32,
         kps_5: &[[f32; 2]; 5],
@@ -216,11 +215,11 @@ impl FaceRecognizer {
     /// `embedding_gpu` [512], `emap_gpu` [512*512], `output_gpu` [512] — all on GPU.
     /// Uses matmul_512 + l2_normalize kernels. Result stays on GPU.
     pub fn calc_latent_gpu(
-        gpu: &GpuOps,
-        embedding_gpu: &mut CudaSlice<f32>,
-        emap_gpu: &CudaSlice<f32>,
-        output_gpu: &mut CudaSlice<f32>,
-    ) -> Result<(), DriverError> {
+        gpu: &ComputeOps,
+        embedding_gpu: &mut Buffer<f32>,
+        emap_gpu: &Buffer<f32>,
+        output_gpu: &mut Buffer<f32>,
+    ) -> Result<(), ComputeError> {
         gpu.calc_latent_512(embedding_gpu, emap_gpu, output_gpu)?;
         Ok(())
     }

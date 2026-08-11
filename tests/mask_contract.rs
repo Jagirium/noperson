@@ -10,8 +10,8 @@ use std::fs;
 #[test]
 fn unblurred_fake_diff_uses_one_direct_composite_pass() {
     let pipeline = fs::read_to_string("src/pipeline/face_mask.rs").unwrap();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
-    let kernel = fs::read_to_string("gpu_kernels/mask_postprocess.cu").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
+    let kernel = fs::read_to_string("gpu_kernels/nvidia/mask_postprocess.cu").unwrap();
 
     assert!(pipeline.contains("if params.differencing_blur == 0"));
     assert!(pipeline.contains("fake_diff_composite_direct"));

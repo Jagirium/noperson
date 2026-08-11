@@ -4,6 +4,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::backend::{CompiledCapabilities, InferenceProvider};
 use crate::config::parameters::{FaceSwapParams, RestorerSize, SwapperModel};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 
@@ -98,6 +99,11 @@ pub enum EngineSpecError {
     InvalidFilename { role: ModelRole, filename: String },
     #[error("CUDA device id must be non-negative, got {0}")]
     InvalidDeviceId(i32),
+    #[error("inference provider {requested:?} is not compiled; available: {available:?}")]
+    ProviderUnavailable {
+        requested: InferenceProvider,
+        available: Vec<InferenceProvider>,
+    },
     #[error("restorer {0} is excluded from new engine generations")]
     UnsupportedRestorer(String),
     #[error("enhancer blend must be finite and in [0,1], got {0}")]
@@ -135,6 +141,13 @@ impl EngineSpec {
     pub fn validate(&self) -> Result<(), EngineSpecError> {
         if self.device_id < 0 {
             return Err(EngineSpecError::InvalidDeviceId(self.device_id));
+        }
+        let capabilities = CompiledCapabilities::current();
+        if !capabilities.supports(self.provider) {
+            return Err(EngineSpecError::ProviderUnavailable {
+                requested: self.provider,
+                available: capabilities.inference_providers.to_vec(),
+            });
         }
 
         for role in Self::REQUIRED_MODELS {

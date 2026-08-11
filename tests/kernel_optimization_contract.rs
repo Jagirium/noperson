@@ -11,8 +11,8 @@ fn build_enforces_blake3(source: &str) -> bool {
 
 #[test]
 fn latent_projection_normalizes_and_projects_in_one_cuda_launch() {
-    let kernel = fs::read_to_string("gpu_kernels/matmul_512.cu").unwrap();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let kernel = fs::read_to_string("gpu_kernels/nvidia/matmul_512.cu").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
     let recognizer = fs::read_to_string("src/pipeline/face_recognizer.rs").unwrap();
 
     assert!(kernel.contains("void calc_latent_512_kernel"));
@@ -26,8 +26,8 @@ fn latent_projection_normalizes_and_projects_in_one_cuda_launch() {
 
 #[test]
 fn detector_compaction_is_parallel_but_preserves_anchor_order() {
-    let kernel = fs::read_to_string("gpu_kernels/detector_decode.cu").unwrap();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let kernel = fs::read_to_string("gpu_kernels/nvidia/detector_decode.cu").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
 
     assert!(kernel.contains("__ballot_sync"));
     assert!(kernel.contains("__shared__ unsigned int warp_offsets[8]"));
@@ -47,7 +47,7 @@ fn release_binary_embeds_every_fatbin_module_instead_of_reading_target_dir() {
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect::<String>();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
     let generator = fs::read_to_string("scripts/kernels/build-fatbins.sh").unwrap();
 
     assert!(build.contains("embedded_fatbin.rs"));
@@ -75,13 +75,13 @@ fn release_binary_embeds_every_fatbin_module_instead_of_reading_target_dir() {
     assert!(generator.contains("arch=compute_75,code=compute_75"));
     assert!(generator.contains("sm_75.ptx"));
 
-    let source_paths = fs::read_dir("gpu_kernels")
+    let source_paths = fs::read_dir("gpu_kernels/nvidia")
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "cu"))
         .map(|path| path.strip_prefix(".").unwrap_or(&path).to_path_buf())
         .collect::<BTreeSet<_>>();
-    let fatbin_paths = fs::read_dir("gpu_kernels/prebuilt/cuda-12.8")
+    let fatbin_paths = fs::read_dir("gpu_kernels/prebuilt/nvidia/cuda-12.8")
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
@@ -89,15 +89,16 @@ fn release_binary_embeds_every_fatbin_module_instead_of_reading_target_dir() {
                 .is_some_and(|extension| extension == "fatbin")
         })
         .collect::<BTreeSet<_>>();
-    let manifest_paths =
-        fs::read_to_string(Path::new("gpu_kernels/prebuilt/cuda-12.8").join("MANIFEST_BLAKE3.txt"))
-            .unwrap()
-            .lines()
-            .filter_map(|line| {
-                line.split_once("  ")
-                    .map(|(_, path)| Path::new(path).to_path_buf())
-            })
-            .collect::<BTreeSet<_>>();
+    let manifest_paths = fs::read_to_string(
+        Path::new("gpu_kernels/prebuilt/nvidia/cuda-12.8").join("MANIFEST_BLAKE3.txt"),
+    )
+    .unwrap()
+    .lines()
+    .filter_map(|line| {
+        line.split_once("  ")
+            .map(|(_, path)| Path::new(path).to_path_buf())
+    })
+    .collect::<BTreeSet<_>>();
     let expected_manifest_paths = source_paths
         .iter()
         .cloned()
@@ -116,11 +117,11 @@ fn fatbin_contract_rejects_a_noop_blake3_verifier() {
 
 #[test]
 fn dead_gpu_modules_are_not_embedded_or_jitted() {
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
-    let resize = fs::read_to_string("gpu_kernels/warp_affine.cu").unwrap();
-    let layout = fs::read_to_string("gpu_kernels/layout_convert.cu").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
+    let resize = fs::read_to_string("gpu_kernels/nvidia/warp_affine.cu").unwrap();
+    let layout = fs::read_to_string("gpu_kernels/nvidia/layout_convert.cu").unwrap();
 
-    assert!(!std::path::Path::new("gpu_kernels/cosine_sim.cu").exists());
+    assert!(!std::path::Path::new("gpu_kernels/nvidia/cosine_sim.cu").exists());
     assert!(!resize.contains("warp_affine_chw_kernel"));
     assert!(!layout.contains("void hwc_to_chw_kernel"));
     assert!(!layout.contains("void chw_to_hwc_kernel"));
@@ -129,8 +130,8 @@ fn dead_gpu_modules_are_not_embedded_or_jitted() {
 
 #[test]
 fn gaussian_passes_stage_halo_tiles_in_shared_memory() {
-    let kernel = fs::read_to_string("gpu_kernels/gaussian_blur.cu").unwrap();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let kernel = fs::read_to_string("gpu_kernels/nvidia/gaussian_blur.cu").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
 
     assert!(kernel.matches("extern __shared__ float tile[]").count() >= 4);
     assert!(kernel.contains("const unsigned int tile_width = blockDim.x + ks - 1"));

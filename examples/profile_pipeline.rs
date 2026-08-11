@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use cudarc::driver::CudaContext;
 use image::GenericImageView;
+use noperson::backend::ComputeContext;
 
+use noperson::backend::ComputeOps;
 use noperson::config::parameters::{FaceSwapParams, RestorerMode, SwapDim};
-use noperson::gpu::ops::GpuOps;
 use noperson::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
 use noperson::models::manager::ModelManager;
 use noperson::pipeline::face_detector::YoloFaceDetector;
@@ -49,9 +49,9 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Init CUDA
-    let ctx = Arc::new(CudaContext::new(0)?);
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
-    let gpu = GpuOps::new(&ctx, stream.clone())?;
+    let gpu = ComputeOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
     manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;

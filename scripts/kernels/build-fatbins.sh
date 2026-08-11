@@ -22,8 +22,8 @@ esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
-kernels_dir="$repo_root/gpu_kernels"
-output_dir="$kernels_dir/prebuilt/cuda-$CUDA_RELEASE"
+kernels_dir="$repo_root/gpu_kernels/nvidia"
+output_dir="$repo_root/gpu_kernels/prebuilt/nvidia/cuda-$CUDA_RELEASE"
 temporary_parent="$repo_root/.cache/release/kernels"
 temporary="$temporary_parent/.fatbins.$$"
 
@@ -127,7 +127,7 @@ for source in "${sources[@]}"; do
     stem=${source##*/}
     stem=${stem%.cu}
     printf '%s\n' "${source#"$repo_root/"}"
-    printf 'gpu_kernels/prebuilt/cuda-%s/%s.fatbin\n' "$CUDA_RELEASE" "$stem"
+    printf 'gpu_kernels/prebuilt/nvidia/cuda-%s/%s.fatbin\n' "$CUDA_RELEASE" "$stem"
 done | sort > "$inventory"
 
 while IFS= read -r relative; do

@@ -8,13 +8,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use cudarc::driver::CudaContext;
-#[cfg(target_os = "linux")]
-use cudarc::driver::{CudaEvent, CudaSlice, DevicePtr, DevicePtrMut, sys};
 use thiserror::Error;
 
+#[cfg(target_os = "linux")]
+use crate::backend::cuda::driver_sys as sys;
+#[cfg(target_os = "linux")]
+use crate::backend::{Buffer, ComputeEvent, DevicePtr, DevicePtrMut};
+use crate::backend::{ComputeContext, ComputeOps};
 use crate::engine::BuildPhase;
-use crate::gpu::ops::GpuOps;
 #[cfg(target_os = "linux")]
 use crate::io::native_video::{
     MappedVideoSurface, NativeDemuxer, NativeMuxer, NvDecoder, NvEncoder, NvEncoderConfig,
@@ -145,7 +146,7 @@ pub struct EditorPreviewImage {
 
 #[cfg(target_os = "linux")]
 struct DeferredVideoSurface {
-    completion: CudaEvent,
+    completion: ComputeEvent,
     surface: Option<MappedVideoSurface>,
 }
 
@@ -185,7 +186,7 @@ fn full_predecode_allowed(
 
 #[cfg(target_os = "linux")]
 impl DeferredVideoSurface {
-    fn new(completion: CudaEvent, surface: MappedVideoSurface) -> Self {
+    fn new(completion: ComputeEvent, surface: MappedVideoSurface) -> Self {
         Self {
             completion,
             surface: Some(surface),
@@ -222,7 +223,7 @@ impl Drop for DeferredVideoSurface {
 
 #[cfg(target_os = "linux")]
 struct GpuFrameArchive {
-    storage: CudaSlice<u8>,
+    storage: Buffer<u8>,
     frame_stride: usize,
     row_bytes: usize,
     height: usize,
@@ -251,7 +252,7 @@ impl GpuFrameArchive {
     }
 
     fn new(
-        gpu: &Arc<GpuOps>,
+        gpu: &Arc<ComputeOps>,
         width: u32,
         height: u32,
         pixel_format: PixelFormat,
@@ -276,7 +277,7 @@ impl GpuFrameArchive {
 
     fn copy_from(
         &mut self,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         index: u64,
         surface: &MappedVideoSurface,
     ) -> anyhow::Result<()> {
@@ -324,7 +325,7 @@ impl GpuFrameArchive {
         Ok(())
     }
 
-    fn frame_ptr(&self, gpu: &GpuOps, index: u64) -> anyhow::Result<u64> {
+    fn frame_ptr(&self, gpu: &ComputeOps, index: u64) -> anyhow::Result<u64> {
         let offset = self.frame_stride * usize::try_from(index)?;
         anyhow::ensure!(
             offset + self.frame_stride <= self.storage.len(),
@@ -701,16 +702,19 @@ fn worker_loop(
     }
 }
 
-fn ensure_gpu(gpu: &mut Option<Arc<GpuOps>>, device_id: i32) -> anyhow::Result<Arc<GpuOps>> {
+fn ensure_gpu(
+    gpu: &mut Option<Arc<ComputeOps>>,
+    device_id: i32,
+) -> anyhow::Result<Arc<ComputeOps>> {
     if let Some(gpu) = gpu {
         return Ok(Arc::clone(gpu));
     }
-    let context = Arc::new(CudaContext::new(device_id as usize)?);
+    let context = Arc::new(ComputeContext::new(device_id as usize)?);
     // A real stream handle is required for NvEncSetIOCudaStreams. CUDA's
     // legacy default stream is represented by NULL, which made the native
     // shim skip NVENC ordering and race the final RGB -> NV12 kernel.
     let stream = context.new_stream()?;
-    let initialized = Arc::new(GpuOps::new(&context, stream)?);
+    let initialized = Arc::new(ComputeOps::new(&context, stream)?);
     *gpu = Some(Arc::clone(&initialized));
     Ok(initialized)
 }
@@ -720,7 +724,7 @@ fn analyze_job(
     request: AnalyzeRequest,
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
-    gpu: &mut Option<Arc<GpuOps>>,
+    gpu: &mut Option<Arc<ComputeOps>>,
     device_id: i32,
 ) -> anyhow::Result<()> {
     cancel.ensure_active("analysis")?;
@@ -772,7 +776,7 @@ fn preview_job(
     request: EditorEngineRequest,
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
-    gpu: &mut Option<Arc<GpuOps>>,
+    gpu: &mut Option<Arc<ComputeOps>>,
     engine: &mut Option<AtomicLiveEngine>,
     device_id: i32,
     #[cfg(target_os = "linux")] render_state: Option<&egui_wgpu::RenderState>,
@@ -833,7 +837,7 @@ fn record_job(
     markers: BTreeMap<u64, EditorEngineRequest>,
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
-    gpu: &mut Option<Arc<GpuOps>>,
+    gpu: &mut Option<Arc<ComputeOps>>,
     engine: &mut Option<AtomicLiveEngine>,
     device_id: i32,
 ) -> anyhow::Result<()> {
@@ -861,7 +865,7 @@ fn record_job_pipe(
     mut markers: BTreeMap<u64, EditorEngineRequest>,
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
-    gpu: &mut Option<Arc<GpuOps>>,
+    gpu: &mut Option<Arc<ComputeOps>>,
     engine: &mut Option<AtomicLiveEngine>,
     device_id: i32,
 ) -> anyhow::Result<()> {
@@ -934,7 +938,7 @@ fn record_job_native(
     mut markers: BTreeMap<u64, EditorEngineRequest>,
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
-    gpu: &mut Option<Arc<GpuOps>>,
+    gpu: &mut Option<Arc<ComputeOps>>,
     engine: &mut Option<AtomicLiveEngine>,
     device_id: i32,
 ) -> anyhow::Result<()> {
@@ -1291,7 +1295,7 @@ fn record_job_native(
 
 #[cfg(target_os = "linux")]
 fn process_gpu_preview(
-    gpu: &Arc<GpuOps>,
+    gpu: &Arc<ComputeOps>,
     engine: &mut AtomicLiveEngine,
     frame: &Frame,
     render_state: &egui_wgpu::RenderState,
@@ -1377,7 +1381,7 @@ fn playback_job(
     mut markers: BTreeMap<u64, EditorEngineRequest>,
     events: &Sender<EditorRuntimeEvent>,
     cancel: &CancellationToken<'_>,
-    gpu: &mut Option<Arc<GpuOps>>,
+    gpu: &mut Option<Arc<ComputeOps>>,
     engine: &mut Option<AtomicLiveEngine>,
     device_id: i32,
     #[cfg(target_os = "linux")] render_state: Option<&egui_wgpu::RenderState>,
@@ -1553,7 +1557,7 @@ mod tests {
 
 fn configure_engine(
     models_dir: &std::path::Path,
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     engine: &mut Option<AtomicLiveEngine>,
     request: EditorEngineRequest,
     cancel: &CancellationToken<'_>,

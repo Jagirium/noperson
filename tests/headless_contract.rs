@@ -76,7 +76,7 @@ fn headless_plan_maps_cli_quality_controls_into_the_engine_spec() {
     .unwrap();
 
     let plan = build_plan(options.headless.as_ref().unwrap()).unwrap();
-    assert_eq!(plan.provider, ExecutionProvider::TensorRT);
+    assert_eq!(plan.provider, ExecutionProvider::TensorRt);
     assert_eq!(plan.params.dim, SwapDim::Dim3);
     assert_eq!(plan.params.detector_score, 0.67);
     assert_eq!(plan.params.max_faces, 4);

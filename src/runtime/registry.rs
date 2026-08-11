@@ -4,6 +4,8 @@ use super::TensorRtShard;
 
 pub const LINUX_GENERATION: &str = "cuda12.8-cudnn9.20-trt10.16-v1";
 pub const WINDOWS_GENERATION: &str = "cuda12.8-cudnn9.11-trt10.13-v1";
+pub const LINUX_CUDA_GENERATION: &str = "cuda12.8-cudnn9.20-v1";
+pub const WINDOWS_CUDA_GENERATION: &str = "cuda12.8-cudnn9.11-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimePlatform {
@@ -139,9 +141,16 @@ pub const WINDOWS_TRT_UNIVERSAL: ArtifactEntry = windows_runtime_artifact!(
 pub fn artifacts_for(
     platform: RuntimePlatform,
     shard: TensorRtShard,
-) -> [&'static ArtifactEntry; 3] {
+) -> Vec<&'static ArtifactEntry> {
     if platform == RuntimePlatform::WindowsX86_64 {
-        return [&WINDOWS_BASE, &WINDOWS_TRT_BASE, &WINDOWS_TRT_UNIVERSAL];
+        let mut artifacts = vec![&WINDOWS_BASE];
+        if cfg!(feature = "tensorrt") {
+            artifacts.extend([&WINDOWS_TRT_BASE, &WINDOWS_TRT_UNIVERSAL]);
+        }
+        return artifacts;
+    }
+    if !cfg!(feature = "tensorrt") {
+        return vec![&BASE];
     }
     let shard = match shard {
         TensorRtShard::Sm75 => &TRT_SM75,
@@ -153,10 +162,16 @@ pub fn artifacts_for(
         TensorRtShard::Sm120 => &TRT_SM120,
         TensorRtShard::Ptx => &TRT_PTX,
     };
-    [&BASE, &TRT_BASE, shard]
+    vec![&BASE, &TRT_BASE, shard]
 }
 
 pub fn generation_name_for(platform: RuntimePlatform, shard: TensorRtShard) -> String {
+    if !cfg!(feature = "tensorrt") {
+        return match platform {
+            RuntimePlatform::LinuxX86_64 => LINUX_CUDA_GENERATION.to_owned(),
+            RuntimePlatform::WindowsX86_64 => WINDOWS_CUDA_GENERATION.to_owned(),
+        };
+    }
     match platform {
         RuntimePlatform::LinuxX86_64 => {
             format!("{LINUX_GENERATION}-{}", shard.directory())
@@ -165,7 +180,7 @@ pub fn generation_name_for(platform: RuntimePlatform, shard: TensorRtShard) -> S
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tensorrt"))]
 mod tests {
     use std::collections::BTreeMap;
 

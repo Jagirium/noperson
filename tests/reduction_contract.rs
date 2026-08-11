@@ -103,9 +103,9 @@ fn scalar_fixtures_preserve_masks_exact_integer_reductions_and_dfm_denominator()
 
 #[test]
 fn reduction_sources_use_two_deterministic_stages_without_contended_outputs() {
-    let dfm = fs::read_to_string("gpu_kernels/dfm_color.cu").unwrap();
-    let mask = fs::read_to_string("gpu_kernels/mask_postprocess.cu").unwrap();
-    let color = fs::read_to_string("gpu_kernels/color_adjust.cu").unwrap();
+    let dfm = fs::read_to_string("gpu_kernels/nvidia/dfm_color.cu").unwrap();
+    let mask = fs::read_to_string("gpu_kernels/nvidia/mask_postprocess.cu").unwrap();
+    let color = fs::read_to_string("gpu_kernels/nvidia/color_adjust.cu").unwrap();
 
     for name in [
         "dfm_rct_stats_stage1_kernel",
@@ -142,10 +142,10 @@ fn reduction_sources_use_two_deterministic_stages_without_contended_outputs() {
 #[test]
 fn workspace_and_launches_reuse_partials_without_host_zero_clears() {
     let workspace = fs::read_to_string("src/pipeline/workspace.rs").unwrap();
-    let ops = fs::read_to_string("src/gpu/ops.rs").unwrap();
+    let ops = fs::read_to_string("src/backend/cuda/ops.rs").unwrap();
 
-    assert!(workspace.contains("reduction_partials_f32: CudaSlice<f32>"));
-    assert!(workspace.contains("reduction_partials_u32: CudaSlice<u32>"));
+    assert!(workspace.contains("reduction_partials_f32: Buffer<f32>"));
+    assert!(workspace.contains("reduction_partials_u32: Buffer<u32>"));
     assert!(workspace.contains("stream.alloc_zeros::<f32>(1024 * 13)?"));
     assert!(workspace.contains("stream.alloc_zeros::<u32>(1024)?"));
     assert!(ops.contains("const REDUCTION_THREADS: u32 = 256;"));
@@ -181,9 +181,9 @@ fn capped_stage_one_grid_stride_covers_all_pixels_and_live_contract_uses_u32_par
             .all(|visits| visits == 1)
     );
 
-    let dfm = fs::read_to_string("gpu_kernels/dfm_color.cu").unwrap();
-    let mask = fs::read_to_string("gpu_kernels/mask_postprocess.cu").unwrap();
-    let color = fs::read_to_string("gpu_kernels/color_adjust.cu").unwrap();
+    let dfm = fs::read_to_string("gpu_kernels/nvidia/dfm_color.cu").unwrap();
+    let mask = fs::read_to_string("gpu_kernels/nvidia/mask_postprocess.cu").unwrap();
+    let color = fs::read_to_string("gpu_kernels/nvidia/color_adjust.cu").unwrap();
     for (source, name) in [
         (&dfm, "dfm_rct_stats_stage1_kernel"),
         (&dfm, "auto_color_dfl_stats_stage1_kernel"),
@@ -211,9 +211,9 @@ fn grid_stride_uses_non_wrapping_64_bit_indices_at_u32_max() {
     assert_eq!(iterations, 16_384);
     assert_eq!(iterations * stride, 1u64 << 32);
 
-    let dfm = fs::read_to_string("gpu_kernels/dfm_color.cu").unwrap();
-    let mask = fs::read_to_string("gpu_kernels/mask_postprocess.cu").unwrap();
-    let color = fs::read_to_string("gpu_kernels/color_adjust.cu").unwrap();
+    let dfm = fs::read_to_string("gpu_kernels/nvidia/dfm_color.cu").unwrap();
+    let mask = fs::read_to_string("gpu_kernels/nvidia/mask_postprocess.cu").unwrap();
+    let color = fs::read_to_string("gpu_kernels/nvidia/color_adjust.cu").unwrap();
     for (source, name) in [
         (&dfm, "dfm_rct_stats_stage1_kernel"),
         (&dfm, "auto_color_dfl_stats_stage1_kernel"),

@@ -1,4 +1,4 @@
-//! Build script — validates and embeds precompiled CUDA fatbins.
+//! Build script — validates and embeds precompiled backend kernels.
 //!
 //! Kernel compilation is an explicit release-maintenance step. Ordinary Cargo
 //! builds need a C/C++ toolchain for the native bridges, but never CUDA/nvcc.
@@ -10,12 +10,15 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const FATBIN_DIRECTORY: &str = "gpu_kernels/prebuilt/cuda-12.8";
-const FATBIN_MANIFEST: &str = "gpu_kernels/prebuilt/cuda-12.8/MANIFEST_BLAKE3.txt";
+const NVIDIA_SOURCE_DIRECTORY: &str = "gpu_kernels/nvidia";
+const NVIDIA_FATBIN_DIRECTORY: &str = "gpu_kernels/prebuilt/nvidia/cuda-12.8";
+const NVIDIA_FATBIN_MANIFEST: &str = "gpu_kernels/prebuilt/nvidia/cuda-12.8/MANIFEST_BLAKE3.txt";
+const NVIDIA_CUDA_RELEASE: &str = "12.8";
+const NVIDIA_REQUIRED_SASS: &str = "sm75,sm80,sm86,sm89,sm90,sm100,sm120";
+const NVIDIA_PTX_FALLBACK: &str = "compute_75";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(noperson_static_test)");
-    let kernels_dir = Path::new("gpu_kernels");
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR is not set");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
@@ -124,16 +127,28 @@ fn main() {
         println!("cargo:rerun-if-changed=native/jpeg_roundtrip.c");
     }
 
-    generate_embedded_fatbin_registry(kernels_dir, Path::new(&out_dir));
+    if env::var_os("CARGO_FEATURE_CUDA").is_some() {
+        generate_embedded_fatbin_registry(Path::new(&out_dir));
+        println!("cargo:rerun-if-changed={NVIDIA_FATBIN_MANIFEST}");
+    } else {
+        generate_empty_kernel_registry(Path::new(&out_dir));
+    }
 
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={FATBIN_MANIFEST}");
 }
 
-fn generate_embedded_fatbin_registry(kernels_dir: &Path, out_dir: &Path) {
-    let manifest = read_blake3_manifest(Path::new(FATBIN_MANIFEST));
-    let mut sources = std::fs::read_dir(kernels_dir)
-        .expect("failed to read gpu_kernels/")
+fn generate_empty_kernel_registry(out_dir: &Path) {
+    std::fs::write(
+        out_dir.join("embedded_fatbin.rs"),
+        "fn embedded_fatbin(_name: &str) -> Option<&'static [u8]> { None }\n",
+    )
+    .expect("failed to generate empty backend kernel registry");
+}
+
+fn generate_embedded_fatbin_registry(out_dir: &Path) {
+    let manifest = read_blake3_manifest(Path::new(NVIDIA_FATBIN_MANIFEST));
+    let mut sources = std::fs::read_dir(NVIDIA_SOURCE_DIRECTORY)
+        .unwrap_or_else(|error| panic!("failed to read {NVIDIA_SOURCE_DIRECTORY}: {error}"))
         .map(|entry| entry.expect("invalid GPU kernel entry").path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "cu"))
         .collect::<Vec<_>>();
@@ -150,8 +165,8 @@ fn generate_embedded_fatbin_registry(kernels_dir: &Path, out_dir: &Path) {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .expect("CUDA kernel filename is not valid UTF-8");
-        let source_relative = format!("gpu_kernels/{stem}.cu");
-        let fatbin_relative = format!("{FATBIN_DIRECTORY}/{stem}.fatbin");
+        let source_relative = format!("{NVIDIA_SOURCE_DIRECTORY}/{stem}.cu");
+        let fatbin_relative = format!("{NVIDIA_FATBIN_DIRECTORY}/{stem}.fatbin");
         verify_manifest_file(&manifest, &source_relative);
         verify_manifest_file(&manifest, &fatbin_relative);
         expected_manifest_paths.insert(source_relative.clone());
@@ -168,8 +183,8 @@ fn generate_embedded_fatbin_registry(kernels_dir: &Path, out_dir: &Path) {
         manifest_paths, expected_manifest_paths,
         "BLAKE3 manifest contains stale or incomplete CUDA inventory"
     );
-    let tracked_fatbin_paths = std::fs::read_dir(FATBIN_DIRECTORY)
-        .unwrap_or_else(|error| panic!("failed to read {FATBIN_DIRECTORY}: {error}"))
+    let tracked_fatbin_paths = std::fs::read_dir(NVIDIA_FATBIN_DIRECTORY)
+        .unwrap_or_else(|error| panic!("failed to read {NVIDIA_FATBIN_DIRECTORY}: {error}"))
         .map(|entry| entry.expect("invalid tracked fatbin entry").path())
         .filter(|path| {
             path.extension()
@@ -190,8 +205,16 @@ fn read_blake3_manifest(path: &Path) -> BTreeMap<String, String> {
     let body = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     let mut inventory = BTreeMap::new();
+    let mut metadata = BTreeMap::new();
     for (index, line) in body.lines().enumerate() {
-        if line.is_empty() || line.starts_with('#') || line.contains('=') {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            assert!(
+                metadata.insert(key.to_owned(), value.to_owned()).is_none(),
+                "duplicate CUDA manifest metadata key: {key}"
+            );
             continue;
         }
         let (digest, relative) = line.split_once("  ").unwrap_or_else(|| {
@@ -214,6 +237,24 @@ fn read_blake3_manifest(path: &Path) -> BTreeMap<String, String> {
             "duplicate BLAKE3 manifest path: {relative}"
         );
     }
+    for (key, expected) in [
+        ("cuda_release", NVIDIA_CUDA_RELEASE),
+        ("sass", NVIDIA_REQUIRED_SASS),
+        ("ptx", NVIDIA_PTX_FALLBACK),
+    ] {
+        assert_eq!(
+            metadata.get(key).map(String::as_str),
+            Some(expected),
+            "CUDA manifest metadata {key} does not match the compiled kernel contract"
+        );
+    }
+    let nvcc_version = metadata
+        .get("nvcc_version")
+        .expect("CUDA manifest does not record nvcc_version");
+    assert!(
+        nvcc_version.starts_with(NVIDIA_CUDA_RELEASE),
+        "CUDA manifest nvcc_version does not match release {NVIDIA_CUDA_RELEASE}"
+    );
     inventory
 }
 

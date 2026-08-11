@@ -6,7 +6,7 @@
 
 use std::ffi::CString;
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut};
+use crate::backend::{Buffer, ComputeStream, DevicePtr, DevicePtrMut};
 use ort::AsPointer;
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::{IoBinding, Session};
@@ -176,7 +176,7 @@ impl BindingProtocol for OrtBindingProtocol<'_, '_, '_> {
 /// not sufficient for the selected provider.
 pub fn run_bound_values(
     manager: &mut ModelManager,
-    stream: &CudaStream,
+    stream: &ComputeStream,
     session_name: &str,
     inputs: &[(&str, &OrtValueGuard)],
     outputs: &[(&str, &OrtValueGuard)],
@@ -197,13 +197,13 @@ pub fn run_bound_values(
 #[allow(clippy::too_many_arguments)]
 pub fn run_bound_f32(
     manager: &mut ModelManager,
-    stream: &CudaStream,
+    stream: &ComputeStream,
     session_name: &str,
     input_name: &str,
-    input: &CudaSlice<f32>,
+    input: &Buffer<f32>,
     input_shape: &[i64],
     output_name: &str,
-    output: &mut CudaSlice<f32>,
+    output: &mut Buffer<f32>,
     output_shape: &[i64],
 ) -> anyhow::Result<()> {
     let memory = MemoryInfo::new(

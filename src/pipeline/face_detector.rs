@@ -3,12 +3,11 @@
 //! Port of crosswap/app/processors/face_detectors.py
 //! All three detectors share the same DetectedFace output format.
 
-use cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
+use crate::backend::{Buffer, ComputeOps, DevicePtr, DevicePtrMut};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use std::cell::RefCell;
 
 use crate::config::settings::DetectorModel;
-use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
 use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
 use crate::pipeline::workspace::GpuWorkspace;
@@ -25,8 +24,8 @@ pub trait FaceDetectorBackend {
     fn detect_gpu(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
@@ -35,8 +34,8 @@ pub trait FaceDetectorBackend {
     fn detect_gpu_auto_rotation(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
@@ -96,8 +95,8 @@ impl FaceDetectorBackend for FaceDetector {
     fn detect_gpu(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
@@ -113,8 +112,8 @@ impl FaceDetectorBackend for FaceDetector {
     fn detect_gpu_auto_rotation(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
@@ -203,7 +202,7 @@ pub struct YoloFaceDetector {
     score_threshold: f32,
     nms_iou_threshold: f32,
     max_faces: usize,
-    rotation_scratch: RefCell<Option<CudaSlice<f32>>>,
+    rotation_scratch: RefCell<Option<Buffer<f32>>>,
 }
 
 impl YoloFaceDetector {
@@ -254,8 +253,8 @@ impl YoloFaceDetector {
     pub fn detect_gpu(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
@@ -391,8 +390,8 @@ impl FaceDetectorBackend for YoloFaceDetector {
     fn detect_gpu(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
@@ -411,7 +410,7 @@ pub struct AnchorDetector {
     nms_iou_threshold: f32,
     kind: AnchorDetectorKind,
     max_faces: usize,
-    rotation_scratch: RefCell<Option<CudaSlice<f32>>>,
+    rotation_scratch: RefCell<Option<Buffer<f32>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -523,8 +522,8 @@ impl AnchorDetector {
     pub fn detect_gpu(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,
@@ -700,8 +699,8 @@ impl FaceDetectorBackend for AnchorDetector {
     fn detect_gpu(
         &self,
         mgr: &mut ModelManager,
-        gpu: &GpuOps,
-        frame_chw: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame_chw: &Buffer<f32>,
         ws: &mut GpuWorkspace,
         frame_h: u32,
         frame_w: u32,

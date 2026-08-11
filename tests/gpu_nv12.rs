@@ -2,9 +2,9 @@
 use std::sync::Arc;
 
 #[cfg(not(noperson_static_test))]
-use cudarc::driver::CudaContext;
+use noperson::backend::ComputeContext;
 #[cfg(not(noperson_static_test))]
-use noperson::gpu::ops::GpuOps;
+use noperson::backend::ComputeOps;
 
 #[derive(Clone, Copy, Debug)]
 enum Matrix {
@@ -280,7 +280,7 @@ fn scalar_encoder_matches_literal_nonuniform_nv12_and_p010_bytes() {
 
 #[test]
 fn nv12_encoder_static_contract_launches_one_thread_per_macroblock() {
-    let kernel_source = include_str!("../gpu_kernels/frame_convert.cu");
+    let kernel_source = include_str!("../gpu_kernels/nvidia/frame_convert.cu");
     let kernel = kernel_source
         .split_once("void chw_f32_to_nv12_scaled_kernel(")
         .expect("NV12 encoder entry point must exist")
@@ -288,7 +288,7 @@ fn nv12_encoder_static_contract_launches_one_thread_per_macroblock() {
         .split_once("// Letterbox resize + normalize")
         .expect("NV12 encoder must end before letterbox encoder")
         .0;
-    let launches = include_str!("../src/gpu/ops.rs");
+    let launches = include_str!("../src/backend/cuda/ops.rs");
     assert!(kernel.contains("unsigned int total = (dst_h / 2) * (dst_w / 2);"));
     assert!(kernel.contains("unsigned int macro_index = idx;"));
     assert!(kernel.contains("unsigned int x = (macro_index % macro_w) * 2;"));
@@ -430,9 +430,9 @@ fn nv12_encoder_static_contract_launches_one_thread_per_macroblock() {
 #[cfg(not(noperson_static_test))]
 #[ignore = "requires CUDA"]
 fn converts_and_scales_solid_green_to_nv12_on_gpu() -> anyhow::Result<()> {
-    let ctx = Arc::new(CudaContext::new(0)?);
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
-    let gpu = GpuOps::new(&ctx, stream)?;
+    let gpu = ComputeOps::new(&ctx, stream)?;
 
     // 2x2 planar RGB: R plane, G plane, B plane.
     let chw = [0.0; 4]

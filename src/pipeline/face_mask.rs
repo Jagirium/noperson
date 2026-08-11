@@ -4,10 +4,10 @@
 //!
 //! Mask convention: 1.0 = keep swapped face, 0.0 = keep original background.
 
+use crate::backend::{Buffer, ComputeOps};
 use crate::config::parameters::{
     FaceParserMaskParams, FaceSwapParams, RestoreEyesParams, RestoreMouthParams,
 };
-use crate::gpu::ops::GpuOps;
 use crate::models::manager::ModelManager;
 use crate::pipeline::workspace::{GpuWorkspace, MAX_BLUR_KS};
 
@@ -495,7 +495,7 @@ pub fn compose_masks(border: &[f32], occluder: Option<&[f32]>) -> Vec<f32> {
 /// The blur kernel is cached in the workspace and regenerated only when
 /// kernel_size/sigma change.
 pub fn gpu_generate_mask_512(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     border_top: u32,
     border_bottom: u32,
@@ -556,7 +556,7 @@ pub fn gpu_generate_mask_512(
 
 /// Run enabled learned masks and compose them in CrossSwap's 128-space.
 pub fn gpu_generate_learned_mask_128(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
     ws: &mut GpuWorkspace,
     params: &FaceSwapParams,
@@ -629,7 +629,7 @@ pub fn gpu_generate_learned_mask_128(
 }
 
 pub fn gpu_apply_landmark_restore_mask(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     params: &FaceSwapParams,
     aligned_landmarks: &[[f64; 2]; 5],
@@ -680,8 +680,8 @@ pub fn gpu_apply_landmark_restore_mask(
 }
 
 fn apply_restore_ellipse_gpu(
-    gpu: &GpuOps,
-    mask: &mut cudarc::driver::CudaSlice<f32>,
+    gpu: &ComputeOps,
+    mask: &mut Buffer<f32>,
     ellipse: RestoreEllipse,
     blend: f32,
     feather: u32,
@@ -701,7 +701,7 @@ fn apply_restore_ellipse_gpu(
 }
 
 pub fn gpu_restore_semantic_regions(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<()> {
@@ -718,7 +718,7 @@ pub fn gpu_restore_semantic_regions(
 }
 
 pub fn gpu_apply_fake_diff(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     params: &FaceSwapParams,
 ) -> anyhow::Result<()> {
@@ -763,7 +763,7 @@ pub fn gpu_apply_fake_diff(
 }
 
 fn restore_semantic_region(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     params: &FaceSwapParams,
     region: SemanticRegion,
@@ -860,7 +860,7 @@ fn restore_semantic_region(
 }
 
 fn compose_faceparser_gpu(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     manager: &mut ModelManager,
     ws: &mut GpuWorkspace,
     params: &FaceParserMaskParams,
@@ -934,7 +934,7 @@ enum ParserMaskBuffer {
 }
 
 fn blur_parser_mask(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     target: ParserMaskBuffer,
     amount: u32,
@@ -983,14 +983,14 @@ fn parser_attributes(params: &FaceParserMaskParams) -> [(u32, u32); 12] {
     ]
 }
 
-fn prepare_learned_mask_input(gpu: &GpuOps, ws: &mut GpuWorkspace) -> anyhow::Result<()> {
+fn prepare_learned_mask_input(gpu: &ComputeOps, ws: &mut GpuWorkspace) -> anyhow::Result<()> {
     gpu.resize_npp(&ws.face_512_original, &mut ws.face_256, 512, 512, 256, 256)?;
     gpu.normalize_prefix(&mut ws.face_256, 3 * 256 * 256)?;
     Ok(())
 }
 
 fn compose_learned_mask(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     blur_amount: u32,
 ) -> anyhow::Result<()> {
@@ -1013,7 +1013,7 @@ fn compose_learned_mask(
 }
 
 pub(crate) fn prepare_blur_kernel(
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     ws: &mut GpuWorkspace,
     kernel_size: u32,
     sigma: f32,

@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, DevicePtrMut};
-use noperson::gpu::ops::GpuOps;
+use noperson::backend::ComputeOps;
+use noperson::backend::{ComputeContext, DevicePtrMut};
 use noperson::pipeline::frame_processor::{AssignmentBackend, GenerationGpuState, SourceFace};
 use noperson::{
     config::parameters::ColorAdjustParams,
@@ -50,10 +50,10 @@ fn chw(pixels: &[[f32; 3]]) -> Vec<f32> {
 #[test]
 #[ignore = "single consolidated CUDA verification gate"]
 fn optimized_gpu_paths_match_references() -> anyhow::Result<()> {
-    noperson::gpu::npp::initialize_runtime(Path::new("libs/base"))?;
-    let context = Arc::new(CudaContext::new(0)?);
+    noperson::backend::cuda::npp::initialize_runtime(Path::new("libs/base"))?;
+    let context = Arc::new(ComputeContext::new(0)?);
     let stream = context.new_stream()?;
-    let gpu = GpuOps::new(&context, stream)?;
+    let gpu = ComputeOps::new(&context, stream)?;
 
     let sources = vec![
         source(Some(basis(1)), 0.75, 1.0),

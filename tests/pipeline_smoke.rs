@@ -10,10 +10,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cudarc::driver::CudaContext;
 use image::GenericImageView;
+use noperson::backend::ComputeContext;
 
-use noperson::gpu::ops::GpuOps;
+use noperson::backend::ComputeOps;
 use noperson::models::manager::ModelManager;
 use noperson::models::registry::MODELS;
 use noperson::pipeline::face_detector::YoloFaceDetector;
@@ -54,9 +54,9 @@ fn test_detect_faces_smoke() -> anyhow::Result<()> {
     eprintln!("Loaded face.jpg: {width}x{height}");
 
     // Init CUDA
-    let ctx = Arc::new(CudaContext::new(0)?);
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
-    let gpu = GpuOps::new(&ctx, stream.clone())?;
+    let gpu = ComputeOps::new(&ctx, stream.clone())?;
     eprintln!("CUDA initialized");
 
     // Init model manager

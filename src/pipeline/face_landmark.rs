@@ -3,12 +3,11 @@
 //! Port of crosswap/app/processors/face_landmark_detectors.py
 //! Each model has unique input size, normalization, and output decoding.
 
-use cudarc::driver::{CudaSlice, DevicePtrMut};
+use crate::backend::{Buffer, ComputeOps, DevicePtrMut};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use thiserror::Error;
 
 use crate::config::parameters::LandmarkMode;
-use crate::gpu::ops::GpuOps;
 use crate::math::affine;
 use crate::models::manager::ModelManager;
 use crate::pipeline::ort_binding::{create_cuda_tensor_f32, run_bound_values};
@@ -274,9 +273,9 @@ impl LandmarkModel {
     pub fn detect_gpu(
         self,
         manager: &mut ModelManager,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         workspace: &mut GpuWorkspace,
-        frame: &CudaSlice<f32>,
+        frame: &Buffer<f32>,
         frame_height: u32,
         frame_width: u32,
         bbox: [f32; 4],
@@ -322,7 +321,7 @@ impl LandmarkModel {
     pub fn detect_restorer_reference_gpu(
         self,
         manager: &mut ModelManager,
-        gpu: &GpuOps,
+        gpu: &ComputeOps,
         workspace: &mut GpuWorkspace,
         score_threshold: f32,
     ) -> anyhow::Result<Option<LandmarkResult>> {
@@ -443,7 +442,7 @@ fn output_shapes(model: LandmarkModel) -> &'static [&'static [i64]] {
 fn run_landmark_session(
     model: LandmarkModel,
     manager: &mut ModelManager,
-    gpu: &GpuOps,
+    gpu: &ComputeOps,
     workspace: &mut GpuWorkspace,
 ) -> anyhow::Result<()> {
     let size = model.input_size() as i64;

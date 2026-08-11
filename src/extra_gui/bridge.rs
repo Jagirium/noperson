@@ -50,7 +50,7 @@ impl EditorRuntimeConfig {
     pub fn from_controls(controls: &ControlState) -> Result<Self, ControlBridgeError> {
         let provider = match choice(controls, "ProvidersPrioritySelection")? {
             "CUDA" => ExecutionProvider::Cuda,
-            "TensorRT" => ExecutionProvider::TensorRT,
+            "TensorRT" => ExecutionProvider::TensorRt,
             value => return Err(unknown_choice("ProvidersPrioritySelection", value)),
         };
         let detector = match choice(controls, "DetectorModelSelection")? {

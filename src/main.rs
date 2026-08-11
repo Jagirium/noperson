@@ -55,16 +55,15 @@ fn main() -> anyhow::Result<()> {
     if launch_mode == noperson::launch::LaunchMode::RuntimeCheck {
         let probe_model = models_dir.join("yoloface_8n.onnx");
         if probe_model.is_file() {
-            let mut manager = noperson::models::manager::ModelManager::new(&models_dir);
-            manager.load("RuntimeCheck", "yoloface_8n.onnx")?;
-            tracing::info!("CUDA execution provider session check passed");
-
-            let mut manager = noperson::models::manager::ModelManager::with_provider(
-                &models_dir,
-                noperson::config::settings::ExecutionProvider::TensorRT,
-            );
-            manager.load("RuntimeCheck", "yoloface_8n.onnx")?;
-            tracing::info!("TensorRT execution provider session check passed");
+            for provider in noperson::backend::CompiledCapabilities::current().inference_providers {
+                let mut manager =
+                    noperson::models::manager::ModelManager::with_provider(&models_dir, *provider);
+                manager.load("RuntimeCheck", "yoloface_8n.onnx")?;
+                tracing::info!(
+                    provider = provider.display_name(),
+                    "execution provider session check passed"
+                );
+            }
         } else {
             tracing::warn!(
                 "CUDA session check skipped because {} is missing",

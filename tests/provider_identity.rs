@@ -1,12 +1,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaStream};
 use image::GenericImageView;
+use noperson::backend::{ComputeContext, ComputeStream};
 
+use noperson::backend::ComputeOps;
 use noperson::config::parameters::FaceSwapParams;
 use noperson::config::settings::ExecutionProvider;
-use noperson::gpu::ops::GpuOps;
 use noperson::live::LiveEngine;
 use noperson::math::{affine, constants::ARCFACE_DST};
 use noperson::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
@@ -16,14 +16,14 @@ use noperson::pipeline::face_recognizer::FaceRecognizer;
 use noperson::pipeline::face_swapper::FaceSwapper;
 use noperson::pipeline::workspace::GpuWorkspace;
 
-fn init_gpu() -> anyhow::Result<(Arc<CudaStream>, Arc<GpuOps>)> {
-    let context = Arc::new(CudaContext::new(0)?);
+fn init_gpu() -> anyhow::Result<(Arc<ComputeStream>, Arc<ComputeOps>)> {
+    let context = Arc::new(ComputeContext::new(0)?);
     let stream = context.new_stream()?;
-    let gpu = Arc::new(GpuOps::new(&context, stream.clone())?);
+    let gpu = Arc::new(ComputeOps::new(&context, stream.clone())?);
     Ok((stream, gpu))
 }
 
-fn load_cuda_reference_models(stream: &Arc<CudaStream>) -> anyhow::Result<ModelManager> {
+fn load_cuda_reference_models(stream: &Arc<ComputeStream>) -> anyhow::Result<ModelManager> {
     let mut manager = ModelManager::with_provider("models", ExecutionProvider::Cuda);
     manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     manager.load("YoloFace8n", "yoloface_8n.onnx")?;
@@ -34,8 +34,8 @@ fn load_cuda_reference_models(stream: &Arc<CudaStream>) -> anyhow::Result<ModelM
 }
 
 fn prepare_identical_swap_inputs(
-    gpu: &GpuOps,
-    stream: &Arc<CudaStream>,
+    gpu: &ComputeOps,
+    stream: &Arc<ComputeStream>,
     manager: &mut ModelManager,
 ) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
     let image = image::open("assets/photos/face.jpg")?;
@@ -87,8 +87,8 @@ fn prepare_identical_swap_inputs(
 }
 
 fn identity_embedding(
-    gpu: &GpuOps,
-    stream: &Arc<CudaStream>,
+    gpu: &ComputeOps,
+    stream: &Arc<ComputeStream>,
     manager: &mut ModelManager,
     rgb: &[u8],
     width: u32,
@@ -228,7 +228,7 @@ fn provider_stage_cosines_locate_first_identity_divergence() -> anyhow::Result<(
     cuda_manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
     cuda_manager.load_emap(CANONICAL_SWAPPER_FILENAME)?;
 
-    let mut tensorrt_manager = ModelManager::with_provider("models", ExecutionProvider::TensorRT);
+    let mut tensorrt_manager = ModelManager::with_provider("models", ExecutionProvider::TensorRt);
     tensorrt_manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     tensorrt_manager.load("YoloFace8n", "yoloface_8n.onnx")?;
     tensorrt_manager.load("Inswapper128ArcFace", "w600k_r50.onnx")?;
@@ -330,7 +330,7 @@ fn raw_inswapper_provider_activations_have_the_same_direction() -> anyhow::Resul
     let (crop, latent) = prepare_identical_swap_inputs(&gpu, &stream, &mut cuda_manager)?;
     let cuda_output = FaceSwapper::swap(&mut cuda_manager, &crop, &latent, 1)?;
 
-    let mut tensorrt_manager = ModelManager::with_provider("models", ExecutionProvider::TensorRT);
+    let mut tensorrt_manager = ModelManager::with_provider("models", ExecutionProvider::TensorRt);
     tensorrt_manager.set_compute_stream(stream.cu_stream() as *mut ())?;
     tensorrt_manager.load("Inswapper128", CANONICAL_SWAPPER_FILENAME)?;
     let tensorrt_output = FaceSwapper::swap(&mut tensorrt_manager, &crop, &latent, 1)?;
@@ -372,7 +372,7 @@ fn elon_self_swap_cuda_and_tensorrt_preserve_the_same_identity() -> anyhow::Resu
         Path::new("models"),
         Path::new("assets/photos/face.jpg"),
         FaceSwapParams::default(),
-        ExecutionProvider::TensorRT,
+        ExecutionProvider::TensorRt,
         &stream,
     )?;
     let tensorrt_output = tensorrt_engine.process_rgb(rgb.as_raw(), width, height)?;

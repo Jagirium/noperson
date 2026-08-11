@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::CudaContext;
 use image::GenericImageView;
+use noperson::backend::ComputeContext;
 
+use noperson::backend::ComputeOps;
 use noperson::config::parameters::{FaceSwapParams, SwapDim};
-use noperson::gpu::ops::GpuOps;
 use noperson::io::VirtualCamera;
 use noperson::models::live_catalog::CANONICAL_SWAPPER_FILENAME;
 use noperson::models::manager::ModelManager;
@@ -38,9 +38,9 @@ fn main() -> anyhow::Result<()> {
     let publish_to_vcam = std::env::args().any(|argument| argument == "--vcam");
 
     // Init CUDA
-    let ctx = Arc::new(CudaContext::new(0)?);
+    let ctx = Arc::new(ComputeContext::new(0)?);
     let stream = ctx.new_stream()?;
-    let gpu = GpuOps::new(&ctx, stream.clone())?;
+    let gpu = ComputeOps::new(&ctx, stream.clone())?;
     let mut manager = ModelManager::new("models");
     manager.set_compute_stream(stream.cu_stream() as *mut ())?;
 

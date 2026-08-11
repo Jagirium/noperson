@@ -27,13 +27,13 @@ mod linux {
     use std::os::fd::FromRawFd;
     use std::sync::{Arc, Mutex};
 
+    use super::{PreviewGeometry, PreviewRingState};
+    use crate::backend::cuda::{
+        DeviceSlice, SyncOnDrop, driver_result as result, driver_sys as sys,
+    };
+    use crate::backend::{Buffer, ComputeEvent, ComputeStream, DevicePtrMut};
     use anyhow::{Context as _, anyhow};
     use ash::vk;
-    use cudarc::driver::{
-        CudaEvent, CudaSlice, CudaStream, DevicePtrMut, DeviceSlice, SyncOnDrop, result, sys,
-    };
-
-    use super::{PreviewGeometry, PreviewRingState};
 
     const SLOT_COUNT: usize = 3;
 
@@ -41,8 +41,8 @@ mod linux {
         external_memory: sys::CUexternalMemory,
         device_ptr: sys::CUdeviceptr,
         len: usize,
-        stream: Arc<CudaStream>,
-        completion: CudaEvent,
+        stream: Arc<ComputeStream>,
+        completion: ComputeEvent,
         written: bool,
     }
 
@@ -55,7 +55,7 @@ mod linux {
             self.len
         }
 
-        fn stream(&self) -> &Arc<CudaStream> {
+        fn stream(&self) -> &Arc<ComputeStream> {
             &self.stream
         }
     }
@@ -63,7 +63,7 @@ mod linux {
     impl DevicePtrMut<u8> for CudaInteropBuffer {
         fn device_ptr_mut<'a>(
             &'a mut self,
-            stream: &'a CudaStream,
+            stream: &'a ComputeStream,
         ) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
             if self.written {
                 stream
@@ -271,8 +271,8 @@ mod linux {
 
         pub fn publish(
             &self,
-            gpu: &crate::gpu::ops::GpuOps,
-            chw: &CudaSlice<f32>,
+            gpu: &crate::backend::ComputeOps,
+            chw: &Buffer<f32>,
         ) -> anyhow::Result<bool> {
             let Some(write) = self.stage(gpu, chw)? else {
                 return Ok(false);
@@ -286,8 +286,8 @@ mod linux {
         /// Call `commit` only after a later synchronization has completed.
         pub fn stage<'a>(
             &'a self,
-            gpu: &crate::gpu::ops::GpuOps,
-            chw: &CudaSlice<f32>,
+            gpu: &crate::backend::ComputeOps,
+            chw: &Buffer<f32>,
         ) -> anyhow::Result<Option<LinuxPreviewWrite<'a>>> {
             let Some(index) = self.ring.acquire() else {
                 return Ok(None);

@@ -16,7 +16,9 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
-use cudarc::driver::{CudaStream, result, sys};
+use crate::backend::ComputeStream;
+#[cfg(target_os = "linux")]
+use crate::backend::cuda::{driver_result as result, driver_sys as sys};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -726,7 +728,7 @@ impl Drop for MappedVideoSurface {
 /// NVENC unregisters every resource before the underlying CUDA memory is freed.
 #[cfg(target_os = "linux")]
 pub struct NvEncoderInputSurface {
-    stream: Arc<CudaStream>,
+    stream: Arc<ComputeStream>,
     device_ptr: u64,
     pitch: u32,
     width: u32,
@@ -737,7 +739,7 @@ pub struct NvEncoderInputSurface {
 #[cfg(target_os = "linux")]
 impl NvEncoderInputSurface {
     pub fn new(
-        stream: Arc<CudaStream>,
+        stream: Arc<ComputeStream>,
         width: u32,
         height: u32,
         pixel_format: PixelFormat,

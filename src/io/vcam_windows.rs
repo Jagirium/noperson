@@ -3,14 +3,13 @@
 #![cfg(target_os = "windows")]
 
 use anyhow::{Context, ensure};
-use cudarc::driver::CudaSlice;
 use virtualcam::{Camera, PixelFormat};
 
-use crate::gpu::ops::GpuOps;
+use crate::backend::{Buffer, ComputeOps};
 
 pub struct VirtualCamera {
     camera: Camera,
-    device_nv12: Option<CudaSlice<u8>>,
+    device_nv12: Option<Buffer<u8>>,
 }
 
 impl VirtualCamera {
@@ -39,8 +38,8 @@ impl VirtualCamera {
 
     pub fn send_gpu_frame(
         &mut self,
-        gpu: &GpuOps,
-        frame: &CudaSlice<f32>,
+        gpu: &ComputeOps,
+        frame: &Buffer<f32>,
         width: u32,
         height: u32,
     ) -> anyhow::Result<()> {

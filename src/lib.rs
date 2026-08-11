@@ -11,10 +11,10 @@
 
 pub mod app;
 pub mod artifacts;
+pub mod backend;
 pub mod config;
 pub mod engine;
 pub mod extra_gui;
-pub mod gpu;
 pub mod gpu_preview;
 pub mod headless;
 pub mod io;

@@ -101,20 +101,32 @@ impl RuntimeLayout {
     }
 
     pub fn library_paths(&self) -> Vec<PathBuf> {
-        vec![self.base(), self.tensorrt_base(), self.tensorrt_shard()]
+        let mut paths = vec![self.base()];
+        if cfg!(feature = "tensorrt") {
+            paths.extend([self.tensorrt_base(), self.tensorrt_shard()]);
+        }
+        paths
     }
 
     pub fn is_complete(&self) -> bool {
         let base = self.base();
-        let trt_base = self.tensorrt_base();
-        let shard = self.tensorrt_shard();
-        [
+        let base_complete = [
             base.join(platform_library("nppc")),
             base.join(platform_library("nppig")),
             base.join(platform_library("nppif")),
             base.join(platform_library("nppim")),
             self.ort_shared_provider(),
             self.ort_cuda_provider(),
+        ]
+        .into_iter()
+        .all(|path| path.is_file());
+        if !base_complete || !cfg!(feature = "tensorrt") {
+            return base_complete;
+        }
+
+        let trt_base = self.tensorrt_base();
+        let shard = self.tensorrt_shard();
+        [
             trt_base.join(platform_trt_library()),
             self.ort_tensorrt_provider(),
         ]

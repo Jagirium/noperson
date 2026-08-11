@@ -5,13 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cudarc::driver::CudaContext;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::backend::{CompiledCapabilities, ComputeContext, ComputeOps};
 use crate::config::parameters::{FaceSwapParams, SwapDim};
 use crate::config::settings::{DetectorModel, ExecutionProvider};
 use crate::extra_gui::{EditorEngineRequest, EditorRuntimeEvent, EditorRuntimeHandle};
-use crate::gpu::ops::GpuOps;
 #[cfg(target_os = "linux")]
 use crate::io::native_video::NativeDemuxer;
 use crate::launch::{HeadlessOptions, PredecodeMode};
@@ -69,9 +68,12 @@ pub fn build_plan(options: &HeadlessOptions) -> anyhow::Result<HeadlessPlan> {
     )?;
     let provider = match options.execution_provider.as_str() {
         "cuda" => ExecutionProvider::Cuda,
-        "tensorrt" => ExecutionProvider::TensorRT,
+        "tensorrt" => ExecutionProvider::TensorRt,
+        "rocm" => ExecutionProvider::Rocm,
+        "migraphx" => ExecutionProvider::MiGraphX,
         value => anyhow::bail!("unsupported execution provider {value}"),
     };
+    CompiledCapabilities::current().require(provider)?;
     let dim = match options.swap_resolution {
         128 => SwapDim::Dim1,
         256 => SwapDim::Dim2,
@@ -167,9 +169,9 @@ fn engine_request(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<Edit
 
 fn process_image(plan: &HeadlessPlan, models_dir: &Path) -> anyhow::Result<()> {
     let request = engine_request(plan, models_dir)?;
-    let context = Arc::new(CudaContext::new(plan.device_id as usize)?);
+    let context = Arc::new(ComputeContext::new(plan.device_id as usize)?);
     let stream = context.new_stream()?;
-    let gpu = Arc::new(GpuOps::new(&context, Arc::clone(&stream))?);
+    let gpu = Arc::new(ComputeOps::new(&context, Arc::clone(&stream))?);
     let builder = LiveShadowBuilder::new(gpu, models_dir.to_path_buf(), stream);
     let mut engine =
         AtomicLiveEngine::bootstrap_inputs(builder, &request.assignments, request.spec, 1)?;

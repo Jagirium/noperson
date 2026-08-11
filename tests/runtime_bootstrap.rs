@@ -33,6 +33,7 @@ fn runtime_layout_keeps_common_and_arch_specific_libraries_separate() {
         layout.tensorrt_shard(),
         PathBuf::from("/runtime/generation/trt/sm89")
     );
+    #[cfg(feature = "tensorrt")]
     assert_eq!(
         layout.library_paths(),
         vec![
@@ -41,6 +42,32 @@ fn runtime_layout_keeps_common_and_arch_specific_libraries_separate() {
             PathBuf::from("/runtime/generation/trt/sm89"),
         ]
     );
+    #[cfg(not(feature = "tensorrt"))]
+    assert_eq!(
+        layout.library_paths(),
+        vec![PathBuf::from("/runtime/generation/base")]
+    );
+}
+
+#[cfg(all(target_os = "linux", not(feature = "tensorrt")))]
+#[test]
+fn pure_cuda_runtime_does_not_require_tensorrt_payloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = RuntimeLayout::new(directory.path().to_path_buf(), TensorRtShard::Sm86);
+    for relative in [
+        "base/libnppc.so.12",
+        "base/libnppig.so.12",
+        "base/libnppif.so.12",
+        "base/libnppim.so.12",
+        "base/libonnxruntime_providers_shared.so",
+        "base/libonnxruntime_providers_cuda.so",
+    ] {
+        let path = directory.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"fixture").unwrap();
+    }
+
+    assert!(layout.is_complete());
 }
 
 #[cfg(target_os = "linux")]

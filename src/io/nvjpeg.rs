@@ -2,9 +2,10 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtrMut};
 use libloading::Library;
 use nokhwa::utils::FrameFormat;
+
+use crate::backend::{Buffer, ComputeStream, DevicePtrMut};
 
 const NVJPEG_STATUS_SUCCESS: i32 = 0;
 const NVJPEG_OUTPUT_RGBI: i32 = 5;
@@ -158,8 +159,8 @@ impl NvJpegDecoder {
     pub fn decode_into(
         &mut self,
         jpeg: &[u8],
-        destination: &mut CudaSlice<u8>,
-        stream: &CudaStream,
+        destination: &mut Buffer<u8>,
+        stream: &ComputeStream,
     ) -> anyhow::Result<(u32, u32)> {
         anyhow::ensure!(!jpeg.is_empty(), "nvJPEG input is empty");
         stream.context().bind_to_thread()?;

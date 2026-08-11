@@ -62,7 +62,7 @@ fn model_detection_and_enhancement_controls_bridge_without_loss() {
             ControlValue::Choice("Pearl".into()),
         ),
     ]);
-    assert_eq!(runtime.provider, ExecutionProvider::TensorRT);
+    assert_eq!(runtime.provider, ExecutionProvider::TensorRt);
     assert_eq!(runtime.detector, DetectorModel::Scrfd2_5g);
     assert_eq!(runtime.params.dim, SwapDim::Dim4);
     assert_eq!(runtime.params.landmark_mode, LandmarkMode::Points478);

@@ -1,12 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use cudarc::driver::CudaSlice;
 use thiserror::Error;
 
+use crate::backend::{Buffer, ComputeOps};
 pub use crate::config::parameters::EnhancerModel;
 use crate::config::settings::ExecutionProvider;
-use crate::gpu::ops::GpuOps;
 use crate::models::{manager::ModelManager, registry::find_model};
 
 /// Tile size selected by CrossSwap's production `FrameWorker.enhance_core`.
@@ -140,9 +139,9 @@ fn checked_elements(dimensions: &[usize]) -> Result<usize, FrameEnhancerError> {
 }
 
 struct EnhancerWorkspace {
-    tiles_in: CudaSlice<f32>,
-    tiles_out: CudaSlice<f32>,
-    enhanced_frame: CudaSlice<f32>,
+    tiles_in: Buffer<f32>,
+    tiles_out: Buffer<f32>,
+    enhanced_frame: Buffer<f32>,
 }
 
 impl EnhancerWorkspace {
@@ -155,7 +154,7 @@ impl EnhancerWorkspace {
 
 /// GPU-resident CrossSwap frame enhancer with reusable shape-specific buffers.
 pub struct FrameEnhancer {
-    gpu: Arc<GpuOps>,
+    gpu: Arc<ComputeOps>,
     manager: ModelManager,
     model: EnhancerModel,
     tile_size: u32,
@@ -164,7 +163,7 @@ pub struct FrameEnhancer {
 
 impl FrameEnhancer {
     pub fn new(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: impl AsRef<Path>,
         provider: ExecutionProvider,
         device_id: i32,
@@ -184,7 +183,7 @@ impl FrameEnhancer {
     }
 
     pub fn new_with_filename(
-        gpu: Arc<GpuOps>,
+        gpu: Arc<ComputeOps>,
         models_dir: impl AsRef<Path>,
         provider: ExecutionProvider,
         device_id: i32,
@@ -218,8 +217,8 @@ impl FrameEnhancer {
     /// crop, resize, and blending stay on the shared CUDA stream.
     pub fn enhance_into(
         &mut self,
-        input: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        input: &Buffer<f32>,
+        output: &mut Buffer<f32>,
         width: u32,
         height: u32,
         blend: f32,
